@@ -1,0 +1,1002 @@
+{
+  "makes": [
+    {
+      "make": "Mercedes-Benz",
+      "models": [
+        {
+          "model": "S-Class",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "S 580",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Maybach S-Class",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "E-Class",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "C-Class",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "GLS 450",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "GLS 580",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "GLE",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "V-Class",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Vito",
+          "classes": ["HIACE"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 9
+        },
+        {
+          "model": "Sprinter",
+          "classes": ["COASTER"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 16
+        },
+        {
+          "model": "EQS",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "EQS SUV",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "EQE",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "BMW",
+      "models": [
+        {
+          "model": "7 Series",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "i7",
+          "classes": ["FIRST_CLASS", "ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "5 Series",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "3 Series",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "X7",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "X5",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "iX",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "i5",
+          "classes": ["ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Audi",
+      "models": [
+        {
+          "model": "A8",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "A6",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "A4",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Q8",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Q7",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "e-tron GT",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Q8 e-tron",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Lexus",
+      "models": [
+        {
+          "model": "LS",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "ES",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "IS",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "LX 600",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "GX",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "RX",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "RZ 450e",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Toyota",
+      "models": [
+        {
+          "model": "Camry",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Avalon",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2024,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Crown",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Land Cruiser 300",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Land Cruiser Prado",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Fortuner",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Hiace",
+          "classes": ["HIACE"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 13
+        },
+        {
+          "model": "Hiace High Roof",
+          "classes": ["HIACE"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 15
+        },
+        {
+          "model": "Coaster",
+          "classes": ["COASTER"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 26
+        },
+        {
+          "model": "bZ4X",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Cadillac",
+      "models": [
+        {
+          "model": "CT6",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "CT5",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Escalade",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Escalade ESV",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "XT6",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Lyriq",
+          "classes": ["ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "GMC",
+      "models": [
+        {
+          "model": "Yukon",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Yukon XL",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Yukon Denali",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Chevrolet",
+      "models": [
+        {
+          "model": "Tahoe",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Suburban",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Malibu",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2025,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Impala",
+          "classes": ["ECONOMY_SEDAN", "BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2024,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Lincoln",
+      "models": [
+        {
+          "model": "Continental",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2019,
+          "maxYear": 2022,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Navigator",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Navigator L",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Aviator",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Range Rover",
+      "models": [
+        {
+          "model": "Range Rover",
+          "classes": ["FIRST_CLASS", "BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Range Rover LWB",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Range Rover Sport",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Range Rover Velar",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Defender 110",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Genesis",
+      "models": [
+        {
+          "model": "G90",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "G80",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "G70",
+          "classes": ["ECONOMY_SEDAN", "BUSINESS_SEDAN"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "GV80",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "GV70",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Electrified G80",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Electrified GV70",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Hyundai",
+      "models": [
+        {
+          "model": "Sonata",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Azera",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Palisade",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Staria",
+          "classes": ["HIACE"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 11
+        },
+        {
+          "model": "Ioniq 6",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Ioniq 5",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Kia",
+      "models": [
+        {
+          "model": "K8",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "K5",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Carnival",
+          "classes": ["HIACE"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 11
+        },
+        {
+          "model": "Telluride",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "EV9",
+          "classes": ["ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "EV6",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Nissan",
+      "models": [
+        {
+          "model": "Altima",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Maxima",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2024,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Patrol",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Patrol Nismo",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Ariya",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Honda",
+      "models": [
+        {
+          "model": "Accord",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Civic",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Infiniti",
+      "models": [
+        {
+          "model": "Q50",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "QX80",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "QX60",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Porsche",
+      "models": [
+        {
+          "model": "Panamera",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Cayenne",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Taycan",
+          "classes": ["ELECTRIC", "FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Bentley",
+      "models": [
+        {
+          "model": "Flying Spur",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Bentayga",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Rolls-Royce",
+      "models": [
+        {
+          "model": "Ghost",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Phantom",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Cullinan",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Spectre",
+          "classes": ["FIRST_CLASS", "ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Volvo",
+      "models": [
+        {
+          "model": "S90",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "XC90",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "EX90",
+          "classes": ["ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Tesla",
+      "models": [
+        {
+          "model": "Model S",
+          "classes": ["ELECTRIC"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Model X",
+          "classes": ["ELECTRIC"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Model 3",
+          "classes": ["ELECTRIC"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Model Y",
+          "classes": ["ELECTRIC"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "BYD",
+      "models": [
+        {
+          "model": "Han",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Tang",
+          "classes": ["ELECTRIC"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Seal",
+          "classes": ["ELECTRIC"],
+          "minYear": 2024,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        }
+      ]
+    },
+    {
+      "make": "Lucid",
+      "models": [
+        {
+          "model": "Air",
+          "classes": ["ELECTRIC", "FIRST_CLASS"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Gravity",
+          "classes": ["ELECTRIC"],
+          "minYear": 2025,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "King Long",
+      "models": [
+        {
+          "model": "XMQ6900",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 35
+        },
+        {
+          "model": "XMQ6127",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 49
+        },
+        {
+          "model": "XMQ6119",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 45
+        }
+      ]
+    },
+    {
+      "make": "Yutong",
+      "models": [
+        {
+          "model": "ZK6122H",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 49
+        },
+        {
+          "model": "ZK6107",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 45
+        }
+      ]
+    },
+    {
+      "make": "Mitsubishi",
+      "models": [
+        {
+          "model": "Rosa",
+          "classes": ["COASTER"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 26
+        }
+      ]
+    }
+  ]
+}

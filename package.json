@@ -1,0 +1,22 @@
+{
+  "name": "luxdrive",
+  "private": true,
+  "packageManager": "yarn@1.22.22",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --ui tui",
+    "build": "turbo run build",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "dotenv": "^17.4.2",
+    "prisma": "^7.8.0",
+    "turbo": "^2.5.4"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.8.0"
+  }
+}

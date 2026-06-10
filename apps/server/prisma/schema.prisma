@@ -1,0 +1,1531 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============== ENUMS ==============
+
+enum Role {
+  CUSTOMER
+  PARTNER
+  VENDOR
+  ADMIN
+  SALES
+  OPERATIONS
+  FINANCE
+}
+
+enum Position {
+  HEAD
+  SENIOR
+  EXECUTIVE
+}
+
+enum Department {
+  SALES
+  OPERATIONS
+  FINANCE
+}
+
+enum LoyaltyTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum BookingStatus {
+  // Booking created (e.g. partner submitted a ride request) but admin
+  // hasn't yet offered it to a vendor.
+  PENDING
+
+  // Admin has entered a vendor payout amount and offered the booking
+  // to a specific vendor. Vendor sees an Accept/Reject prompt.
+  // Admin-only view shows "Assignment Offered"; partner sees the
+  // masked "Awaiting Driver/Vehicle Assignment" state.
+  ASSIGNMENT_OFFERED
+
+  // Same vendor rejected with reason "Price too low" and admin chose
+  // to re-offer at a higher price. A single vendor gets at most 2
+  // offer attempts (first OFFERED, then RE_OFFERED). After two
+  // rejections from the same vendor, the booking moves on to the
+  // next eligible vendor with a fresh ASSIGNMENT_OFFERED.
+  ASSIGNMENT_RE_OFFERED
+
+  // Vendor accepted the offer. Now they need to assign a driver +
+  // vehicle. Partner still sees "Awaiting Driver/Vehicle Assignment"
+  // until the assignment is done.
+  CONFIRMED
+
+  IN_PROGRESS
+  COMPLETED
+
+  // Terminal: either explicitly cancelled OR all eligible vendors
+  // (by category match) exhausted their offer attempts and rejected.
+  // Partner-facing: just "Cancelled" with no internal detail leaked.
+  CANCELLED
+}
+
+enum BookingSource {
+  DIRECT
+  PARTNER
+}
+
+enum TripType {
+  ONE_WAY
+  HOURLY
+}
+
+enum City {
+  RIYADH
+  JEDDAH
+  MAKKAH
+  MADINAH
+}
+
+enum VehicleClass {
+  ECONOMY_SEDAN
+  BUSINESS_SEDAN
+  BUSINESS_SUV
+  FIRST_CLASS
+  ELECTRIC
+  HIACE
+  COASTER
+  KING_LONG
+}
+
+enum VendorStatus {
+  INVITED // Invitation sent, waiting for vendor to click the link
+  ONBOARDING // Clicked link + set password; completing profile fields. Transitional state, ends on profile submit
+  PENDING_REVIEW // Vendor submitted profile, waiting for admin review
+  CHANGES_REQUESTED // Admin requested changes to profile
+  APPROVED // Profile approved, vendor can operate
+  SUSPENDED // Vendor suspended by admin
+}
+
+model VendorDocument {
+  id                   String    @id @default(cuid())
+  vendorId             String
+  type                 String // CR, VAT, CHAMBER_OF_COMMERCE, BALADY, NATIONAL_ADDRESS, IBAN_LETTER
+  fileUrl              String
+  fileName             String?
+  expiryDate           DateTime?
+  // Tracks the last time the doc-expiry cron sent an expiry warning
+  // or expired-notification for this document. Used to throttle
+  // notifications to one per 7-day window, mirroring the pattern on
+  // VehicleDocument/DriverDocument. Null on never-notified docs.
+  lastExpiryNotifiedAt DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorId, type])
+  @@index([vendorId])
+  @@index([type])
+  @@map("vendor_documents")
+}
+
+// NEW ENUM: Driver review status
+enum DriverStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+// NEW ENUM: Vehicle review status
+enum VehicleStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  UNDER_MAINTENANCE
+  CHANGES_REQUESTED
+}
+
+// NEW ENUM: Bank update request status
+enum BankUpdateRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PartnerStatus {
+  INVITED // Invitation sent, waiting for partner to click the link
+  ONBOARDING // Clicked link + set password; completing profile fields. Transitional state, ends on profile submit
+  PENDING_REVIEW // Partner submitted profile, waiting for admin review
+  CHANGES_REQUESTED // Admin requested changes to profile
+  APPROVED // Profile approved, partner can use platform
+  SUSPENDED // Partner suspended by admin
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  PARTIAL
+  OVERDUE
+}
+
+enum LoginStatus {
+  SUCCESS
+  FAILED
+  BLOCKED
+}
+
+enum DeviceType {
+  DESKTOP
+  MOBILE
+  TABLET
+  UNKNOWN
+}
+
+// ============== BETTER AUTH MODELS ==============
+
+model User {
+  id            String   @id @default(cuid())
+  name          String?
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Custom LuxDrive fields
+  phone         String?
+  firstName     String?
+  lastName      String?
+  dob           DateTime?
+  role          Role        @default(CUSTOMER)
+  position      Position?
+  department    Department?
+  loyaltyTier   LoyaltyTier @default(BRONZE)
+  loyaltyPoints Int         @default(0)
+  isActive      Boolean     @default(true)
+
+  // IP & Security
+  registrationIp String?
+  lastLoginIp    String?
+  lastLoginAt    DateTime?
+  failedAttempts Int       @default(0)
+  lockedUntil    DateTime?
+
+  // Better Auth relations
+  sessions Session[]
+  accounts Account[]
+
+  // LuxDrive relations
+  bookings           Booking[]           @relation("CustomerBookings")
+  partner            Partner?
+  vendor             Vendor?
+  loginLogs          LoginLog[]
+  onlinePayments     OnlinePayment[]
+  partnerTeamMembers PartnerTeamMember[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([providerId, accountId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+  @@map("verification")
+}
+
+// ============== LUXDRIVE MODELS ==============
+
+model LoginLog {
+  id     String      @id @default(cuid())
+  userId String?
+  email  String
+  status LoginStatus
+
+  // IP & Location
+  ip          String?
+  city        String?
+  region      String?
+  country     String?
+  countryCode String?
+  latitude    Decimal? @db.Decimal(10, 8)
+  longitude   Decimal? @db.Decimal(11, 8)
+  timezone    String?
+
+  // Device Info
+  deviceType     DeviceType @default(UNKNOWN)
+  browser        String?
+  browserVersion String?
+  os             String?
+  osVersion      String?
+  userAgent      String?
+
+  // Security
+  failureReason String?
+  isSuspicious  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([email])
+  @@index([ip])
+  @@index([createdAt])
+  @@map("login_logs")
+}
+
+model Partner {
+  id             String        @id @default(cuid())
+  userId         String        @unique
+  companyName    String
+  crNumber       String?
+  vatNumber      String?
+  creditLimit    Decimal       @default(0) @db.Decimal(10, 2)
+  currentBalance Decimal       @default(0) @db.Decimal(10, 2)
+  paymentTerms   Int           @default(30)
+  status         PartnerStatus @default(PENDING_REVIEW)
+  logoUrl        String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  invitationToken     String?   @unique
+  invitationSentAt    DateTime?
+  invitationExpiresAt DateTime?
+  invitedByUserId     String?
+
+  // Profile submission tracking  
+  profileSubmittedAt DateTime?
+  profileReviewedAt  DateTime?
+  profileReviewedBy  String?
+
+  // Contact info (filled by partner)
+  contactPerson String?
+  contactPhone  String?
+  contactEmail  String?
+  address       String?
+
+  // Document Details
+  mouFileUrl              String?
+  mouExpiryDate           DateTime?
+  mouUploadedAt           DateTime?
+  chamberOfCommerceNumber String?
+  baladyNumber            String?
+  nationalAddress         String?
+  bankName                String?
+  bankAccountNumber       String?
+  bankIban                String?
+  mouExpiryNotified       Boolean   @default(false) // Track if 2-month warning sent
+
+  profileSnapshot Json? // Stores pre-edit snapshot for admin comparison
+
+  // Admin review
+  isProfileComplete Boolean @default(false)
+
+  // Add relation for review comments
+  reviewComments PartnerReviewComment[]
+  documents      PartnerDocument[]      @relation("PartnerDocs")
+
+  // Relations
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings              Booking[]
+  invoices              Invoice[]
+  teamMembers           PartnerTeamMember[]
+  partnerInvoices       PartnerInvoice[]
+  partnerChangeRequests PartnerChangeRequest[]
+
+  // Add indexes
+  @@index([status])
+  @@index([invitationToken])
+  @@index([mouExpiryDate])
+  @@map("partners")
+}
+
+// NEW MODEL: Partner review comments (field-level comments from admin)
+model PartnerReviewComment {
+  id        String  @id @default(cuid())
+  partnerId String
+  partner   Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  fieldName  String // Which field the comment is for: "crNumber", "vatNumber", "address", etc.
+  comment    String // Admin's comment
+  isResolved Boolean @default(false)
+
+  createdBy  String // Admin user ID
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([partnerId])
+  @@index([isResolved])
+  @@map("partner_review_comments")
+}
+
+model PartnerDocument {
+  id                   String    @id @default(cuid())
+  partnerId            String
+  type                 String // CR, VAT, CHAMBER_OF_COMMERCE, BALADY, NATIONAL_ADDRESS, IBAN_LETTER
+  fileUrl              String
+  fileName             String?
+  expiryDate           DateTime?
+  // Mirrors VendorDocument.lastExpiryNotifiedAt — used by the
+  // partner-profile-doc-expiry cron to throttle expiry warnings to
+  // one per 7-day window per doc.
+  lastExpiryNotifiedAt DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  partner Partner @relation("PartnerDocs", fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@unique([partnerId, type])
+  @@index([partnerId])
+  @@index([type])
+  @@map("partner_documents")
+}
+
+// NEW MODEL: Partner invitation log (audit trail)
+model PartnerInvitationLog {
+  id           String   @id @default(cuid())
+  partnerId    String?
+  email        String
+  companyName  String
+  action       String // "SENT", "RESENT", "ACCEPTED", "EXPIRED"
+  sentByUserId String
+  sentByName   String
+  createdAt    DateTime @default(now())
+
+  @@index([email])
+  @@index([partnerId])
+  @@map("partner_invitation_logs")
+}
+
+model PartnerTeamMember {
+  id                   String    @id @default(cuid())
+  partnerId            String
+  userId               String? // linked once they accept invite
+  name                 String
+  email                String
+  phone                String?
+  role                 String    @default("member") // "admin", "manager", "booker", "viewer"
+  status               String    @default("INVITED") // INVITED, ACTIVE, DEACTIVATED
+  isActive             Boolean   @default(true)
+  invitationToken      String?   @unique
+  invitationSentAt     DateTime?
+  invitationExpiresAt  DateTime?
+  invitationAcceptedAt DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id])
+
+  @@map("partner_team_members")
+}
+
+model Vendor {
+  id              String       @id @default(cuid())
+  userId          String       @unique
+  companyName     String
+  crNumber        String?
+  vatNumber       String?
+  bankName        String?
+  bankAccountName String? // NEW: Account holder name
+  bankIban        String?
+  status          VendorStatus @default(PENDING_REVIEW)
+  rating          Decimal?     @db.Decimal(2, 1)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // NEW: Invitation system (mirrors Partner)
+  invitationToken     String?   @unique
+  invitationSentAt    DateTime?
+  invitationExpiresAt DateTime?
+  invitedByUserId     String?
+
+  // NEW: Profile review tracking
+  profileSubmittedAt DateTime?
+  profileReviewedAt  DateTime?
+  profileReviewedBy  String?
+  isProfileComplete  Boolean   @default(false)
+
+  // NEW: Contact info (filled by vendor)
+  contactPerson String?
+  contactPhone  String?
+  contactEmail  String?
+  address       String?
+
+  // NEW: MOU Document
+  mouFileUrl        String?
+  mouExpiryDate     DateTime?
+  mouUploadedAt     DateTime?
+  mouExpiryNotified Boolean   @default(false)
+
+  profileSnapshot Json? // Stores pre-edit snapshot for admin comparison
+  logoUrl         String? // Company logo
+
+  // Relations
+  user                  User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicles              Vehicle[]
+  drivers               Driver[]
+  bookings              Booking[]
+  reviewComments        VendorReviewComment[] // NEW
+  bankUpdateRequests    VendorBankUpdateRequest[] // NEW
+  invitationLogs        VendorInvitationLog[] // NEW
+  payouts               VendorPayout[]
+  vendorDocuments       VendorDocument[]
+  profileReviewRequests VendorProfileReviewRequest[] // NEW — vendor-initiated change requests
+  assignmentOffers      BookingAssignmentOffer[] // Booking offers admin sent this vendor (audit trail)
+
+  @@index([status])
+  @@index([invitationToken])
+  @@index([mouExpiryDate])
+  @@map("vendors")
+}
+
+// Vendor payouts — admin OWES the vendor this amount for bookings
+// performed in the period (new payment direction). Admin uploads a
+// receipt image proving the bank transfer, purely for the vendor's
+// transparency. Each payout aggregates a set of completed bookings.
+model VendorPayout {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Receipt identifier shown to vendor (e.g. SAU-RCP-202606-001).
+  // Generated when the payout is created so the vendor can reference
+  // it in correspondence. Unique platform-wide.
+  receiptNumber String @unique
+
+  amount         Decimal               @db.Decimal(10, 2)
+  periodStart    DateTime
+  periodEnd      DateTime
+  bookingCount   Int
+  generationType InvoiceGenerationType // WEEKLY, MONTHLY
+
+  status VendorPayoutStatus @default(PENDING)
+
+  // Admin uploads the bank-transfer receipt when marking PAID.
+  // Vendor can view but not modify — pure transparency artifact.
+  receiptUrl        String?
+  receiptFileName   String?
+  receiptUploadedAt DateTime?
+  paidAt            DateTime?
+  paidBy            String? // admin userId
+  adminNote         String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("vendor_payouts")
+}
+
+model Vehicle {
+  id               String        @id @default(cuid())
+  vendorId         String
+  category         VehicleClass
+  make             String
+  model            String
+  year             Int
+  plateNumber      String
+  color            String?
+  seats            Int           @default(4)
+  features         String[]
+  isActive         Boolean       @default(true)
+  status           VehicleStatus @default(PENDING_REVIEW) // NEW
+  suspendedForDocs Boolean       @default(false) // Auto-suspended due to expired documents
+  mileage          Int? // NEW: Odometer reading
+  editSnapshot     Json? // Snapshot of editable fields when CHANGES_REQUESTED, for diff display
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  // Relations
+  vendor         Vendor                 @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  bookings       Booking[]
+  driver         Driver?                @relation("AssignedVehicle")
+  documents      VehicleDocument[]
+  reviewRequests VehicleReviewRequest[] // NEW
+  reviewComments VehicleReviewComment[] // NEW field-level comments
+
+  @@map("vehicles")
+}
+
+// Vendor review comments (field-level, mirrors PartnerReviewComment)
+model VendorReviewComment {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  fieldName  String // "crNumber", "vatNumber", "companyName", "address", "mou", etc.
+  comment    String
+  isResolved Boolean @default(false)
+
+  createdBy  String // Admin user ID
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([vendorId])
+  @@index([isResolved])
+  @@map("vendor_review_comments")
+}
+
+// Vendor invitation audit log (mirrors PartnerInvitationLog)
+model VendorInvitationLog {
+  id           String   @id @default(cuid())
+  vendorId     String?
+  email        String
+  companyName  String
+  action       String // "SENT", "RESENT", "ACCEPTED", "EXPIRED"
+  sentByUserId String
+  sentByName   String
+  createdAt    DateTime @default(now())
+
+  vendor Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@index([email])
+  @@index([vendorId])
+  @@map("vendor_invitation_logs")
+}
+
+// Vendor bank update requests
+model VendorBankUpdateRequest {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Requested new values
+  requestedBankName        String?
+  requestedBankAccountName String?
+  requestedBankIban        String?
+
+  // Current values at time of request (for audit)
+  previousBankName        String?
+  previousBankAccountName String?
+  previousBankIban        String?
+
+  status    BankUpdateRequestStatus @default(PENDING)
+  reason    String? // Vendor's reason for change
+  adminNote String? // Admin's note on approval/rejection
+
+  // Who processed it
+  processedBy String?
+  processedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("vendor_bank_update_requests")
+}
+
+model VehicleDocument {
+  id                   String    @id @default(cuid())
+  vehicleId            String
+  type                 String
+  fileUrl              String
+  fileName             String?
+  expiryDate           DateTime?
+  lastExpiryNotifiedAt DateTime? // Track when we last sent an expiry notification for this doc (prevents spam)
+  createdAt            DateTime  @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@map("vehicle_documents")
+}
+
+// Driver review requests
+// Can be either ADMIN_INITIATED (admin asks vendor to update) or VENDOR_INITIATED (approved vendor asks admin for permission to edit)
+model DriverReviewRequest {
+  id       String @id @default(cuid())
+  driverId String
+  driver   Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  // Which fields need attention. Keys here come from DRIVER_EDITABLE_FIELDS
+  // (text fields like firstName/lastName/phone) and from the document type
+  // codes (PROFILE_PHOTO, IQAMA_NATIONAL_ID, DRIVING_LICENSE).
+  fields  String[]
+  message String // Vendor's reason (VENDOR_INITIATED) OR admin's details (ADMIN_INITIATED)
+
+  // Request type & status workflow
+  requestType String  @default("ADMIN_INITIATED") // ADMIN_INITIATED | VENDOR_INITIATED
+  status      String  @default("PENDING") // PENDING | APPROVED | REJECTED (only used for VENDOR_INITIATED)
+  adminNote   String? // Admin's response when approving/rejecting a VENDOR_INITIATED request
+
+  // Resolution tracking (used for ADMIN_INITIATED — when vendor has addressed all comments)
+  isResolved Boolean   @default(false)
+  createdBy  String // User ID (admin or vendor user)
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([driverId])
+  @@index([isResolved])
+  @@index([status])
+  @@index([requestType])
+  @@map("driver_review_requests")
+}
+
+// Vehicle review requests
+// Can be either ADMIN_INITIATED (admin asks vendor to update) or VENDOR_INITIATED (approved vendor asks admin for permission to edit)
+model VehicleReviewRequest {
+  id        String  @id @default(cuid())
+  vehicleId String
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  // Which documents need re-upload
+  documents String[] // ["vehiclePhotos", "numberPlates", "odometer", "insurance", "istimara"]
+  message   String // Vendor's reason (VENDOR_INITIATED) OR admin's details (ADMIN_INITIATED)
+
+  // Request type & status workflow
+  requestType String  @default("ADMIN_INITIATED") // ADMIN_INITIATED | VENDOR_INITIATED
+  status      String  @default("PENDING") // PENDING | APPROVED | REJECTED (only used for VENDOR_INITIATED)
+  adminNote   String? // Admin's response when approving/rejecting a VENDOR_INITIATED request
+
+  // Resolution tracking (used for ADMIN_INITIATED — when vendor has addressed all comments)
+  isResolved Boolean   @default(false)
+  createdBy  String // User ID (admin or vendor user)
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([vehicleId])
+  @@index([isResolved])
+  @@index([status])
+  @@index([requestType])
+  @@map("vehicle_review_requests")
+}
+
+// Vendor profile change requests
+// Mirrors DriverReviewRequest / VehicleReviewRequest. Approved vendors use this
+// to request permission from the admin to edit specific profile fields or
+// re-upload expired/expiring documents. Admin approves → those fields become
+// editable / those docs can be re-uploaded.
+model VendorProfileReviewRequest {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Which fields/docs need attention. Keys here come from VENDOR_EDITABLE_FIELDS
+  // (text fields like companyName/contactPerson + bank fields + doc type codes
+  // like CR/VAT/BALADY etc + 'logo' + 'mou').
+  fields  String[]
+  message String // Vendor's reason
+
+  // Request type & status workflow
+  requestType String  @default("VENDOR_INITIATED") // VENDOR_INITIATED only (admin-initiated changes go through reviewComments)
+  status      String  @default("PENDING") // PENDING | APPROVED | REJECTED
+  adminNote   String? // Admin's response when approving/rejecting
+
+  // Resolution tracking — once the vendor has resubmitted the profile after the
+  // change request was approved, isResolved → true and that "permission window"
+  // closes for the listed fields.
+  isResolved Boolean   @default(false)
+  createdBy  String // Vendor user ID
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([vendorId])
+  @@index([isResolved])
+  @@index([status])
+  @@map("vendor_profile_review_requests")
+}
+
+// Driver review comments (field-level, mirrors VendorReviewComment)
+model DriverReviewComment {
+  id       String @id @default(cuid())
+  driverId String
+  driver   Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  fieldName  String // Editable field key (firstName/lastName/phone) or doc-type code (PROFILE_PHOTO, IQAMA_NATIONAL_ID, DRIVING_LICENSE)
+  comment    String
+  isResolved Boolean @default(false)
+
+  createdBy  String // Admin user ID
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([driverId])
+  @@index([isResolved])
+  @@map("driver_review_comments")
+}
+
+// Vehicle review comments (field-level, mirrors VendorReviewComment)
+model VehicleReviewComment {
+  id        String  @id @default(cuid())
+  vehicleId String
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  fieldName  String // "vehiclePhotos", "numberPlates", "odometer", "insurance", "istimara", "make", "model", "plateNumber", etc.
+  comment    String
+  isResolved Boolean @default(false)
+
+  createdBy  String // Admin user ID
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([vehicleId])
+  @@index([isResolved])
+  @@map("vehicle_review_comments")
+}
+
+model Driver {
+  id                String       @id @default(cuid())
+  vendorId          String
+  assignedVehicleId String?      @unique
+  firstName         String
+  lastName          String
+  phone             String
+  photoUrl          String?
+  rating            Decimal?     @db.Decimal(2, 1)
+  isActive          Boolean      @default(true)
+  status            DriverStatus @default(PENDING_REVIEW) // NEW
+  suspendedForDocs  Boolean      @default(false) // Auto-suspended due to expired documents
+  editSnapshot      Json? // Snapshot of profile fields when CHANGES_REQUESTED, for diff display
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  vendor          Vendor                @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  assignedVehicle Vehicle?              @relation("AssignedVehicle", fields: [assignedVehicleId], references: [id])
+  bookings        Booking[]
+  documents       DriverDocument[]
+  reviewRequests  DriverReviewRequest[] // NEW
+  reviewComments  DriverReviewComment[] // NEW field-level comments
+
+  @@map("drivers")
+}
+
+model DriverDocument {
+  id                   String    @id @default(cuid())
+  driverId             String
+  type                 String
+  fileUrl              String
+  fileName             String?
+  expiryDate           DateTime?
+  lastExpiryNotifiedAt DateTime?
+  createdAt            DateTime  @default(now())
+
+  driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@map("driver_documents")
+}
+
+model Booking {
+  id         String @id @default(cuid())
+  bookingRef String @unique
+
+  // Relations
+  customerId String?
+  customer   User?    @relation("CustomerBookings", fields: [customerId], references: [id])
+  partnerId  String?
+  partner    Partner? @relation(fields: [partnerId], references: [id])
+  vendorId   String?
+  vendor     Vendor?  @relation(fields: [vendorId], references: [id])
+  vehicleId  String?
+  vehicle    Vehicle? @relation(fields: [vehicleId], references: [id])
+  driverId   String?
+  driver     Driver?  @relation(fields: [driverId], references: [id])
+
+  // Source
+  source     BookingSource @default(DIRECT)
+  guestName  String?
+  guestPhone String?
+  guestEmail String?
+
+  // Trip Details
+  tripType TripType
+  city     City
+  route    String?
+  hours    Int?
+
+  pickupAddress  String
+  pickupLat      Decimal? @db.Decimal(10, 8)
+  pickupLng      Decimal? @db.Decimal(11, 8)
+  dropoffAddress String
+  dropoffLat     Decimal? @db.Decimal(10, 8)
+  dropoffLng     Decimal? @db.Decimal(11, 8)
+
+  tripDate     DateTime
+  tripTime     String
+  flightNumber String?
+
+  // Airport fields (shown when route includes airport)
+  terminalNo       String?
+  terminalLocation String?
+
+  // Route tariff reference (which admin-defined route was selected)
+  routeTariffId String?
+
+  // For hourly bookings — the duration label from the route (e.g., "6-8 Hours")
+  hourlyDuration String?
+
+  // Vehicle
+  vehicleClass VehicleClass
+  passengers   Int          @default(1)
+  luggage      Int          @default(0)
+  childSeat    Boolean      @default(false)
+
+  // Pricing
+  basePrice      Decimal @db.Decimal(10, 2)
+  peakMultiplier Decimal @default(1.00) @db.Decimal(3, 2)
+  vatAmount      Decimal @db.Decimal(10, 2)
+  totalPrice     Decimal @db.Decimal(10, 2)
+
+  // Status
+  status        BookingStatus @default(PENDING)
+  driverDetails Json?
+  notes         String?
+
+  // Vendor payout — the price admin offered the vendor for this
+  // booking (in SAR). Set when admin enters the amount on the offer
+  // screen. The accepted offer's amount is denormalized here for
+  // cheap reads from settlement / earnings / dashboard queries.
+  // Locked at acceptance time — admin cannot change after vendor
+  // accepts (matches the "no in-system price edits" rule). NULL until
+  // the first offer is sent.
+  //
+  // Admin's margin on this booking is computed at read time as
+  // `totalPrice - vendorPayoutAmount`; not stored to keep a single
+  // source of truth for both numbers.
+  vendorPayoutAmount Decimal? @db.Decimal(10, 2)
+
+  // Per-attempt offer history — see BookingAssignmentOffer model below.
+  // This is the audit trail: which vendors got offered, which rejected
+  // with what reason, attempt counts. Used to enforce the
+  // "max 2 attempts per vendor" and "no re-offer to a vendor who
+  // rejected for non-price reasons" rules.
+  assignmentOffers BookingAssignmentOffer[]
+
+  // Admin Notification Tracking
+  isReadByAdmin   Boolean   @default(false)
+  needsAttention  Boolean   @default(false)
+  attentionReason String?
+  attentionAt     DateTime?
+
+  //Invoice
+  partnerInvoiceId String?
+  partnerInvoice   PartnerInvoice? @relation(fields: [partnerInvoiceId], references: [id])
+  isCustomInvoiced Boolean         @default(false)
+  customInvoicedAt DateTime?
+
+  // Timestamps
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  confirmedAt    DateTime?
+  completedAt    DateTime?
+  onlinePayments OnlinePayment[]
+
+  @@index([customerId])
+  @@index([partnerId])
+  @@index([vendorId])
+  @@index([status])
+  @@index([tripDate])
+  @@index([bookingRef])
+  @@index([isReadByAdmin])
+  @@index([needsAttention])
+  @@map("bookings")
+}
+
+model Tariff {
+  id           String       @id @default(cuid())
+  city         City
+  tripType     TripType
+  route        String?
+  hours        Int?
+  vehicleClass VehicleClass
+  price        Decimal      @db.Decimal(10, 2)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@unique([city, tripType, route, hours, vehicleClass])
+  @@map("tariffs")
+}
+
+model Invoice {
+  id               String        @id @default(cuid())
+  invoiceNumber    String        @unique
+  partnerId        String
+  month            String?
+  type             String        @default("monthly")
+  subtotal         Decimal       @db.Decimal(10, 2)
+  vatAmount        Decimal       @db.Decimal(10, 2)
+  totalAmount      Decimal       @db.Decimal(10, 2)
+  paidAmount       Decimal       @default(0) @db.Decimal(10, 2)
+  status           InvoiceStatus @default(PENDING)
+  dueDate          DateTime
+  paidAt           DateTime?
+  paymentReference String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([partnerId])
+  @@index([status])
+  @@map("invoices")
+}
+
+model PeakPricing {
+  id         String   @id @default(cuid())
+  name       String
+  multiplier Decimal  @db.Decimal(3, 2)
+  startDate  DateTime
+  endDate    DateTime
+  cities     City[]
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@map("peak_pricing")
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String
+  isRead    Boolean   @default(false)
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String
+  changes   Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model DistancePricing {
+  id           String       @id @default(cuid())
+  vehicleClass VehicleClass
+
+  // Distance tiers (base prices in SAR)
+  tier1Base  Decimal @db.Decimal(10, 2) // 1-25 km (flat rate)
+  tier2Base  Decimal @db.Decimal(10, 2) // 26-50 km (flat rate)
+  tier3PerKm Decimal @db.Decimal(10, 2) // 51-200 km (per km rate)
+  tier4PerKm Decimal @db.Decimal(10, 2) // 200+ km (per km rate)
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([vehicleClass])
+  @@map("distance_pricing")
+}
+
+// Peak pricing (temporary multiplier for 24 hours)
+model PeakPricingConfig {
+  id         String    @id @default(cuid())
+  isEnabled  Boolean   @default(false)
+  multiplier Decimal   @db.Decimal(3, 2) // e.g., 1.5x
+  enabledAt  DateTime? // When peak was enabled
+  expiresAt  DateTime? // Auto-disable after 24 hours
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@map("peak_pricing_config")
+}
+
+// Additional services pricing
+model AdditionalServicePricing {
+  id          String   @id @default(cuid())
+  serviceType String   @unique // CHILD_SEAT, EXTRA_STOP, WAIT_TIME, MEET_GREET
+  serviceName String // Display name
+  price       Decimal  @db.Decimal(10, 2)
+  unit        String? // null, "per_15_min", etc.
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("additional_service_pricing")
+}
+
+// Margin configuration
+model MarginConfig {
+  id            String   @id @default(cuid())
+  marginPercent Decimal  @db.Decimal(5, 2) // e.g., 20.00 for 20%
+  vatPercent    Decimal  @db.Decimal(5, 2) // e.g., 15.00 for 15%
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("margin_config")
+}
+
+// Default pricing (for reset functionality)
+model DefaultPricing {
+  id         String   @id @default(cuid())
+  configType String   @unique // DISTANCE, PEAK, SERVICES, MARGIN
+  configData Json // Stores default values
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("default_pricing")
+}
+
+// Route tariffs - prices per route per vehicle class
+model RouteTariff {
+  id              String    @id @default(cuid())
+  city            City
+  routeType       RouteType // ONE_WAY, HOURLY
+  routeName       String // "RUH Airport → Riyadh City" or "6-8 Hours (Day Rate)"
+  pickupLocation  String
+  dropoffLocation String
+
+  // Prices per vehicle class (null = TBD)
+  economySedan  Decimal? @db.Decimal(10, 2)
+  businessSedan Decimal? @db.Decimal(10, 2)
+  firstClass    Decimal? @db.Decimal(10, 2)
+  businessSuv   Decimal? @db.Decimal(10, 2)
+  hiace         Decimal? @db.Decimal(10, 2)
+  coaster       Decimal? @db.Decimal(10, 2)
+  kingLong      Decimal? @db.Decimal(10, 2)
+
+  // For per-km routes (optional)
+  isPerKm Boolean @default(false)
+
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([city, routeType, routeName])
+  @@index([city])
+  @@index([routeType])
+  @@map("route_tariffs")
+}
+
+// Electric fleet tariffs (Riyadh only)
+model ElectricTariff {
+  id              String   @id @default(cuid())
+  city            City     @default(RIYADH)
+  routeName       String
+  pickupLocation  String
+  dropoffLocation String
+  price           Decimal? @db.Decimal(10, 2)
+  isPerKm         Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([city, routeName])
+  @@map("electric_tariffs")
+}
+
+// Electric fleet config (enable/disable)
+model ElectricFleetConfig {
+  id        String   @id @default(cuid())
+  isEnabled Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("electric_fleet_config")
+}
+
+// Tariff change history for audit log
+model TariffChangeLog {
+  id           String     @id @default(cuid())
+  userId       String
+  userName     String
+  action       String // "updated", "created", "deleted", "bulk_update"
+  routeName    String
+  vehicleClass String? // Which vehicle class was changed
+  oldValue     Decimal?   @db.Decimal(10, 2)
+  newValue     Decimal?   @db.Decimal(10, 2)
+  bulkPercent  Decimal?   @db.Decimal(5, 2) // For bulk updates
+  city         City?
+  routeType    RouteType?
+  createdAt    DateTime   @default(now())
+
+  @@index([createdAt])
+  @@map("tariff_change_logs")
+}
+
+// Add this enum
+enum RouteType {
+  ONE_WAY
+  HOURLY
+}
+
+// Online payments from customers (PayTabs gateway)
+model OnlinePayment {
+  id            String   @id @default(cuid())
+  transactionId String   @unique // tran_2a3b4c5d6e
+  bookingId     String?
+  booking       Booking? @relation(fields: [bookingId], references: [id])
+
+  // Customer info
+  customerId    String?
+  customer      User?   @relation(fields: [customerId], references: [id])
+  customerName  String
+  customerEmail String
+
+  // Payment details
+  amount    Decimal       @db.Decimal(10, 2)
+  currency  String        @default("SAR")
+  method    PaymentMethod // VISA, MADA, MASTERCARD, APPLE_PAY
+  cardLast4 String? // ****4532
+
+  // Gateway response
+  gatewayResponse PaymentResponse // AUTHORISED, DECLINED, PENDING
+  gatewayMessage  String? // Raw response message
+
+  // Status
+  status PaymentStatus @default(PENDING) // COMPLETED, FAILED, PENDING, REFUNDED
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([bookingId])
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("online_payments")
+}
+
+// VendorReceipt model was removed during the payment-direction
+// refactor. The old direction (vendor paying admin and uploading
+// proof) no longer exists; in the new model admin pays the vendor
+// and uploads a receipt for transparency. That receipt lives on
+// VendorPayout.receiptUrl. Stage 1 wiped all rows; this model
+// removal is part of Stage 2.
+
+model PartnerChangeRequest {
+  id         String    @id @default(uuid())
+  partnerId  String
+  partner    Partner   @relation(fields: [partnerId], references: [id])
+  fields     Json // Array of field names they want to edit e.g. ["companyName", "vatNumber", "CR"]
+  reason     String
+  status     String    @default("PENDING") // PENDING, APPROVED, REJECTED
+  adminNote  String?
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([partnerId, status])
+}
+
+// Partner invoices — partner OWES admin this amount (new payment direction).
+// Partner uploads a proof image; admin reviews and confirms PAID.
+model PartnerInvoice {
+  id            String  @id @default(cuid())
+  invoiceNumber String  @unique // INV-2026-0089
+  partnerId     String
+  partner       Partner @relation(fields: [partnerId], references: [id])
+
+  // Invoice details
+  amount         Decimal               @db.Decimal(10, 2)
+  bookingCount   Int                   @default(0)
+  periodStart    DateTime
+  periodEnd      DateTime
+  generationType InvoiceGenerationType // WEEKLY, MONTHLY, CUSTOM
+
+  // Due date (overdue after 3 days)
+  dueDate DateTime
+
+  // Viewing — used for sidebar badge counting on partner side so
+  // unviewed invoices flash a notification dot.
+  isViewedByPartner Boolean   @default(false)
+  viewedByPartnerAt DateTime?
+
+  // Single source of truth for payment progression. The previous
+  // schema had redundant boolean flags (isPaymentReceived,
+  // isConfirmed) plus timestamps that mirrored status transitions —
+  // those have been collapsed into the enum + the two timestamps
+  // below. Status flow: PENDING → (OVERDUE) → PROOF_UPLOADED → PAID.
+  status PartnerInvoiceStatus @default(PENDING)
+
+  // Partner-uploaded proof of payment (bank transfer screenshot etc).
+  // Set when status transitions to PROOF_UPLOADED.
+  paymentProofUrl        String?
+  paymentProofFileName   String?
+  paymentProofUploadedAt DateTime?
+
+  // Admin confirmation. Set when status transitions to PAID.
+  // confirmedBy is the admin userId who clicked Confirm.
+  confirmedAt DateTime?
+  confirmedBy String?
+
+  // Reminders — cron tracks these to avoid spamming the partner.
+  reminderSentAt DateTime?
+  reminderCount  Int       @default(0)
+
+  // Custom (mid-period) invoice support. Partner can request an
+  // invoice for a specific date range to settle early. When the
+  // month-end auto-invoice generates, it excludes bookings already
+  // covered by a custom invoice (see isCustomInvoiced on Booking).
+  dateRangeLabel  String? // e.g. "01 May 2026 – 15 May 2026"
+  isCustom        Boolean @default(false)
+  createdByUserId String? // userId of the partner who generated it
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  bookings  Booking[]
+
+  @@index([partnerId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+  @@map("partner_invoices")
+}
+
+// Enums
+enum PaymentMethod {
+  VISA
+  MADA
+  MASTERCARD
+  APPLE_PAY
+  BANK_TRANSFER
+}
+
+enum PaymentResponse {
+  AUTHORISED
+  DECLINED
+  PENDING
+  ERROR
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// VendorReceiptStatus removed alongside the VendorReceipt model.
+// VendorPayout has its own VendorPayoutStatus enum defined below.
+
+enum PartnerInvoiceStatus {
+  // Invoice issued, partner hasn't acted yet.
+  PENDING
+
+  // Past dueDate without proof upload. Auto-suspension cron may fire
+  // for partners with any OVERDUE invoice past the grace period.
+  OVERDUE
+
+  // Partner has uploaded a payment-proof image. Admin needs to
+  // confirm the proof matches their bank record before final PAID.
+  PROOF_UPLOADED
+
+  // Admin has confirmed receipt of the payment. Terminal state.
+  PAID
+}
+
+enum InvoiceGenerationType {
+  // DAILY is currently unused but kept in the enum to avoid a tricky
+  // migration step. Prisma's migration generator tried to ALTER the
+  // new `vendor_payouts.generationType` column TYPE before adding
+  // the column (statement ordering bug), which aborted the whole
+  // migration. Leaving DAILY in keeps the enum intact and skips the
+  // AlterEnum step entirely. Drop it later in a dedicated migration
+  // once Stage 3 is stable.
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum VendorPayoutStatus {
+  // Payout owed but admin hasn't paid yet.
+  PENDING
+
+  // Admin marked PAID and uploaded the receipt image. Terminal state.
+  PAID
+}
+
+// ============== BOOKING ASSIGNMENT OFFERS ==============
+//
+// Records each offer admin sends to a vendor for a booking. The
+// existence of this table is what lets us enforce two key business
+// rules without piling Json blobs onto Booking:
+//
+//   1. A vendor can be offered the same booking at most TWICE
+//      (the initial offer + one re-offer after a "Price too low"
+//      rejection). The unique (bookingId, vendorId, attemptNumber)
+//      constraint prevents duplicates at a given attempt number; app
+//      logic refuses to insert attemptNumber > 2.
+//
+//   2. A vendor who rejected for non-price reasons (car/driver not
+//      available, unsuitable route) is excluded from any further
+//      offers on this booking — the query that picks the next
+//      eligible vendor excludes vendors who have any non-PRICE_TOO_LOW
+//      rejection on this booking.
+//
+// The accepted offer's amount is denormalized to Booking.vendorPayoutAmount
+// at acceptance for cheap reads from earnings/dashboard queries. This
+// table remains the audit trail for "who got offered, who rejected,
+// at what price, why".
+model BookingAssignmentOffer {
+  id        String  @id @default(cuid())
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  vendorId  String
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Offered payout amount in SAR. Denormalized to Booking.vendorPayoutAmount
+  // when this row's status flips to ACCEPTED.
+  payoutAmount Decimal @db.Decimal(10, 2)
+
+  // 1 = first time this vendor was offered the booking.
+  // 2 = re-offer after the vendor rejected for "Price too low".
+  // App logic refuses to insert a row with attemptNumber > 2 for the
+  // same (bookingId, vendorId) pair.
+  attemptNumber Int @default(1)
+
+  status          OfferStatus
+  rejectionReason OfferRejectionReason? // NULL unless status = REJECTED
+
+  offeredAt   DateTime  @default(now())
+  respondedAt DateTime? // Set when vendor accepts or rejects
+
+  @@unique([bookingId, vendorId, attemptNumber])
+  @@index([bookingId, status])
+  @@index([vendorId])
+  @@map("booking_assignment_offers")
+}
+
+enum OfferStatus {
+  // Offer sent, vendor hasn't responded. A booking has at most ONE
+  // PENDING offer at any time (the currently-active vendor).
+  PENDING
+
+  // Vendor accepted; their payoutAmount is now locked. Booking
+  // transitions to CONFIRMED and the vendor proceeds to assign a
+  // driver + vehicle.
+  ACCEPTED
+
+  // Vendor rejected with a reason. Booking either gets re-offered to
+  // the same vendor at a higher price (PRICE_TOO_LOW) or moves to
+  // the next eligible vendor (other reasons).
+  REJECTED
+}
+
+enum OfferRejectionReason {
+  // Vendor has no available car or driver for the trip date/time.
+  // Vendor is excluded from any further offers on this booking.
+  CAR_DRIVER_UNAVAILABLE
+
+  // Vendor wants a higher payout. Admin can choose to re-offer the
+  // same vendor at a better price (one re-offer maximum). If the
+  // re-offer is also rejected, vendor is excluded.
+  PRICE_TOO_LOW
+
+  // Vendor doesn't service this route. Vendor is excluded from any
+  // further offers on this booking.
+  UNSUITABLE_ROUTE
+}
+
+// Add relation to Booking model:
+// payment OnlinePayment?
+
+// Add relation to User model:
+// payments OnlinePayment[]
+
+// Loyalty program configuration (single row, admin-managed)
+model LoyaltyConfig {
+  id String @id @default(cuid())
+
+  // Points Per SAR Spent
+  pointsPerSar    Int     @default(1) // e.g., 1 point per 1 SAR spent
+  isPointsEnabled Boolean @default(true)
+
+  // Birthday Discount
+  birthdayDiscountPercent   Decimal @default(10) @db.Decimal(5, 2) // e.g., 10%
+  isBirthdayDiscountEnabled Boolean @default(true)
+
+  // Tier Thresholds (Points)
+  silverThreshold   Int @default(500)
+  goldThreshold     Int @default(2000)
+  platinumThreshold Int @default(5000)
+
+  // Free Ride Redemption (Points)
+  freeRideEconomy     Int @default(1000) // Points needed for Economy Sedan free ride
+  freeRideBusiness    Int @default(2000) // Points needed for Business Sedan free ride
+  freeRideFirstClass  Int @default(3500) // Points needed for First Class free ride
+  freeRideBusinessSuv Int @default(3000) // Points needed for Business SUV free ride
+
+  updatedAt DateTime @default(now()) @updatedAt
+  updatedBy String? // Admin user ID who last updated
+
+  @@map("loyalty_config")
+}
+
+// WhatsApp message template configuration (single row, admin-managed)
+model WhatsAppTemplate {
+  id String @id @default(cuid())
+
+  // Template for booking confirmation
+  bookingConfirmationTemplate String @default("Dear {{customerName}}, your booking {{bookingRef}} has been confirmed.\n\nTrip Details:\nDate: {{tripDate}}\nTime: {{tripTime}}\nPickup: {{pickupAddress}}\nDropoff: {{dropoffAddress}}\nVehicle: {{vehicleClass}}\n\nDriver: {{driverName}}\nContact: {{driverPhone}}\n\nThank you for choosing LuxDrive!")
+
+  isEnabled Boolean @default(true)
+
+  updatedAt DateTime @default(now()) @updatedAt
+  updatedBy String? // Admin user ID who last updated
+
+  @@map("whatsapp_templates")
+}
