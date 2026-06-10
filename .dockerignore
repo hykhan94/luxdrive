@@ -1,0 +1,61 @@
+# ============================================
+# .dockerignore - exclude noise from Docker build context
+# ============================================
+# Without this, Cloud Build uploads MB of unnecessary files
+# every build, slowing down each deployment.
+# ============================================
+
+# Dependencies (will be installed fresh in the container)
+**/node_modules
+
+# Build outputs (will be regenerated)
+**/.next
+**/dist
+**/build
+**/.turbo
+
+# Env files (use --build-arg + Cloud Run env config instead)
+**/.env
+**/.env.*
+!**/.env.example
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Editor / OS
+.vscode
+.idea
+**/.DS_Store
+**/Thumbs.db
+
+# Logs
+**/*.log
+**/logs
+
+# Tests
+**/coverage
+**/.nyc_output
+
+# Documentation (not needed at runtime)
+**/*.md
+!**/SKILL.md
+**/docs
+
+# CI/CD
+.github
+
+# Cache directories
+**/.cache
+**/.eslintcache
+**/.npm
+**/.yarn/cache
+**/.yarn/install-state.gz
+
+# Backend (not needed for frontend image)
+apps/server
+
+# Misc
+**/*.local
+.vercel
