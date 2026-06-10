@@ -8,6 +8,7 @@ import {
 import { Analytics } from "@vercel/analytics/next";
 import { AuthProvider } from "@/lib/auth-context";
 import { NotificationProvider } from "@/lib/notification-context";
+import { TopLoader } from "@/components/shared/top-loader";
 import "./globals.css";
 
 const montserrat = Montserrat({
@@ -42,30 +43,104 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  themeColor: "#0a0a0a",
 };
 
+// ============================================
+// SEO metadata
+// ============================================
+// metadataBase is required for OG image URLs to be absolute (social
+// platforms reject relative paths). Use production URL.
+// ============================================
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://luxdriveksa.com";
+const SITE_NAME = "LuxDrive";
+const SITE_TAGLINE = "Premium Chauffeur Services in Saudi Arabia";
+const SITE_DESCRIPTION =
+  "Experience luxury travel across the Kingdom of Saudi Arabia with LuxDrive. Premium chauffeur services, executive transfers, and curated journeys with professional drivers and an elite fleet — from Makkah and Madinah to Jeddah and Riyadh.";
+
 export const metadata: Metadata = {
-  title: "LuxDrive - Premium Chauffeur Services in Saudi Arabia",
-  description:
-    "Experience luxury travel with LuxDrive. Premium chauffeur services across Saudi Arabia with professional drivers and exclusive vehicles.",
-  generator: "v0.app",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    template: `%s | ${SITE_NAME}`,
+  },
+  description: SITE_DESCRIPTION,
+  applicationName: SITE_NAME,
+  authors: [{ name: "Luxakari Hospitality Group" }],
+  creator: "Luxakari Hospitality Group",
+  publisher: "Luxakari Hospitality Group",
+  keywords: [
+    "luxury chauffeur Saudi Arabia",
+    "premium transportation KSA",
+    "executive car service Riyadh",
+    "airport transfer Jeddah",
+    "chauffeur service Makkah",
+    "private driver Madinah",
+    "luxury fleet Saudi Arabia",
+    "Mercedes chauffeur KSA",
+    "corporate transportation Saudi",
+    "wedding car service Riyadh",
+    "VIP transportation Kingdom",
+    "LuxDrive",
+    "Luxakari",
+  ],
+  category: "transportation",
+  formatDetection: {
+    email: false,
+    telephone: false,
+    address: false,
+  },
+  alternates: {
+    canonical: "/",
+  },
+  // Replace v0 default icons with the LuxDrive brand mark.
+  // One unified icon — works in both light- and dark-theme browser chrome.
   icons: {
-    icon: [
-      {
-        url: "/icon-light-32x32.png",
-        media: "(prefers-color-scheme: light)",
-      },
-      {
-        url: "/icon-dark-32x32.png",
-        media: "(prefers-color-scheme: dark)",
-      },
-      {
-        url: "/icon.svg",
-        type: "image/svg+xml",
-      },
-    ],
+    icon: [{ url: "/icon.svg", type: "image/svg+xml" }],
     apple: "/apple-icon.png",
   },
+  // Open Graph — how the link previews on WhatsApp, Slack, Discord,
+  // iMessage, Facebook, LinkedIn, etc.
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    alternateLocale: ["ar_SA"],
+    url: SITE_URL,
+    siteName: SITE_NAME,
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: SITE_DESCRIPTION,
+    // The image referenced here is auto-generated from app/opengraph-image.tsx
+    // at build time. No manual upload needed.
+  },
+  // Twitter / X card — how the link previews on X (and Mastodon, Bluesky
+  // honor twitter:* tags as fallback).
+  twitter: {
+    card: "summary_large_image",
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: SITE_DESCRIPTION,
+    creator: "@luxdriveksa",
+    // Image auto-pulled from openGraph.images
+  },
+  // Search-engine indexing rules. Keep open for crawling; restrict
+  // certain user-only routes (dashboards, password resets) via individual
+  // page-level metadata if needed later.
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-image-preview": "large",
+      "max-snippet": -1,
+      "max-video-preview": -1,
+    },
+  },
+  // Verification placeholders — fill in once you set up Search Console
+  // and Bing Webmaster Tools (totally optional, can skip for now).
+  // verification: {
+  //   google: 'your-google-search-console-verification-code',
+  //   other: { 'msvalidate.01': 'your-bing-webmaster-tools-code' },
+  // },
 };
 
 export default function RootLayout({
@@ -122,6 +197,7 @@ export default function RootLayout({
         />
       </head>
       <body className="font-sans antialiased">
+        <TopLoader />
         <NotificationProvider>
           <AuthProvider>{children}</AuthProvider>
         </NotificationProvider>
