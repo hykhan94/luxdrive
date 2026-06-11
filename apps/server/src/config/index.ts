@@ -13,7 +13,14 @@ export const config = {
   },
 
   cors: {
-    origins: process.env.CORS_ORIGINS?.split(",") || ["http://localhost:3000"],
+    // Comma-separated list of trusted origins. Used by both:
+    //   1. The Express CORS middleware (apps/server/src/index.ts)
+    //   2. Better Auth's trustedOrigins config (apps/server/src/lib/auth.ts)
+    // Each origin must be the EXACT scheme + host (+ port if non-default).
+    // No trailing slash. Both .map(trim) so spaces around commas don't break it.
+    origins: process.env.CORS_ORIGINS?.split(",").map((s) => s.trim()) || [
+      "http://localhost:3000",
+    ],
   },
 
   jwt: {

@@ -2,6 +2,9 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { prisma } from "./prisma";
 import { sendPasswordResetEmail } from "./email";
+import { config } from "../config";
+
+const isProd = process.env.NODE_ENV === "production";
 
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL,
@@ -52,8 +55,35 @@ export const auth = betterAuth({
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
   },
-  trustedOrigins: ["http://localhost:3000", "http://localhost:5000"],
+  // Trusted origins read from the same env-driven list as CORS.
+  // In dev: ["http://localhost:3000"] etc.
+  // In prod: ["https://luxdriveksa.com", "https://www.luxdriveksa.com"]
+  trustedOrigins: config.cors.origins,
   advanced: {
-    disableCSRFCheck: process.env.NODE_ENV !== "production",
+    disableCSRFCheck: !isProd,
+
+    // Cross-subdomain cookies (production only).
+    //
+    // In production the frontend is at luxdriveksa.com and the backend
+    // at api.luxdriveksa.com — different subdomains of the same root.
+    // For the session cookie to travel between them we need:
+    //   1. Cookie Domain set to the shared parent .luxdriveksa.com
+    //      (the leading dot makes it apply to all subdomains)
+    //   2. SameSite=None + Secure=true so modern browsers send the
+    //      cookie on cross-site requests at all
+    //
+    // In dev (no COOKIE_DOMAIN env var set) we skip this block and
+    // Better Auth uses its safe localhost defaults — cookie scoped to
+    // the host, SameSite=Lax, no Secure requirement.
+    ...(process.env.COOKIE_DOMAIN && {
+      crossSubDomainCookies: {
+        enabled: true,
+        domain: process.env.COOKIE_DOMAIN,
+      },
+    }),
+    defaultCookieAttributes: {
+      sameSite: isProd ? "none" : "lax",
+      secure: isProd,
+    },
   },
 });
