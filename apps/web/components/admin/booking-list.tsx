@@ -164,11 +164,18 @@ const REJECTION_REASONS = [
 ] as const;
 type RejectionReason = (typeof REJECTION_REASONS)[number]["value"];
 
+interface BookingListProps {
+  showSourceFilter?: boolean;
+  initialOpenBookingId?: string | null;
+  onInitialOpenConsumed?: () => void;
+}
 export default function BookingList({
   showSourceFilter = false,
-}: {
-  showSourceFilter?: boolean;
-}) {
+  initialOpenBookingId,
+  onInitialOpenConsumed,
+}: BookingListProps) {
+  void initialOpenBookingId;
+  void onInitialOpenConsumed;
   const { showNotification } = useNotification();
 
   // List state

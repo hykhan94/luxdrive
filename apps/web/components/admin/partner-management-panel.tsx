@@ -145,7 +145,23 @@ function isPdf(url: string | null): boolean {
   return url.toLowerCase().endsWith(".pdf") || url.includes("/pdf");
 }
 
-export default function PartnerManagementPanel() {
+// ============== PROPS ==============
+// Optional deep-link prop from the admin dashboard router. When the
+// Overview panel sends the user here, it stashes a partnerId so this
+// panel can auto-open that partner's detail view. Currently treated
+// as reserved-for-future-wiring; declared so the parent typechecks.
+interface PartnerManagementPanelProps {
+  initialOpenPartnerId?: string | null;
+  onInitialOpenConsumed?: () => void;
+}
+
+export default function PartnerManagementPanel({
+  initialOpenPartnerId,
+  onInitialOpenConsumed,
+}: PartnerManagementPanelProps = {}) {
+  // Reserved deep-link props — wiring TBD.
+  void initialOpenPartnerId;
+  void onInitialOpenConsumed;
   const { showNotification } = useNotification();
 
   const [summary, setSummary] = useState({

@@ -37,6 +37,23 @@ const vehicleTypes = [
   { id: "ELECTRIC", name: "Electric", model: "Lucid Air or Similar" },
 ];
 
+// Shape of one vehicle's tier prices. Kept as a type to share between
+// state initialization and the save payload — single source of truth
+// for "what fields must exist for this vehicle class".
+type TierPrices = {
+  tier1Base: number;
+  tier2Base: number;
+  tier3PerKm: number;
+  tier4PerKm: number;
+};
+
+const EMPTY_TIERS: TierPrices = {
+  tier1Base: 0,
+  tier2Base: 0,
+  tier3PerKm: 0,
+  tier4PerKm: 0,
+};
+
 interface DistancePricing {
   vehicleClass: string;
   tier1Base: number;
@@ -65,15 +82,7 @@ export default function PricingStrategyPanel({
   const [isSaving, setIsSaving] = useState(false);
 
   const [distancePricing, setDistancePricing] = useState<
-    Record<
-      string,
-      {
-        tier1Base: number;
-        tier2Base: number;
-        tier3PerKm: number;
-        tier4PerKm: number;
-      }
-    >
+    Record<string, TierPrices>
   >({});
   const [services, setServices] = useState<Record<string, number>>({
     CHILD_SEAT: 0,
@@ -145,19 +154,31 @@ export default function PricingStrategyPanel({
       const res = await api.get(ADMIN_BASE);
       if (res.success && res.data) {
         const data = res.data;
-        // Backend returns: distancePricing, peakPricing, additionalServices, margin
+
+        // Seed state with all 5 vehicle classes at zero so the user
+        // can type into ANY tier field without the others becoming
+        // undefined. Without this seed, an empty DB returns no
+        // pricing rows, state stays {}, and the first onChange
+        // creates an object missing the other 3 tier fields — which
+        // then breaks the save payload (Prisma rejects undefined on
+        // required Decimal columns). Overlay backend rows on top.
+        const dp: Record<string, TierPrices> = {};
+        vehicleTypes.forEach((v) => {
+          dp[v.id] = { ...EMPTY_TIERS };
+        });
+
         if (data.distancePricing && Array.isArray(data.distancePricing)) {
-          const dp: Record<string, any> = {};
           data.distancePricing.forEach((d: DistancePricing) => {
             dp[d.vehicleClass] = {
-              tier1Base: Number(d.tier1Base),
-              tier2Base: Number(d.tier2Base),
-              tier3PerKm: Number(d.tier3PerKm),
-              tier4PerKm: Number(d.tier4PerKm),
+              tier1Base: Number(d.tier1Base) || 0,
+              tier2Base: Number(d.tier2Base) || 0,
+              tier3PerKm: Number(d.tier3PerKm) || 0,
+              tier4PerKm: Number(d.tier4PerKm) || 0,
             };
           });
-          setDistancePricing(dp);
         }
+        setDistancePricing(dp);
+
         if (data.peakPricing) {
           setPeakEnabled(data.peakPricing.isEnabled ?? false);
           setPeakMultiplier(Number(data.peakPricing.multiplier) || 1.5);
@@ -188,28 +209,44 @@ export default function PricingStrategyPanel({
 
   const markChanged = () => setHasChanges(true);
 
-  const updateDistance = (vehicleId: string, field: string, value: number) => {
-    setDistancePricing((prev) => ({
-      ...prev,
-      [vehicleId]: { ...prev[vehicleId], [field]: value },
-    }));
+  // Defensive update: if prev[vehicleId] is somehow undefined (e.g.
+  // a vehicle class added later, or a stale state race), start from
+  // EMPTY_TIERS rather than spreading `undefined` which would leave
+  // sibling fields missing.
+  const updateDistance = (
+    vehicleId: string,
+    field: keyof TierPrices,
+    value: number,
+  ) => {
+    setDistancePricing((prev) => {
+      const existing = prev[vehicleId] || { ...EMPTY_TIERS };
+      return {
+        ...prev,
+        [vehicleId]: { ...existing, [field]: value },
+      };
+    });
     markChanged();
   };
 
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Use the single POST /pricing/save endpoint
+      // Build the payload by mapping over vehicleTypes (the canonical
+      // list of vehicle classes) rather than Object.entries on state.
+      // Each row is coerced through Number() so empty strings, undefined,
+      // and NaN all become 0 — the backend's upsert.create branch
+      // requires all 4 fields, so we guarantee that here.
       const payload = {
-        distancePricing: vehicleTypes.map((v) => ({
-          vehicleClass: v.id,
-          ...(distancePricing[v.id] || {
-            tier1Base: 0,
-            tier2Base: 0,
-            tier3PerKm: 0,
-            tier4PerKm: 0,
-          }),
-        })),
+        distancePricing: vehicleTypes.map((v) => {
+          const existing = distancePricing[v.id] || EMPTY_TIERS;
+          return {
+            vehicleClass: v.id,
+            tier1Base: Number(existing.tier1Base) || 0,
+            tier2Base: Number(existing.tier2Base) || 0,
+            tier3PerKm: Number(existing.tier3PerKm) || 0,
+            tier4PerKm: Number(existing.tier4PerKm) || 0,
+          };
+        }),
         peakPricing: {
           isEnabled: peakEnabled,
           multiplier: peakMultiplier,
@@ -220,13 +257,13 @@ export default function PricingStrategyPanel({
             serviceName: serviceType
               .replace(/_/g, " ")
               .replace(/\b\w/g, (c) => c.toUpperCase()),
-            price,
+            price: Number(price) || 0,
             unit: serviceType === "WAIT_TIME" ? "per_15_min" : null,
           }),
         ),
         margin: {
-          marginPercent: profitMargin,
-          vatPercent: vatRate,
+          marginPercent: Number(profitMargin) || 0,
+          vatPercent: Number(vatRate) || 0,
         },
       };
       await api.post(`${ADMIN_BASE}/save`, payload);
@@ -332,12 +369,7 @@ export default function PricingStrategyPanel({
             </thead>
             <tbody className="divide-y divide-neutral-800">
               {vehicleTypes.map((vehicle) => {
-                const dp = distancePricing[vehicle.id] || {
-                  tier1Base: 0,
-                  tier2Base: 0,
-                  tier3PerKm: 0,
-                  tier4PerKm: 0,
-                };
+                const dp = distancePricing[vehicle.id] || EMPTY_TIERS;
                 return (
                   <tr
                     key={vehicle.id}
@@ -429,12 +461,7 @@ export default function PricingStrategyPanel({
         {/* Mobile cards — shown on small screens */}
         <div className="md:hidden divide-y divide-neutral-800">
           {vehicleTypes.map((vehicle) => {
-            const dp = distancePricing[vehicle.id] || {
-              tier1Base: 0,
-              tier2Base: 0,
-              tier3PerKm: 0,
-              tier4PerKm: 0,
-            };
+            const dp = distancePricing[vehicle.id] || EMPTY_TIERS;
             return (
               <div key={vehicle.id} className="p-4 space-y-3">
                 <div>
