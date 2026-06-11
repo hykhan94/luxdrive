@@ -26,13 +26,14 @@ WORKDIR /app
 # Enable yarn 1 globally
 RUN corepack enable && corepack prepare yarn@1.22.22 --activate
 
-# Copy monorepo manifests for workspace resolution
+# Copy monorepo manifests for workspace resolution.
+# We skip apps/server/package.json — yarn workspaces handle missing
+# workspace members gracefully, and the server isn't needed to build
+# the frontend.
 COPY package.json yarn.lock ./
 COPY apps/web/package.json ./apps/web/
-COPY apps/server/package.json ./apps/server/
 
 # Install with frozen lockfile - reproducible builds.
-# --ignore-scripts skips any postinstall hooks (none needed for build)
 RUN yarn install --frozen-lockfile --network-timeout 600000
 
 
