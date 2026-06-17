@@ -143,19 +143,19 @@ export default function Footer() {
               <li className="flex items-center justify-center md:justify-start gap-3 text-gray-400">
                 <Phone className="w-4 h-4 text-[#C9A961]" />
                 <a
-                  href="tel:+966500000000"
+                  href="tel:+966545559510"
                   className="text-sm hover:text-[#C9A961] transition-colors"
                 >
-                  +966 50 000 0000
+                  +966545559510
                 </a>
               </li>
               <li className="flex items-center justify-center md:justify-start gap-3 text-gray-400">
                 <Mail className="w-4 h-4 text-[#C9A961]" />
                 <a
-                  href="mailto:info@luxdrive.sa"
+                  href="mailto:info@luxdriveksa.com"
                   className="text-sm hover:text-[#C9A961] transition-colors"
                 >
-                  info@luxdrive.sa
+                  info@luxdriveksa.com
                 </a>
               </li>
               <li className="flex items-start justify-center md:justify-start gap-3 text-gray-400">
