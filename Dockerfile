@@ -55,6 +55,8 @@ COPY apps/web ./apps/web
 # Pass build-time env var (baked into JS bundle by Next.js)
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_SITE_URL
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 
 # Build the web app
 RUN cd apps/web && yarn build
