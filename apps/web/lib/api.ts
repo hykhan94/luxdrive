@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/web/lib/api.ts
+// ============================================
+// ============================================
 // apps/web/lib/api.ts
 // Direct calls to backend — no Next.js rewrites
 // Cookies work on localhost across ports (same-site)
@@ -283,6 +286,10 @@ export const adminApi = {
   getBookings: (params?: Record<string, any>) =>
     api.get(`${ADMIN_BASE}/bookings`, params),
   getBooking: (id: string) => api.get(`${ADMIN_BASE}/bookings/${id}`),
+  // Download Purchase Order HTML for any booking. Returns the same
+  // shape as partner's PO endpoint: { data: { html, meta: {...} } }.
+  // Frontend opens in a popup window with print-to-PDF triggered.
+  getBookingPO: (id: string) => api.get(`${ADMIN_BASE}/bookings/${id}/po`),
 
   // Vendor Management
   getVendorSummary: () => api.get(`${ADMIN_BASE}/vendors/summary`),
@@ -769,6 +776,9 @@ export const vendorApi = {
     api.patch(`${VENDOR_BASE}/bookings/${id}/complete`),
   exportBookingsCsv: (params?: Record<string, any>) =>
     api.get(`${VENDOR_BASE}/bookings/export/csv`, params),
+  // PO download — server returns { html, meta }; frontend opens
+  // the HTML in a new window for browser-native print-to-PDF.
+  getBookingPO: (id: string) => api.get(`${VENDOR_BASE}/bookings/${id}/po`),
 
   // Fleet Management (Vehicles)
   getVehicles: (params?: Record<string, any>) =>
@@ -944,6 +954,25 @@ export const invitationApi = {
       phone?: string;
     },
   ) => api.post(`/api/v1/invitation/${type}/${token}/accept`, body),
+};
+
+// ============== CONTACT API ==============
+//
+// Public contact form submission. Unauthenticated — anyone browsing
+// the marketing site can call it. Backend validates the payload
+// (name/email/subject/message all required, message has a 10-char
+// minimum, all fields capped) and sends a transactional email to
+// the LuxDrive ops inbox with reply-to set to the submitter so
+// hitting "Reply" goes straight back to them.
+
+export const contactApi = {
+  submit: (body: {
+    name: string;
+    email: string;
+    phone?: string;
+    subject: string;
+    message: string;
+  }) => api.post("/api/v1/contact", body),
 };
 
 export default api;

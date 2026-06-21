@@ -271,3 +271,97 @@ export async function sendApprovalEmail(opts: {
     text: `${companyName}, your LuxDrive ${roleLabel.toLowerCase()} account has been approved.\n\nOpen portal: ${portalUrl}`,
   });
 }
+
+// ============== TEMPLATE: CONTACT FORM SUBMISSION ==============
+//
+// Sent to the LuxDrive ops inbox whenever a visitor submits the
+// public contact form. `replyTo` is set to the submitter so the
+// admin can hit Reply in Gmail/Outlook and respond directly — the
+// conversation feels normal even though the original message was
+// machine-generated.
+//
+// The HTML body is escaped (user-supplied content) before being
+// inlined into renderShell, so a submitter typing < or > or & into
+// the message field can't break rendering or inject markup.
+
+export async function sendContactFormEmail(opts: {
+  to: string;
+  replyTo: string;
+  submitterName: string;
+  submitterEmail: string;
+  submitterPhone: string | null;
+  subjectLabel: string;
+  message: string;
+}): Promise<SendEmailResult> {
+  const {
+    to,
+    replyTo,
+    submitterName,
+    submitterEmail,
+    submitterPhone,
+    subjectLabel,
+    message,
+  } = opts;
+
+  // HTML-escape user-supplied content. We deliberately don't import
+  // an escape helper to keep this self-contained — these four
+  // substitutions cover the cases that matter for an email body.
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const safeName = escapeHtml(submitterName);
+  const safeMessage = escapeHtml(message).replace(/\n/g, "<br/>");
+
+  const bodyHtml = `
+    <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#fafafa;">New Contact Form Submission</h1>
+    <p style="margin:0 0 24px;color:#a3a3a3;">${escapeHtml(subjectLabel)}</p>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:0 0 24px;">
+      <tr>
+        <td style="padding:8px 0;color:#737373;font-size:13px;width:90px;">Name</td>
+        <td style="padding:8px 0;color:#e5e5e5;font-size:14px;">${safeName}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#737373;font-size:13px;">Email</td>
+        <td style="padding:8px 0;color:#e5e5e5;font-size:14px;"><a href="mailto:${submitterEmail}" style="color:#c8a961;text-decoration:none;">${submitterEmail}</a></td>
+      </tr>
+      ${
+        submitterPhone
+          ? `<tr>
+        <td style="padding:8px 0;color:#737373;font-size:13px;">Phone</td>
+        <td style="padding:8px 0;color:#e5e5e5;font-size:14px;">${escapeHtml(submitterPhone)}</td>
+      </tr>`
+          : ""
+      }
+    </table>
+
+    <div style="border-top:1px solid #262626;padding-top:24px;">
+      <p style="margin:0 0 8px;color:#737373;font-size:13px;">Message</p>
+      <div style="color:#d4d4d4;font-size:14px;line-height:1.6;white-space:pre-wrap;">${safeMessage}</div>
+    </div>
+
+    <p style="margin:32px 0 0;font-size:13px;color:#a3a3a3;">Reply directly to this email to respond — your reply goes straight to ${safeName}.</p>
+  `;
+
+  return sendEmail({
+    to,
+    replyTo,
+    subject: `[Contact] ${subjectLabel} — from ${submitterName}`,
+    html: renderShell({
+      preheader: `New contact form submission from ${submitterName} (${subjectLabel})`,
+      title: "Contact Form Submission",
+      bodyHtml,
+      footerNote:
+        "This message was submitted via the contact form on luxdriveksa.com.",
+    }),
+    text: `New Contact Form Submission — ${subjectLabel}
+
+Name: ${submitterName}
+Email: ${submitterEmail}${submitterPhone ? `\nPhone: ${submitterPhone}` : ""}
+
+Message:
+${message}
+
+Reply directly to this email to respond.`,
+  });
+}

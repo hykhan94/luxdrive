@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/partner/reports-analytics-panel.tsx
+// ============================================
 "use client";
 
 // ============================================
@@ -446,7 +449,12 @@ export default function ReportsAnalyticsPanel() {
 
         {/* Trip Type Split */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 hover:border-luxury-gold/30 transition-colors">
-          <h3 className="text-white font-semibold mb-4">Trip Type Split</h3>
+          <div className="flex items-baseline justify-between mb-4">
+            <h3 className="text-white font-semibold">Trip Type Split</h3>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+              Completed rides
+            </span>
+          </div>
           {safeTripTypeSplit.length > 0 ? (
             <div className="grid grid-cols-2 gap-4 mb-6">
               {safeTripTypeSplit.map((t, i) => (
@@ -517,7 +525,12 @@ export default function ReportsAnalyticsPanel() {
 
       {/* Section 4: Vehicle Class Usage */}
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 hover:border-luxury-gold/30 transition-colors">
-        <h3 className="text-white font-semibold mb-4">Vehicle Class Usage</h3>
+        <div className="flex items-baseline justify-between mb-4">
+          <h3 className="text-white font-semibold">Vehicle Class Usage</h3>
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+            Completed rides
+          </span>
+        </div>
         {safeVehicleUsage.breakdown.length > 0 ? (
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
@@ -552,7 +565,7 @@ export default function ReportsAnalyticsPanel() {
                       <div className="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2">
                         <p className="text-white text-sm">{d.vehicleClass}</p>
                         <p className="text-gray-300 text-xs">
-                          {d.count} bookings • SAR{" "}
+                          {d.count} completed • SAR{" "}
                           {d.totalSpend?.toLocaleString() ?? 0}
                         </p>
                         <p className="text-gray-400 text-xs">
@@ -580,7 +593,12 @@ export default function ReportsAnalyticsPanel() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* City Distribution */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 hover:border-luxury-gold/30 transition-colors">
-          <h3 className="text-white font-semibold mb-4">City Distribution</h3>
+          <div className="flex items-baseline justify-between mb-4">
+            <h3 className="text-white font-semibold">City Distribution</h3>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+              Completed rides
+            </span>
+          </div>
           {safeCityDistribution.breakdown.length > 0 ? (
             <div className="h-48">
               <ResponsiveContainer width="100%" height="100%">
@@ -609,7 +627,7 @@ export default function ReportsAnalyticsPanel() {
                         <div className="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2">
                           <p className="text-white text-sm">{d.city}</p>
                           <p className="text-gray-300 text-xs">
-                            {d.count} bookings • SAR{" "}
+                            {d.count} completed • SAR{" "}
                             {d.totalSpend?.toLocaleString() ?? 0}
                           </p>
                         </div>
@@ -631,7 +649,12 @@ export default function ReportsAnalyticsPanel() {
 
         {/* Top Routes */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 hover:border-luxury-gold/30 transition-colors">
-          <h3 className="text-white font-semibold mb-4">Top 5 Routes</h3>
+          <div className="flex items-baseline justify-between mb-4">
+            <h3 className="text-white font-semibold">Top 5 Routes</h3>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+              By completions
+            </span>
+          </div>
           {safeTopRoutes.length > 0 ? (
             <div className="space-y-3">
               {safeTopRoutes.slice(0, 5).map((route, i) => (

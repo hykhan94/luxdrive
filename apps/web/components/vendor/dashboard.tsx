@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/vendor/dashboard.tsx
+// ============================================
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
@@ -16,6 +19,8 @@ import {
   User,
   AlertCircle,
   Loader2,
+  Clock,
+  ArrowRight,
 } from "lucide-react";
 import {
   Empty,
@@ -66,13 +71,28 @@ interface RecentBooking {
   route: string;
   pickupAddress: string;
   dropoffAddress: string;
+  tripType: string;
+  // Trip-type detail powers the violet HOURLY chip (with hours
+  // label) and the sky city chip. Same shape partner + admin
+  // recent-bookings consume — kept aligned so the same row-render
+  // helpers could be hoisted into a shared module later.
+  hours: number | null;
+  hourlyDuration: string | null;
+  city: string;
   tripDate: string;
   tripTime: string;
   vehicleClass: string;
   totalPrice: number;
+  // Vendor-side bookings carry the *vendor's* payout, not the
+  // customer's total price. We surface payout as the headline
+  // figure in the row; totalPrice is kept around for fallback
+  // until every consumer is migrated.
+  vendorPayoutAmount: number | null;
   status: string;
-  isPartnerBooking: boolean;
-  partnerName: string | null;
+  // No isPartnerBooking / partnerName — vendor-facing responses
+  // never expose booking-origin attribution (partner ↔ vendor
+  // isolation rule). If older clients still expect these, treating
+  // them as absent is correct.
   driverName: string | null;
   createdAt: string;
 }
@@ -195,6 +215,90 @@ function TopDriverAvatar({
         <User className="w-5 h-5 text-luxury-gold absolute" />
       )}
     </div>
+  );
+}
+
+// ============== ROW DESCRIPTOR BADGES ==============
+//
+// Visual language is intentionally aligned with admin's overview and
+// partner's dashboard recent-bookings so the same booking reads the
+// same way wherever an internal user encounters it:
+//   • Violet ⏱ HOURLY chip with hours suffix
+//   • Teal → ONE_WAY chip
+//   • Sky 📍 city chip (HOURLY only — one-way carries city in its
+//     implicit route)
+//   • Neutral 🚗 vehicle class chip (vendor needs to know which of
+//     their classes is needed)
+//
+// Deliberately NO source/partner badge here — vendor-facing UI is
+// kept blind to booking origin per the partner ↔ vendor isolation
+// rule. Vendor sees the booking purely as their job: who's riding,
+// what class, where, when, how much they get paid.
+
+const CITY_LABEL_VENDOR: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+const VEHICLE_CLASS_LABEL_VENDOR: Record<string, string> = {
+  ECONOMY_SEDAN: "Economy",
+  BUSINESS_SEDAN: "Business",
+  FIRST_CLASS: "First Class",
+  BUSINESS_SUV: "Business SUV",
+  HIACE: "Hiace",
+  COASTER: "Coaster",
+  KING_LONG: "King Long",
+  ELECTRIC: "Electric",
+};
+
+function MiniTripTypeBadgeVendor({
+  tripType,
+  hours,
+}: {
+  tripType: string;
+  hours: number | null;
+}) {
+  const isHourly = tripType === "HOURLY";
+  const label = isHourly ? (hours ? `${hours}h` : "Hourly") : "One Way";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${
+        isHourly
+          ? "bg-violet-500/10 text-violet-400 border-violet-500/20"
+          : "bg-teal-500/10 text-teal-400 border-teal-500/20"
+      }`}
+    >
+      {isHourly ? (
+        <Clock className="w-2.5 h-2.5" />
+      ) : (
+        <ArrowRight className="w-2.5 h-2.5" />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function MiniCityBadgeVendor({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-sky-500/10 text-sky-300 border-sky-500/20 whitespace-nowrap">
+      <MapPin className="w-2.5 h-2.5" />
+      {CITY_LABEL_VENDOR[city] || city}
+    </span>
+  );
+}
+
+function MiniVehicleClassBadgeVendor({
+  vehicleClass,
+}: {
+  vehicleClass: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-neutral-700/40 text-gray-300 border-neutral-600/40 whitespace-nowrap">
+      <Car className="w-2.5 h-2.5" />
+      {VEHICLE_CLASS_LABEL_VENDOR[vehicleClass] || vehicleClass}
+    </span>
   );
 }
 
@@ -617,48 +721,90 @@ export default function VendorDashboard({
               Recent Bookings
             </h3>
             <button
-              onClick={() => onTabChange("bookings")}
+              onClick={() => onTabChange("bookings", "all")}
               className="text-xs lg:text-sm text-luxury-gold hover:underline flex items-center gap-1"
             >
               View all <ChevronRight className="w-4 h-4" />
             </button>
           </div>
           <div className="space-y-3">
-            {recentBookings.slice(0, 4).map((booking) => (
-              <div
-                key={booking.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-neutral-800/50 rounded-lg gap-2 sm:gap-4"
-              >
-                <div className="flex items-center gap-3 sm:gap-4">
-                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-luxury-gold/10 flex items-center justify-center flex-shrink-0">
-                    <Car className="w-4 h-4 sm:w-5 sm:h-5 text-luxury-gold" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-white">
-                      {booking.bookingRef}
-                    </p>
-                    <p className="text-xs text-gray-400 flex items-center gap-1">
-                      <MapPin className="w-3 h-3 flex-shrink-0" />
-                      <span className="truncate">
-                        {booking.route ||
-                          `${booking.pickupAddress} → ${booking.dropoffAddress}`}
+            {recentBookings.slice(0, 4).map((booking) => {
+              const isHourly = booking.tripType === "HOURLY";
+              // Vendor headline figure prefers payout (what they
+              // earn) over totalPrice (what the customer paid).
+              // Fall through to totalPrice if payout isn't set
+              // yet (booking still in PENDING and never offered).
+              const headlineAmount =
+                booking.vendorPayoutAmount ?? booking.totalPrice;
+              const amountLabel = booking.vendorPayoutAmount
+                ? "Payout"
+                : "Total";
+              return (
+                <div
+                  key={booking.id}
+                  className="p-3 bg-neutral-800/50 rounded-lg flex flex-col gap-2"
+                >
+                  {/* Top row — ref + descriptor badges + amount.
+                      The badges sit next to the ref so the eye picks
+                      up trip type + city + class in one glance. */}
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                      <span className="text-sm font-medium text-white font-mono">
+                        {booking.bookingRef}
                       </span>
+                      <MiniTripTypeBadgeVendor
+                        tripType={booking.tripType}
+                        hours={booking.hours}
+                      />
+                      {isHourly && <MiniCityBadgeVendor city={booking.city} />}
+                      <MiniVehicleClassBadgeVendor
+                        vehicleClass={booking.vehicleClass}
+                      />
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-sm font-semibold text-luxury-gold">
+                        SAR {Number(headlineAmount).toLocaleString()}
+                      </p>
+                      <p className="text-[10px] text-gray-500">{amountLabel}</p>
+                    </div>
+                  </div>
+
+                  {/* Guest + route line. HOURLY shows pickup only
+                      (no fixed drop-off); ONE_WAY shows the route
+                      string. Same logic admin and partner apply so
+                      the row reads the same way across portals. */}
+                  <div className="flex items-start gap-2 text-xs text-gray-400">
+                    <MapPin className="w-3 h-3 flex-shrink-0 mt-0.5 text-green-400" />
+                    <span className="truncate min-w-0 flex-1">
+                      <span className="text-gray-300">{booking.guestName}</span>
+                      <span className="text-gray-500"> · </span>
+                      {isHourly
+                        ? booking.pickupAddress
+                        : booking.route ||
+                          `${booking.pickupAddress} → ${booking.dropoffAddress}`}
+                    </span>
+                  </div>
+
+                  {/* Footer — date/time on the left, status pill on
+                      the right. Date format intentionally short so
+                      the row stays one-line on most viewports. */}
+                  <div className="flex items-center justify-between pt-1 border-t border-neutral-700/50">
+                    <p className="text-[11px] text-gray-500">
+                      {new Date(booking.tripDate).toLocaleDateString("en-SA", {
+                        month: "short",
+                        day: "numeric",
+                      })}{" "}
+                      at {booking.tripTime}
                     </p>
+                    <span
+                      className={`inline-block px-2 py-0.5 text-[10px] rounded-full border ${getStatusColor(booking.status)}`}
+                    >
+                      {formatStatus(booking.status)}
+                    </span>
                   </div>
                 </div>
-                <div className="flex items-center justify-between sm:block sm:text-right pl-12 sm:pl-0">
-                  <p className="text-xs text-gray-400">
-                    {new Date(booking.tripDate).toLocaleDateString()} at{" "}
-                    {booking.tripTime}
-                  </p>
-                  <span
-                    className={`inline-block mt-0 sm:mt-1 px-2 py-0.5 text-xs rounded-full border ${getStatusColor(booking.status)}`}
-                  >
-                    {formatStatus(booking.status)}
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {recentBookings.length === 0 && (
               <Empty className="py-8 border border-dashed border-neutral-700 rounded-lg">
                 <EmptyHeader>

@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/partner/dashboard.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/partner/dashboard.controller.ts
 // Partner Portal — Dashboard
 // ============================================
@@ -100,9 +103,34 @@ export const getDashboardSummary = asyncWrapper(
       },
     });
 
-    // ---- Tile 2: Monthly Rides + 4-month trend ----
-    // Current month + previous 4 months = 5 months total
-    const monthlyRideCounts: { month: string; count: number }[] = [];
+    // ---- Tile 2: Rides Completed (this month) + 4-month dual trend ----
+    //
+    // Switched from creation-based to completion-based in accordance
+    // with how service businesses universally account for activity:
+    // hotels report nights stayed, airlines report flights flown,
+    // chauffeur platforms report rides delivered. A booking generated
+    // today and cancelled tomorrow contributed zero service hours;
+    // counting it inflates the month and misrepresents real workload.
+    //
+    // Slice rules:
+    //   • "Completed" = `tripDate IN month AND status = COMPLETED`.
+    //     We anchor on tripDate (not createdAt) because the operational
+    //     fact is when the ride actually happened, not when the partner
+    //     submitted the request. A booking created in June for an
+    //     August trip belongs to August's completions.
+    //   • "Created" = `createdAt IN month`, any status. Surfaces
+    //     demand-side activity alongside delivery so the trend chart
+    //     can show both lines and partners can spot a widening gap
+    //     between bookings made and bookings delivered (the implicit
+    //     cancellation/no-show signal).
+    //
+    // The percentChange figure is computed on completions — that's
+    // the headline metric. Created counts are supplemental.
+    const monthlyRideCounts: {
+      month: string;
+      completed: number;
+      created: number;
+    }[] = [];
 
     for (let i = 0; i < 5; i++) {
       const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -119,19 +147,27 @@ export const getDashboardSummary = asyncWrapper(
         year: "numeric",
       });
 
-      const count = await prisma.booking.count({
-        where: {
-          partnerId: partner.id,
-          createdAt: { gte: monthStart, lte: monthEnd },
-          status: { notIn: ["CANCELLED"] },
-        },
-      });
+      const [completed, created] = await Promise.all([
+        prisma.booking.count({
+          where: {
+            partnerId: partner.id,
+            tripDate: { gte: monthStart, lte: monthEnd },
+            status: "COMPLETED",
+          },
+        }),
+        prisma.booking.count({
+          where: {
+            partnerId: partner.id,
+            createdAt: { gte: monthStart, lte: monthEnd },
+          },
+        }),
+      ]);
 
-      monthlyRideCounts.push({ month: monthLabel, count });
+      monthlyRideCounts.push({ month: monthLabel, completed, created });
     }
 
-    const currentMonthRides = monthlyRideCounts[0].count;
-    const previousMonthRides = monthlyRideCounts[1].count;
+    const currentMonthRides = monthlyRideCounts[0].completed;
+    const previousMonthRides = monthlyRideCounts[1].completed;
     const percentChange =
       previousMonthRides > 0
         ? Math.round(
@@ -141,6 +177,36 @@ export const getDashboardSummary = asyncWrapper(
         : currentMonthRides > 0
           ? 100
           : 0;
+
+    // ---- Tile 2b: Cancellation rate (this month) ----
+    //
+    // Surfaced separately because mixing it into the headline rides
+    // tile hides a quality signal. Denominator is bookings *created*
+    // this month (only created bookings can be cancelled); numerator
+    // is the subset that ended in CANCELLED. Anchored on createdAt so
+    // the rate reflects this month's intake behaviour, not historical
+    // cancellations of older bookings that happened to resolve this
+    // month. A widening cancellation rate is the partner's earliest
+    // warning of a vendor reliability or guest-side problem.
+    const [cancelledThisMonth, createdThisMonth] = await Promise.all([
+      prisma.booking.count({
+        where: {
+          partnerId: partner.id,
+          createdAt: { gte: currentMonthStart, lte: currentMonthEnd },
+          status: "CANCELLED",
+        },
+      }),
+      prisma.booking.count({
+        where: {
+          partnerId: partner.id,
+          createdAt: { gte: currentMonthStart, lte: currentMonthEnd },
+        },
+      }),
+    ]);
+    const cancellationRate =
+      createdThisMonth > 0
+        ? Math.round((cancelledThisMonth / createdThisMonth) * 100)
+        : 0;
 
     // ---- Tile 3: Total Payable (accumulative unpaid invoices) ----
     // "Unpaid" under the new model = status not yet PAID. Stage 2
@@ -246,10 +312,21 @@ export const getDashboardSummary = asyncWrapper(
       success: true,
       data: {
         activeBookings,
-        monthlyRides: {
+        // Renamed from `monthlyRides` to make the metric's basis
+        // explicit in the API. `current` = COMPLETED rides this
+        // month. Trend now carries both series so the frontend can
+        // render a dual-line chart (completed vs created).
+        ridesCompleted: {
           current: currentMonthRides,
           percentChange,
-          trend: monthlyRideCounts, // [current, prev1, prev2, prev3, prev4]
+          trend: monthlyRideCounts, // [{ month, completed, created }, ...]
+        },
+        // Companion metric: cancellation rate for this month.
+        // Separate tile so partners see quality alongside volume.
+        cancellationRate: {
+          rate: cancellationRate, // 0-100 integer percent
+          cancelled: cancelledThisMonth,
+          createdInMonth: createdThisMonth,
         },
         totalPayable: {
           amount: totalPayable,
@@ -341,6 +418,8 @@ export const getPartnerBookings = asyncWrapper(
           tripDate: true,
           tripTime: true,
           tripType: true,
+          hours: true,
+          hourlyDuration: true,
           city: true,
           vehicleClass: true,
           passengers: true,
@@ -656,12 +735,17 @@ export const getContractAndVehicleStats = asyncWrapper(
       }
     }
 
-    // Most used vehicle classes (from all partner bookings)
+    // Most used vehicle classes — counted from COMPLETED bookings
+    // only. A vehicle that was booked four times and cancelled four
+    // times was not "used" in any operational sense; counting it
+    // would mislead the partner about which class to invest in.
+    // Completion is the universal definition of "used" for service
+    // platforms.
     const vehicleUsage = await prisma.booking.groupBy({
       by: ["vehicleClass"],
       where: {
         partnerId: partner.id,
-        status: { notIn: ["CANCELLED"] },
+        status: "COMPLETED",
       },
       _count: { id: true },
       orderBy: { _count: { id: "desc" } },

@@ -1,7 +1,19 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/vendor/bookings.tsx
+// ============================================
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { vendorApi, ApiError } from "@/lib/api";
+import { proxiedImageUrl } from "@/lib/image-url";
+import {
+  type BookingShareInput,
+  buildCalendarUrl,
+  buildBookingMapsUrl,
+  buildWhatsAppUrl,
+  WhatsAppIcon,
+  formatBookingDate,
+} from "@/lib/booking-share";
 import {
   Search,
   Download,
@@ -24,6 +36,8 @@ import {
   Wrench,
   UserX,
   CarFront,
+  FileText,
+  Star,
 } from "lucide-react";
 import {
   Empty,
@@ -425,6 +439,168 @@ function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString();
 }
 
+// ============== PO DOWNLOAD ==============
+//
+// Fetches the rendered PO HTML from the vendor endpoint and opens it
+// in a new tab, then triggers the browser's print dialog so the user
+// can save to PDF or send to a printer natively. Same shape as the
+// admin and partner versions — the only difference is the API call
+// hits the vendor route, which the backend gates to bookings
+// assigned to this vendor and renders with "vendor" perspective
+// (partner section hidden, source tag suppressed).
+async function downloadPOWindow(bookingId: string): Promise<void> {
+  const res: any = await vendorApi.getBookingPO(bookingId);
+  const html = res?.data?.html;
+  const title = res?.data?.meta?.title || "Purchase Order";
+  if (!html) throw new Error("No PO content returned");
+  const win = window.open("", "_blank");
+  if (!win) {
+    throw new Error("Popup blocked — allow popups to download the PO");
+  }
+  win.document.title = title;
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  setTimeout(() => {
+    try {
+      win.focus();
+      win.print();
+    } catch {
+      /* user can still print manually via Cmd/Ctrl+P */
+    }
+  }, 300);
+}
+
+// ============== DRIVER QUICK-SHARE ==============
+//
+// Helpers for the WhatsApp + Calendar buttons in the chauffeur card.
+// The reusable bits (URL templates, date math, WhatsApp brand SVG,
+// phone normalization) live in @/lib/booking-share so the partner
+// portal can use the same code. The portal-specific piece — what
+// the message actually SAYS — stays here so vendor's driver-facing
+// dispatch brief can diverge from partner's customer-facing
+// confirmation as the brands evolve. Tone: operational, factual,
+// minimal — driver is reading on a phone between trips.
+
+function bookingToShareInput(b: BookingDetailData): BookingShareInput {
+  // Normalize vendor's BookingDetailData (`assignedDriver`,
+  // `assignedVehicle`) into the shape booking-share expects (`driver`,
+  // `vehicle`). One adapter at the call site keeps the shared lib
+  // unaware of vendor's vs partner's field naming.
+  return {
+    bookingRef: b.bookingRef,
+    customer: { name: b.customer.name, phone: b.customer.phone },
+    trip: {
+      tripType: b.trip.tripType,
+      tripDate: b.trip.tripDate,
+      tripTime: b.trip.tripTime,
+      hours: b.trip.hours,
+      pickupAddress: b.trip.pickupAddress,
+      pickupLat: b.trip.pickupLat,
+      pickupLng: b.trip.pickupLng,
+      dropoffAddress: b.trip.dropoffAddress,
+      dropoffLat: b.trip.dropoffLat,
+      dropoffLng: b.trip.dropoffLng,
+      flightNumber: b.trip.flightNumber,
+      terminalNo: b.trip.terminalNo,
+    },
+    vehicle: b.assignedVehicle
+      ? {
+          year: b.assignedVehicle.year,
+          make: b.assignedVehicle.make,
+          model: b.assignedVehicle.model,
+          plateNumber: b.assignedVehicle.plateNumber,
+          color: b.assignedVehicle.color,
+        }
+      : null,
+    driver: b.assignedDriver
+      ? { name: b.assignedDriver.name, phone: b.assignedDriver.phone }
+      : null,
+  };
+}
+
+function vendorCalendarUrl(b: BookingDetailData): string {
+  const input = bookingToShareInput(b);
+  return buildCalendarUrl(input, {
+    title: `Booking ${b.bookingRef} — ${b.customer.name}`,
+    extraDescriptionLines: [
+      b.assignedVehicle
+        ? `Vehicle: ${b.assignedVehicle.year} ${b.assignedVehicle.make} ${b.assignedVehicle.model} (${b.assignedVehicle.plateNumber})`
+        : "",
+      b.assignedDriver ? `Driver: ${b.assignedDriver.name}` : "",
+      `Guest: ${b.customer.name}${b.customer.phone ? " · " + b.customer.phone : ""}`,
+    ],
+  });
+}
+
+function buildDriverMessage(b: BookingDetailData): string {
+  const isHourly = b.trip.tripType === "HOURLY";
+  const tripDate = formatBookingDate(b.trip.tripDate);
+  const input = bookingToShareInput(b);
+  // One maps link covers the whole trip — directions origin →
+  // destination for ONE_WAY, point lookup for HOURLY. Two separate
+  // links (one for pickup, one for drop-off) read as noisy and
+  // forced the driver to mentally piece a route together.
+  const tripMapsUrl = buildBookingMapsUrl(input.trip);
+  const calendarUrl = vendorCalendarUrl(b);
+
+  // Plain text, no emoji. Emoji boxes were rendering as `?` on many
+  // recipient devices; even when they rendered they read more
+  // festive than LuxDrive's brand wants for a dispatch handoff.
+  // All-caps section labels carry the hierarchy without depending
+  // on WhatsApp's inconsistent *bold* rendering. Only the title
+  // line uses *bold*, where the cost of inconsistent rendering is
+  // low (worst case: literal asterisks, still readable).
+  const lines: string[] = [
+    `*LuxDrive Dispatch — ${b.bookingRef}*`,
+    ``,
+    `GUEST`,
+    b.customer.name,
+  ];
+  if (b.customer.phone) lines.push(b.customer.phone);
+
+  lines.push(``, `SERVICE`);
+  const serviceDetail = isHourly
+    ? `By the Hour${b.trip.hours ? ` · ${b.trip.hours} hours` : ""}`
+    : `One Way`;
+  lines.push(`${serviceDetail} · ${tripDate} · ${b.trip.tripTime || "—"}`);
+
+  lines.push(``, `PICKUP`, b.trip.pickupAddress);
+
+  if (!isHourly && b.trip.dropoffAddress) {
+    lines.push(``, `DROP-OFF`, b.trip.dropoffAddress);
+    // For ONE_WAY: single ROUTE section below both endpoints with
+    // the directions URL. Reads like a dispatch sheet — locations
+    // first, then "here's the route" — instead of two competing
+    // map links.
+    lines.push(``, `ROUTE`, tripMapsUrl);
+  } else {
+    // HOURLY: keep the pickup map link inline since there's no
+    // drop-off to relate it to. Driver clicks once for the point.
+    lines.push(tripMapsUrl);
+  }
+
+  if (b.trip.flightNumber) {
+    lines.push(``, `FLIGHT`);
+    lines.push(
+      `${b.trip.flightNumber}${b.trip.terminalNo ? ` · Terminal ${b.trip.terminalNo}` : ""}`,
+    );
+  }
+
+  if (b.assignedVehicle) {
+    lines.push(``, `VEHICLE`);
+    lines.push(
+      `${b.assignedVehicle.year} ${b.assignedVehicle.make} ${b.assignedVehicle.model}${b.assignedVehicle.color ? ` — ${b.assignedVehicle.color}` : ""}`,
+    );
+    lines.push(`Plate ${b.assignedVehicle.plateNumber}`);
+  }
+
+  lines.push(``, `ADD TO CALENDAR`, calendarUrl);
+  lines.push(``, `—`, `LuxDrive`);
+
+  return lines.join("\n");
+}
+
 // ============== BADGE COMPONENTS ==============
 
 function VehicleClassBadge({ vehicleClass }: { vehicleClass: string }) {
@@ -469,6 +645,25 @@ function TripTypeBadge({
   );
 }
 
+// City chip — HOURLY only (one-way's city is implicit in its route).
+// Same sky-blue language used in admin overview + partner dashboard,
+// so the same booking reads the same way wherever it appears.
+const CITY_LABEL: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+function CityBadge({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-md border bg-sky-500/10 text-sky-300 border-sky-500/20">
+      <MapPin className="w-3 h-3" />
+      {CITY_LABEL[city] || city}
+    </span>
+  );
+}
+
 // ============== DRIVER AVATAR ==============
 // Three visual states for the driver's photo in the booking detail sidebar:
 //   - loading: spinner while the signed GCS URL is being fetched by the browser
@@ -508,10 +703,379 @@ function DriverAvatar({ photoUrl }: { photoUrl: string | null }) {
   );
 }
 
+// 64px gold-bordered driver photo for the booking detail's
+// chauffeur card. Distinct from DriverAvatar above (which is the
+// 48px utility version used in row-level UI). This one ships with
+// shadow + thicker border to read as a portrait, not a thumbnail —
+// matches the partner portal's DriverPhoto exactly so the same
+// booking presents the same way across portals. Mid-fetch fallback
+// is the User icon rather than a spinner, since GCS signed URLs
+// typically resolve before the user notices.
+function DriverPhotoLarge({
+  photoUrl,
+  name,
+}: {
+  photoUrl: string | null;
+  name: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  // proxiedImageUrl: null → null, GCS signed URL → proxy URL,
+  // anything else → unchanged. Resize hint of 64 saves bandwidth
+  // for an avatar that renders at exactly that size.
+  const url = !failed ? proxiedImageUrl(photoUrl, 64) : null;
+
+  return (
+    <div className="w-16 h-16 rounded-full border-2 border-luxury-gold/40 bg-luxury-gold/10 shadow-lg shadow-luxury-gold/10 overflow-hidden flex-shrink-0 flex items-center justify-center">
+      {url ? (
+        <img
+          src={url}
+          alt={name}
+          className="w-full h-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <User className="w-8 h-8 text-luxury-gold" />
+      )}
+    </div>
+  );
+}
+
+// Map vehicle color names to CSS values. Three-tier lookup so user
+// data quality doesn't break the visual:
+//   1. Exact match on the lowercased name ("pearl white" → #f7f4ec)
+//   2. Substring keyword match — catches typos and compound names
+//      ("super whitee" → contains "white" → uses white's value,
+//      "midnight black metallic" → contains "black")
+//   3. Neutral gray fallback so the swatch is always visible,
+//      never an invisible/transparent empty circle
+// Same table the partner portal uses; could be hoisted into a
+// shared lib later if a third portal needs it.
+function vehicleColorToCss(name: string): string {
+  const map: Record<string, string> = {
+    white: "#f5f5f5",
+    "pearl white": "#f7f4ec",
+    black: "#1a1a1a",
+    "obsidian black": "#0a0a0a",
+    silver: "#c5c5c5",
+    "metallic silver": "#b8b8b8",
+    gray: "#808080",
+    grey: "#808080",
+    "space gray": "#5a5a5a",
+    red: "#b91c1c",
+    "ruby red": "#9b1c1c",
+    blue: "#1d4ed8",
+    "navy blue": "#1e3a8a",
+    navy: "#1e3a8a",
+    gold: "#c9a961",
+    champagne: "#e3d19c",
+    beige: "#d9c5a0",
+    brown: "#78350f",
+    green: "#15803d",
+  };
+  const lower = (name || "").toLowerCase().trim();
+  if (map[lower]) return map[lower];
+  for (const [key, value] of Object.entries(map)) {
+    if (lower.includes(key)) return value;
+  }
+  return "#737373";
+}
+
+// ============== BOOKING MAP ==============
+//
+// Google Static Map showing the trip's location(s). Vendor copy of
+// the same component admin and partner views use — dark map style
+// matching the panel chrome, green P pin at pickup, red D pin at
+// drop-off (ONE_WAY only) with faint connector line, single P pin
+// for HOURLY since there's no fixed destination.
+//
+// Click anywhere on the map opens Google Maps in a new tab — useful
+// for vendors planning the route before accepting the offer:
+//   ONE_WAY → /maps/dir/?origin=...&destination=...  (directions)
+//   HOURLY  → /maps/search/?query=lat,lng            (point lookup)
+// Returns null if the API key isn't configured or coords missing,
+// so the rest of the detail sidebar keeps rendering cleanly.
+
+function BookingMap({
+  tripType,
+  pickupLat,
+  pickupLng,
+  dropoffLat,
+  dropoffLng,
+}: {
+  tripType: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  dropoffLat: number | null;
+  dropoffLng: number | null;
+}) {
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!apiKey || pickupLat == null || pickupLng == null) return null;
+
+  const isHourly = tripType === "HOURLY";
+  const hasDropoff = !isHourly && dropoffLat != null && dropoffLng != null;
+
+  const darkStyle = [
+    "feature:all|element:geometry|color:0x1f2937",
+    "feature:all|element:labels.text.fill|color:0x9ca3af",
+    "feature:all|element:labels.text.stroke|color:0x111827",
+    "feature:water|element:geometry|color:0x0f172a",
+    "feature:road|element:geometry|color:0x374151",
+    "feature:road.highway|element:geometry|color:0x4b5563",
+    "feature:road|element:labels.text.fill|color:0xd1d5db",
+    "feature:poi|element:geometry|color:0x1f2937",
+    "feature:poi|element:labels|visibility:off",
+    "feature:transit|visibility:off",
+    "feature:administrative|element:geometry.stroke|color:0x374151",
+  ]
+    .map((s) => `&style=${encodeURIComponent(s)}`)
+    .join("");
+
+  const pickupMarker = `&markers=${encodeURIComponent(
+    `color:0x10b981|label:P|${pickupLat},${pickupLng}`,
+  )}`;
+
+  let dropoffMarker = "";
+  let path = "";
+  if (hasDropoff) {
+    dropoffMarker = `&markers=${encodeURIComponent(
+      `color:0xef4444|label:D|${dropoffLat},${dropoffLng}`,
+    )}`;
+    // 50% alpha keeps the connector line subtle — viewers shouldn't
+    // read it as an actual driving route, just a "these two endpoints
+    // belong together" cue.
+    path = `&path=${encodeURIComponent(
+      `color:0x14b8a680|weight:4|${pickupLat},${pickupLng}|${dropoffLat},${dropoffLng}`,
+    )}`;
+  }
+
+  const url =
+    `https://maps.googleapis.com/maps/api/staticmap` +
+    `?size=600x220&scale=2&maptype=roadmap` +
+    pickupMarker +
+    dropoffMarker +
+    path +
+    darkStyle +
+    `&key=${apiKey}`;
+
+  // Single click target — uses the shared helper so the URL pattern
+  // stays in lockstep with what the WhatsApp message links to. For
+  // ONE_WAY: a Directions URL (origin → destination). For HOURLY:
+  // a single point lookup at pickup.
+  const externalUrl = buildBookingMapsUrl({
+    tripType,
+    pickupLat,
+    pickupLng,
+    dropoffLat,
+    dropoffLng,
+  });
+
+  return (
+    <a
+      href={externalUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block rounded-lg overflow-hidden border border-neutral-700 bg-neutral-950 hover:border-luxury-gold/40 transition-colors group relative"
+      title={
+        hasDropoff
+          ? "Open route in Google Maps"
+          : "Open pickup location in Google Maps"
+      }
+    >
+      <img
+        src={url}
+        alt={hasDropoff ? "Pickup and drop-off locations" : "Pickup location"}
+        className="w-full h-auto block"
+        loading="lazy"
+      />
+      <div className="absolute bottom-2 right-2 px-2 py-1 rounded-md bg-black/70 border border-white/10 text-[11px] text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 backdrop-blur-sm">
+        <ChevronRight className="w-3 h-3" />
+        {hasDropoff ? "View route in Google Maps" : "View on Google Maps"}
+      </div>
+    </a>
+  );
+}
+
+// ============== SERVICE DAY TIMELINE ==============
+//
+// 24-hour strip showing where the booked window sits in the day.
+// HOURLY-only. The map shows WHERE, the timeline shows WHEN — and
+// crucially, *when in the day* (early morning vs evening vs
+// overnight). Handles midnight wraparound by rendering two violet
+// bars with a "Spans midnight" caption.
+
+function ServiceDayTimeline({
+  startTime,
+  hours,
+}: {
+  startTime: string;
+  hours: number | null;
+}) {
+  if (!startTime || !hours || hours <= 0) return null;
+
+  const [hhStr, mmStr] = startTime.split(":");
+  const hh = parseInt(hhStr, 10);
+  const mm = parseInt(mmStr, 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+
+  const startMinutes = hh * 60 + mm;
+  const endMinutes = startMinutes + hours * 60;
+  const wrapsMidnight = endMinutes > 24 * 60;
+
+  const VB_W = 480;
+  const VB_H = 72;
+  const AXIS_LEFT = 28;
+  const AXIS_RIGHT = 460;
+  const AXIS_Y = 44;
+  const BAR_H = 14;
+  const AXIS_LEN = AXIS_RIGHT - AXIS_LEFT;
+
+  const minuteToX = (m: number) => {
+    const clamped = Math.max(0, Math.min(1440, m));
+    return AXIS_LEFT + (clamped / 1440) * AXIS_LEN;
+  };
+
+  const startX = minuteToX(startMinutes);
+  const segment1EndX = wrapsMidnight ? minuteToX(1440) : minuteToX(endMinutes);
+  const segment2EndX = wrapsMidnight ? minuteToX(endMinutes - 1440) : AXIS_LEFT;
+  const segment2Width = wrapsMidnight ? segment2EndX - AXIS_LEFT : 0;
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const startLabel = `${pad(hh)}:${pad(mm)}`;
+  const endTotalMin = endMinutes % 1440;
+  const endLabel = `${pad(Math.floor(endTotalMin / 60))}:${pad(endTotalMin % 60)}`;
+
+  const startAnchor: "start" | "middle" | "end" =
+    startX > VB_W * 0.8 ? "end" : startX < VB_W * 0.1 ? "start" : "middle";
+  const endX = wrapsMidnight ? segment2EndX : segment1EndX;
+  const endAnchor: "start" | "middle" | "end" =
+    endX > VB_W * 0.9 ? "end" : endX < VB_W * 0.1 ? "start" : "middle";
+
+  const hourTicks = [0, 6, 12, 18, 24];
+
+  return (
+    <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <Clock className="w-3.5 h-3.5 text-violet-400" />
+          <p className="text-xs uppercase tracking-wide text-violet-300">
+            Service Day
+          </p>
+        </div>
+        {wrapsMidnight && (
+          <span className="text-[10px] text-violet-300/70 italic">
+            Spans midnight
+          </span>
+        )}
+      </div>
+      <svg
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        className="w-full h-auto"
+        role="img"
+        aria-label={`Booking from ${startLabel} for ${hours} hours${wrapsMidnight ? ", spans midnight" : ""}`}
+      >
+        <line
+          x1={AXIS_LEFT}
+          y1={AXIS_Y + BAR_H / 2}
+          x2={AXIS_RIGHT}
+          y2={AXIS_Y + BAR_H / 2}
+          stroke="#3f3f46"
+          strokeWidth="1"
+        />
+        {hourTicks.map((h) => {
+          const x = minuteToX(h * 60);
+          return (
+            <g key={h}>
+              <line
+                x1={x}
+                y1={AXIS_Y + BAR_H / 2 - 3}
+                x2={x}
+                y2={AXIS_Y + BAR_H / 2 + 3}
+                stroke="#52525b"
+                strokeWidth="1"
+              />
+              <text
+                x={x}
+                y={AXIS_Y + BAR_H + 14}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#6b7280"
+              >
+                {h === 24 ? "00" : pad(h)}
+              </text>
+            </g>
+          );
+        })}
+        <rect
+          x={startX}
+          y={AXIS_Y}
+          width={Math.max(2, segment1EndX - startX)}
+          height={BAR_H}
+          rx={3}
+          fill="#8b5cf6"
+        />
+        {wrapsMidnight && segment2Width > 0 && (
+          <rect
+            x={AXIS_LEFT}
+            y={AXIS_Y}
+            width={Math.max(2, segment2Width)}
+            height={BAR_H}
+            rx={3}
+            fill="#8b5cf6"
+            opacity={0.6}
+          />
+        )}
+        <line
+          x1={startX}
+          y1={AXIS_Y - 6}
+          x2={startX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={startX}
+          y={AXIS_Y - 9}
+          textAnchor={startAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {startLabel}
+        </text>
+        <line
+          x1={endX}
+          y1={AXIS_Y - 6}
+          x2={endX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={endX}
+          y={AXIS_Y - 9}
+          textAnchor={endAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {endLabel}
+          {wrapsMidnight ? " +1d" : ""}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
 // ============== MAIN COMPONENT ==============
 
 export default function VendorBookings({
-  initialSubTab = "new_requests",
+  // Default to "all" — matches the parent page's bookingSubTab
+  // default. Specific callers (the dashboard's urgent banner) still
+  // pass "new" explicitly to land on New Requests; leaving the
+  // fallback as "new" was misleading because most non-banner entry
+  // points (sidebar click, View All link) don't want the New
+  // Requests slice.
+  initialSubTab = "all",
   initialDateFilter,
   refreshBadges,
   vendorStatus,
@@ -897,6 +1461,30 @@ export default function VendorBookings({
   const renderRoute = (b: Booking) =>
     b.route || `${b.pickupAddress} → ${b.dropoffAddress}`;
 
+  // PO icon button — appears alongside every row's state-specific
+  // actions. Reusing it across branches (offer / confirmed / in-
+  // progress / default) keeps each branch focused on the state's
+  // primary action and gives the vendor one consistent place to
+  // grab the PO regardless of state. Errors surface as toasts; the
+  // PO opens in a new tab on success.
+  const poButton = (bookingId: string) => (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await downloadPOWindow(bookingId);
+        } catch (err: any) {
+          showNotification("error", err?.message || "Could not open the PO");
+        }
+      }}
+      title="Download PO"
+      aria-label="Download Purchase Order"
+      className="p-1.5 rounded-lg text-gray-400 hover:text-luxury-gold hover:bg-neutral-700/50 transition-colors flex-shrink-0"
+    >
+      <FileText className="w-3.5 h-3.5" />
+    </button>
+  );
+
   const renderActions = (booking: Booking) => {
     const isActionLoading = actionLoading === booking.id;
 
@@ -913,7 +1501,7 @@ export default function VendorBookings({
 
     if (showOfferActions) {
       return (
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <button
             onClick={() => handleOpenReject(booking)}
             className="px-3 py-1.5 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg text-xs hover:bg-red-500/20 transition-colors"
@@ -937,13 +1525,14 @@ export default function VendorBookings({
             {!canAcceptBookings && <ShieldAlert className="w-3 h-3" />}
             Accept
           </button>
+          {poButton(booking.id)}
         </div>
       );
     }
 
     if (booking.status === "CONFIRMED") {
       return (
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <button
             onClick={() => handleStartTrip(booking.id)}
             disabled={isActionLoading}
@@ -955,33 +1544,40 @@ export default function VendorBookings({
               "Start Trip"
             )}
           </button>
+          {poButton(booking.id)}
         </div>
       );
     }
 
     if (booking.status === "IN_PROGRESS") {
       return (
-        <button
-          onClick={() => handleCompleteTrip(booking.id)}
-          disabled={isActionLoading}
-          className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/30 rounded-lg text-xs hover:bg-green-500/20 transition-colors disabled:opacity-50"
-        >
-          {isActionLoading ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            "Complete"
-          )}
-        </button>
+        <div className="flex gap-2 items-center">
+          <button
+            onClick={() => handleCompleteTrip(booking.id)}
+            disabled={isActionLoading}
+            className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/30 rounded-lg text-xs hover:bg-green-500/20 transition-colors disabled:opacity-50"
+          >
+            {isActionLoading ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              "Complete"
+            )}
+          </button>
+          {poButton(booking.id)}
+        </div>
       );
     }
 
     return (
-      <button
-        onClick={() => handleViewDetail(booking.id)}
-        className="text-xs text-luxury-gold hover:underline"
-      >
-        View Details
-      </button>
+      <div className="flex gap-2 items-center">
+        <button
+          onClick={() => handleViewDetail(booking.id)}
+          className="text-xs text-luxury-gold hover:underline"
+        >
+          View Details
+        </button>
+        {poButton(booking.id)}
+      </div>
     );
   };
 
@@ -1191,6 +1787,9 @@ export default function VendorBookings({
                     hours={booking.hours}
                     hourlyDuration={booking.hourlyDuration}
                   />
+                  {booking.tripType === "HOURLY" && (
+                    <CityBadge city={booking.city} />
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 text-xs text-gray-400 mb-2">
@@ -1290,6 +1889,14 @@ export default function VendorBookings({
                             hours={booking.hours}
                             hourlyDuration={booking.hourlyDuration}
                           />
+                          {/* City chip only for HOURLY — one-way rows
+                              carry their city implicitly via the route
+                              cell, so a separate chip would be
+                              redundant. Matches admin overview + partner
+                              dashboard treatment. */}
+                          {booking.tripType === "HOURLY" && (
+                            <CityBadge city={booking.city} />
+                          )}
                           <VehicleClassBadge
                             vehicleClass={booking.vehicleClass}
                           />
@@ -1454,16 +2061,40 @@ export default function VendorBookings({
                   {selectedBooking.bookingRef}
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  setSelectedBooking(null);
-                  setShowRejectModal(false);
-                  setRejectingBooking(null);
-                }}
-                className="p-1 hover:bg-neutral-800 rounded"
-              >
-                <X className="w-5 h-5 text-gray-400" />
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Download PO — also exposed inline on each row, but
+                    surfaced prominently here since the detail panel
+                    is where vendors spend the most time reviewing a
+                    booking. Opens in a new tab, triggers print
+                    dialog automatically. */}
+                <button
+                  onClick={async () => {
+                    try {
+                      await downloadPOWindow(selectedBooking.id);
+                    } catch (err: any) {
+                      showNotification(
+                        "error",
+                        err?.message || "Could not open the PO",
+                      );
+                    }
+                  }}
+                  title="Download Purchase Order"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 text-gray-300 hover:text-luxury-gold hover:bg-neutral-700 border border-neutral-700 rounded-lg text-xs transition-colors"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  PO
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedBooking(null);
+                    setShowRejectModal(false);
+                    setRejectingBooking(null);
+                  }}
+                  className="p-1 hover:bg-neutral-800 rounded"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
             </div>
             <div className="p-5 space-y-5">
               <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1538,76 +2169,199 @@ export default function VendorBookings({
                 </div>
               </div>
 
-              <div className="p-4 bg-neutral-800/50 rounded-lg space-y-4">
-                <p className="text-xs text-gray-500 uppercase tracking-wide">
-                  Trip Details
-                </p>
-
-                <div className="flex items-start gap-3">
-                  <div className="w-7 h-7 bg-green-500/10 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <MapPin className="w-4 h-4 text-green-400" />
+              {/* Trip details — trip-type-aware
+                  ────────────────────────────────────────────────
+                  Mirrors the structured cards used in admin and
+                  partner detail panels. HOURLY → violet Service
+                  Window with Duration/Starts/Ends-approx grid;
+                  ONE_WAY → teal Trip Route with pickup → dots →
+                  drop-off. Both pair with a static map below;
+                  HOURLY also gets the Service Day timeline so
+                  the vendor sees *when* the booking sits in the
+                  day at a glance. */}
+              {selectedBooking.trip.tripType === "HOURLY" ? (
+                (() => {
+                  // Best-effort end-of-service computation. Failures
+                  // (malformed time, edge math) just suppress the
+                  // end-time line rather than throw.
+                  let approxEnd: string | null = null;
+                  try {
+                    if (
+                      selectedBooking.trip.hours &&
+                      selectedBooking.trip.tripTime
+                    ) {
+                      const [hh, mm] = selectedBooking.trip.tripTime
+                        .split(":")
+                        .map((n) => parseInt(n, 10));
+                      if (Number.isFinite(hh) && Number.isFinite(mm)) {
+                        const start = new Date();
+                        start.setHours(hh, mm, 0, 0);
+                        const end = new Date(
+                          start.getTime() +
+                            selectedBooking.trip.hours * 3_600_000,
+                        );
+                        const pad = (n: number) => String(n).padStart(2, "0");
+                        const sameDay =
+                          end.getDate() === start.getDate() &&
+                          end.getMonth() === start.getMonth();
+                        approxEnd = `${pad(end.getHours())}:${pad(end.getMinutes())}${sameDay ? "" : " (next day)"}`;
+                      }
+                    }
+                  } catch {
+                    approxEnd = null;
+                  }
+                  return (
+                    <div className="space-y-3">
+                      <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Clock className="w-4 h-4 text-violet-400" />
+                          <p className="text-xs uppercase tracking-wide text-violet-300">
+                            Service Window
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                          <div>
+                            <p className="text-xs text-gray-500 mb-0.5">
+                              Duration
+                            </p>
+                            <p className="text-white font-medium">
+                              {selectedBooking.trip.hours
+                                ? `${selectedBooking.trip.hours} hours`
+                                : "By the Hour"}
+                            </p>
+                            {selectedBooking.trip.hourlyDuration &&
+                              selectedBooking.trip.hourlyDuration !==
+                                `${selectedBooking.trip.hours} hours` && (
+                                <p className="text-[11px] text-gray-500 mt-0.5">
+                                  {selectedBooking.trip.hourlyDuration}
+                                </p>
+                              )}
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500 mb-0.5">
+                              Starts
+                            </p>
+                            <p className="text-white font-medium">
+                              {selectedBooking.trip.tripTime || "—"}
+                            </p>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              {new Date(
+                                selectedBooking.trip.tripDate,
+                              ).toLocaleDateString("en-SA", {
+                                weekday: "short",
+                                month: "short",
+                                day: "numeric",
+                              })}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500 mb-0.5">
+                              Ends (approx.)
+                            </p>
+                            <p className="text-white font-medium">
+                              {approxEnd || "—"}
+                            </p>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              No fixed drop-off
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2 pt-3 border-t border-violet-500/15">
+                          <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-[11px] text-gray-500">Pickup</p>
+                            <p className="text-sm text-white">
+                              {selectedBooking.trip.pickupAddress}
+                            </p>
+                          </div>
+                        </div>
+                        {selectedBooking.trip.flightNumber && (
+                          <p className="text-xs text-gray-400">
+                            Flight: {selectedBooking.trip.flightNumber}
+                            {selectedBooking.trip.terminalNo
+                              ? ` · Terminal: ${selectedBooking.trip.terminalNo}`
+                              : ""}
+                          </p>
+                        )}
+                      </div>
+                      <ServiceDayTimeline
+                        startTime={selectedBooking.trip.tripTime || ""}
+                        hours={selectedBooking.trip.hours}
+                      />
+                      <BookingMap
+                        tripType="HOURLY"
+                        pickupLat={selectedBooking.trip.pickupLat}
+                        pickupLng={selectedBooking.trip.pickupLng}
+                        dropoffLat={null}
+                        dropoffLng={null}
+                      />
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <ArrowRight className="w-4 h-4 text-teal-400" />
+                      <p className="text-xs uppercase tracking-wide text-teal-300">
+                        Trip Route
+                      </p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] text-gray-500">Pickup</p>
+                        <p className="text-sm text-white">
+                          {selectedBooking.trip.pickupAddress}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 pl-1.5">
+                      <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                      <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                      <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] text-gray-500">Drop-off</p>
+                        <p className="text-sm text-white">
+                          {selectedBooking.trip.dropoffAddress}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="pt-3 border-t border-teal-500/15 flex items-center justify-between text-xs">
+                      <span className="text-gray-500">
+                        {new Date(
+                          selectedBooking.trip.tripDate,
+                        ).toLocaleDateString("en-SA", {
+                          weekday: "short",
+                          month: "short",
+                          day: "numeric",
+                        })}
+                      </span>
+                      <span className="text-white font-medium">
+                        {selectedBooking.trip.tripTime || "—"}
+                      </span>
+                    </div>
+                    {selectedBooking.trip.flightNumber && (
+                      <p className="text-xs text-gray-400">
+                        Flight: {selectedBooking.trip.flightNumber}
+                        {selectedBooking.trip.terminalNo
+                          ? ` · Terminal: ${selectedBooking.trip.terminalNo}`
+                          : ""}
+                      </p>
+                    )}
                   </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Pickup Location</p>
-                    <p className="text-sm text-white">
-                      {selectedBooking.trip.pickupAddress}
-                    </p>
-                  </div>
+                  <BookingMap
+                    tripType="ONE_WAY"
+                    pickupLat={selectedBooking.trip.pickupLat}
+                    pickupLng={selectedBooking.trip.pickupLng}
+                    dropoffLat={selectedBooking.trip.dropoffLat}
+                    dropoffLng={selectedBooking.trip.dropoffLng}
+                  />
                 </div>
-
-                {selectedBooking.trip.tripType === "ONE_WAY" && (
-                  <div className="flex items-start gap-3">
-                    <div className="w-7 h-7 bg-red-500/10 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <MapPin className="w-4 h-4 text-red-400" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500">Drop-off Location</p>
-                      <p className="text-sm text-white">
-                        {selectedBooking.trip.dropoffAddress}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {selectedBooking.trip.tripType === "HOURLY" && (
-                  <div className="flex items-start gap-3">
-                    <div className="w-7 h-7 bg-violet-500/10 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <Clock className="w-4 h-4 text-violet-400" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500">Duration</p>
-                      <p className="text-sm text-white">
-                        {selectedBooking.trip.hourlyDuration ||
-                          (selectedBooking.trip.hours
-                            ? `${selectedBooking.trip.hours} Hours`
-                            : "—")}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {selectedBooking.trip.route && (
-                  <div className="flex items-start gap-3">
-                    <div className="w-7 h-7 bg-luxury-gold/10 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <ArrowRight className="w-4 h-4 text-luxury-gold" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500">Route</p>
-                      <p className="text-sm text-white">
-                        {selectedBooking.trip.route}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {selectedBooking.trip.flightNumber && (
-                  <div className="text-xs text-gray-400">
-                    Flight: {selectedBooking.trip.flightNumber}
-                    {selectedBooking.trip.terminalNo &&
-                      ` · Terminal ${selectedBooking.trip.terminalNo}`}
-                  </div>
-                )}
-              </div>
+              )}
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -1675,55 +2429,198 @@ export default function VendorBookings({
                 )}
               </div>
 
+              {/* ============== CHAUFFEUR CARD ==============
+                  Premium two-section card for the assigned driver +
+                  vehicle. Same visual language as the partner
+                  portal's detail panel — gold-tinted border, driver
+                  section on top with gold gradient, vehicle section
+                  below, brand wordmark tile, plate number in
+                  monospace gold. The same booking should read the
+                  same way regardless of which portal opens it.
+
+                  Vendor-specific framing: labels say "Driver" and
+                  "Vehicle" rather than "Your Chauffeur" / "Your
+                  Vehicle" (partner-side, customer-facing language)
+                  — vendor is the *provider* of these assets, not
+                  the recipient, so the operational phrasing fits
+                  better. Empty states ("Driver Not Yet Assigned" /
+                  "Vehicle Not Yet Assigned") apply when the
+                  booking is in offer state — vendor hasn't
+                  accepted and picked their crew yet.
+
+                  We render this section *only* when the booking
+                  has progressed past offer state, OR when driver/
+                  vehicle is already present. In pure offer state
+                  the assignment is selected through the Accept
+                  flow's inline form, not pre-displayed here. */}
               {(selectedBooking.assignedDriver ||
-                selectedBooking.assignedVehicle) && (
-                <div className="p-4 bg-neutral-800/50 rounded-lg">
-                  <p className="text-xs text-gray-500 mb-3 uppercase tracking-wide">
-                    Assigned
-                  </p>
-                  <div className="space-y-3">
-                    {selectedBooking.assignedDriver && (
-                      <div className="flex items-center gap-3">
-                        <DriverAvatar
+                selectedBooking.assignedVehicle ||
+                !isOfferState(selectedBooking.status)) && (
+                <div className="rounded-xl overflow-hidden border border-luxury-gold/30 bg-gradient-to-br from-luxury-gold/[0.03] to-transparent">
+                  {/* ----- Driver section ----- */}
+                  <div className="p-4 bg-gradient-to-r from-luxury-gold/10 to-transparent border-b border-luxury-gold/10">
+                    <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
+                      Driver
+                    </p>
+                    {selectedBooking.assignedDriver ? (
+                      <div className="flex items-start gap-4">
+                        <DriverPhotoLarge
                           photoUrl={selectedBooking.assignedDriver.photoUrl}
+                          name={selectedBooking.assignedDriver.name}
                         />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-white truncate">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-base font-semibold text-white truncate">
                             {selectedBooking.assignedDriver.name}
-                          </p>
+                          </h4>
+                          {selectedBooking.assignedDriver.rating != null && (
+                            <div className="flex items-center gap-1 mt-0.5">
+                              <Star className="w-3.5 h-3.5 text-luxury-gold fill-luxury-gold" />
+                              <span className="text-xs text-luxury-gold font-medium">
+                                {Number(
+                                  selectedBooking.assignedDriver.rating,
+                                ).toFixed(1)}
+                              </span>
+                            </div>
+                          )}
                           {selectedBooking.assignedDriver.phone && (
                             <a
                               href={`tel:${selectedBooking.assignedDriver.phone}`}
-                              className="inline-flex items-center gap-1 text-xs text-luxury-gold hover:underline mt-0.5"
+                              className="inline-flex items-center gap-1.5 mt-2 text-sm text-gray-300 hover:text-luxury-gold transition-colors"
                             >
-                              <Phone className="w-3 h-3" />
+                              <Phone className="w-3.5 h-3.5" />
                               {selectedBooking.assignedDriver.phone}
                             </a>
                           )}
-                          {selectedBooking.assignedDriver.rating != null && (
-                            <p className="text-xs text-gray-400 mt-0.5">
-                              {Number(
-                                selectedBooking.assignedDriver.rating,
-                              ).toFixed(1)}
-                              ★
-                            </p>
-                          )}
+                          {/* Quick-share row — one tap from vendor
+                              to either (a) shoot the full booking
+                              brief to the driver's WhatsApp, or
+                              (b) drop the trip onto a Google
+                              Calendar. The WhatsApp message itself
+                              embeds the calendar link too, so the
+                              driver can add it to their calendar
+                              from inside the chat without the
+                              vendor doing anything extra.
+
+                              WhatsApp button only renders when a
+                              driver phone exists (no number → no
+                              wa.me target). Calendar always
+                              renders when a driver is assigned
+                              since it's based on the booking, not
+                              the driver. */}
+                          <div className="flex flex-wrap items-center gap-2 mt-3">
+                            {selectedBooking.assignedDriver.phone && (
+                              <a
+                                href={buildWhatsAppUrl(
+                                  selectedBooking.assignedDriver.phone,
+                                  buildDriverMessage(selectedBooking),
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[#25D366]/15 text-[#25D366] border border-[#25D366]/30 hover:bg-[#25D366]/25 transition-colors"
+                                title="Send full booking brief to driver on WhatsApp"
+                              >
+                                <WhatsAppIcon className="w-3.5 h-3.5" />
+                                WhatsApp
+                              </a>
+                            )}
+                            <a
+                              href={vendorCalendarUrl(selectedBooking)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-blue-500/10 text-blue-300 border border-blue-500/30 hover:bg-blue-500/20 transition-colors"
+                              title="Open Google Calendar with this booking pre-filled"
+                            >
+                              <Calendar className="w-3.5 h-3.5" />
+                              Add to Calendar
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 text-gray-400 py-2">
+                        <div className="w-12 h-12 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
+                          <User className="w-6 h-6 text-gray-500" />
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-300">
+                            Driver Not Yet Assigned
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Assign one of your drivers on acceptance
+                          </p>
                         </div>
                       </div>
                     )}
-                    {selectedBooking.assignedVehicle && (
-                      <div className="flex items-center gap-3">
-                        <Car className="w-4 h-4 text-luxury-gold" />
-                        <div>
-                          <p className="text-sm text-white">
+                  </div>
+
+                  {/* ----- Vehicle section ----- */}
+                  <div className="p-4">
+                    <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
+                      Vehicle
+                    </p>
+                    {selectedBooking.assignedVehicle ? (
+                      <div className="flex items-center gap-4">
+                        {/* Brand wordmark tile — make's first word
+                            in serif caps on a gold-tinted gradient.
+                            Feels closer to how luxury automotive
+                            brands present themselves than a clip-art
+                            car icon would. */}
+                        <div className="relative w-24 h-20 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-luxury-gold/20 via-luxury-gold/5 to-neutral-900 border border-luxury-gold/30 flex items-center justify-center">
+                          <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-transparent to-luxury-gold/10" />
+                          {selectedBooking.assignedVehicle.make?.trim() ? (
+                            <span
+                              className="relative font-serif text-base tracking-tight text-luxury-gold uppercase leading-none"
+                              style={{ letterSpacing: "-0.02em" }}
+                            >
+                              {selectedBooking.assignedVehicle.make
+                                .split(" ")[0]
+                                .slice(0, 8)}
+                            </span>
+                          ) : (
+                            <Car className="relative w-8 h-8 text-luxury-gold" />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-base font-semibold text-white">
+                            {selectedBooking.assignedVehicle.year}{" "}
                             {selectedBooking.assignedVehicle.make}{" "}
-                            {selectedBooking.assignedVehicle.model}{" "}
-                            {selectedBooking.assignedVehicle.year}
+                            {selectedBooking.assignedVehicle.model}
+                          </h4>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs">
+                            {selectedBooking.assignedVehicle.color && (
+                              <>
+                                <span className="flex items-center gap-1.5 text-gray-300">
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full border border-gray-500/50 shadow-inner"
+                                    style={{
+                                      backgroundColor: vehicleColorToCss(
+                                        selectedBooking.assignedVehicle.color,
+                                      ),
+                                    }}
+                                    aria-hidden
+                                  />
+                                  {selectedBooking.assignedVehicle.color}
+                                </span>
+                                <span className="text-gray-600">•</span>
+                              </>
+                            )}
+                            <span className="font-mono tracking-wider text-luxury-gold">
+                              {selectedBooking.assignedVehicle.plateNumber}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 text-gray-400 py-2">
+                        <div className="w-24 h-20 rounded-lg bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
+                          <Car className="w-7 h-7 text-gray-500" />
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-300">
+                            Vehicle Not Yet Assigned
                           </p>
-                          <p className="text-xs text-gray-400">
-                            {selectedBooking.assignedVehicle.plateNumber}
-                            {selectedBooking.assignedVehicle.color &&
-                              ` · ${selectedBooking.assignedVehicle.color}`}
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Pick a vehicle when accepting this booking
                           </p>
                         </div>
                       </div>

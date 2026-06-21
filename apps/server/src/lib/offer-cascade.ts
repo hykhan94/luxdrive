@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/lib/offer-cascade.ts
+// ============================================
+// ============================================
 // apps/server/src/lib/offer-cascade.ts
 //
 // Vendor eligibility + auto-cascade engine for the booking-offer
@@ -139,19 +142,35 @@ export async function findEligibleVendors(
     where: { bookingId, status: "REJECTED" },
     select: { vendorId: true },
   });
-  const rejectedVendorIds = [
-    ...new Set(priorRejections.map((r) => r.vendorId)),
+
+  // The vendor currently holding a PENDING offer (if any) is also
+  // excluded — they're not a candidate to *receive* an offer, they
+  // already have one. Without this filter the "Available Vendors" /
+  // override list would show the current offer-holder, which is
+  // both confusing (same vendor appears as an "alternative") and
+  // would cause the unique (bookingId, vendorId, attemptNumber)
+  // constraint to fail if admin clicked them.
+  const activePending = await prisma.bookingAssignmentOffer.findFirst({
+    where: { bookingId, status: "PENDING" },
+    select: { vendorId: true },
+  });
+
+  const excludedVendorIds = [
+    ...new Set([
+      ...priorRejections.map((r) => r.vendorId),
+      ...(activePending ? [activePending.vendorId] : []),
+    ]),
   ];
 
   // Pass (a) — coarse candidate pool from Prisma. Filters that map
-  // cleanly to a query: status=APPROVED, not in rejected list, has at
-  // least one active vehicle in the right class, has at least one
-  // active driver.
+  // cleanly to a query: status=APPROVED, not in rejected/active-offer
+  // list, has at least one active vehicle in the right class, has at
+  // least one active driver.
   const candidates = await prisma.vendor.findMany({
     where: {
       status: "APPROVED",
       id:
-        rejectedVendorIds.length > 0 ? { notIn: rejectedVendorIds } : undefined,
+        excludedVendorIds.length > 0 ? { notIn: excludedVendorIds } : undefined,
       vehicles: {
         some: {
           category: booking.vehicleClass,

@@ -181,16 +181,42 @@ export const getTariffOverview = asyncWrapper(
 // ============== ADD ROUTE ==============
 
 /**
+ * Fixed duration tiers for HOURLY route type. These mirror the
+ * industry-standard chauffeur tariff structure (6-8 hour day rate,
+ * extra hour overage, hourly rate for short bookings) and are NOT
+ * admin-defined — restricting the admin to these three keeps tier
+ * labels consistent across cities and downstream consumers (partner
+ * book-ride flow, invoicing).
+ */
+const HOURLY_DURATION_TIERS = [
+  "6-8 Hours (Day Rate)",
+  "Extra Hour (After 8 Hours)",
+  "Per Hour Rate",
+] as const;
+
+/**
  * Add a new route
+ *
+ * Branches on routeType:
+ *   - ONE_WAY: requires pickupLocation + dropoffLocation, routeName is
+ *     "{pickup} → {dropoff}"
+ *   - HOURLY:  requires durationTier (one of HOURLY_DURATION_TIERS).
+ *     routeName is the tier itself; pickup/dropoff are stored as empty
+ *     strings since they don't apply to time-based pricing.
  */
 export const addRoute = asyncWrapper(async (req: Request, res: Response) => {
-  const { city, routeType, pickupLocation, dropoffLocation, prices, isPerKm } =
-    req.body;
+  const {
+    city,
+    routeType,
+    pickupLocation,
+    dropoffLocation,
+    durationTier,
+    prices,
+    isPerKm,
+  } = req.body;
 
-  if (!city || !routeType || !pickupLocation || !dropoffLocation) {
-    throw new BadRequestError(
-      "city, routeType, pickupLocation, and dropoffLocation are required",
-    );
+  if (!city || !routeType) {
+    throw new BadRequestError("city and routeType are required");
   }
 
   if (!["RIYADH", "JEDDAH", "MAKKAH", "MADINAH"].includes(city)) {
@@ -201,26 +227,69 @@ export const addRoute = asyncWrapper(async (req: Request, res: Response) => {
     throw new BadRequestError("routeType must be ONE_WAY or HOURLY");
   }
 
-  const routeName = `${pickupLocation} → ${dropoffLocation}`;
+  // Per-route-type validation and field derivation.
+  // The route uses three DB columns for identity (routeName,
+  // pickupLocation, dropoffLocation). For ONE_WAY they're naturally
+  // distinct; for HOURLY they all reduce to the tier label, with
+  // pickup/dropoff stored as empty strings so the unique constraint
+  // on [city, routeType, routeName] still does the right thing.
+  let resolvedRouteName: string;
+  let resolvedPickup: string;
+  let resolvedDropoff: string;
+  let resolvedIsPerKm: boolean;
+
+  if (routeType === "HOURLY") {
+    if (!durationTier) {
+      throw new BadRequestError(
+        "durationTier is required for HOURLY route type",
+      );
+    }
+    if (!HOURLY_DURATION_TIERS.includes(durationTier)) {
+      throw new BadRequestError(
+        `durationTier must be one of: ${HOURLY_DURATION_TIERS.join(", ")}`,
+      );
+    }
+    resolvedRouteName = durationTier;
+    resolvedPickup = "";
+    resolvedDropoff = "";
+    // isPerKm is meaningless for time-based pricing — force false so
+    // downstream consumers can rely on the flag's semantics.
+    resolvedIsPerKm = false;
+  } else {
+    // ONE_WAY
+    if (!pickupLocation || !dropoffLocation) {
+      throw new BadRequestError(
+        "pickupLocation and dropoffLocation are required for ONE_WAY route type",
+      );
+    }
+    resolvedRouteName = `${pickupLocation} → ${dropoffLocation}`;
+    resolvedPickup = pickupLocation;
+    resolvedDropoff = dropoffLocation;
+    resolvedIsPerKm = isPerKm || false;
+  }
 
   // Check for existing (including soft-deleted)
   const existing = await prisma.routeTariff.findFirst({
-    where: { city, routeType, routeName },
+    where: { city, routeType, routeName: resolvedRouteName },
   });
 
   let tariff;
 
   if (existing && existing.isActive) {
-    throw new BadRequestError("Route already exists");
+    throw new BadRequestError(
+      routeType === "HOURLY"
+        ? `Tier "${resolvedRouteName}" already exists for this city`
+        : "Route already exists",
+    );
   } else if (existing && !existing.isActive) {
     // Reactivate soft-deleted route
     tariff = await prisma.routeTariff.update({
       where: { id: existing.id },
       data: {
         isActive: true,
-        pickupLocation,
-        dropoffLocation,
-        isPerKm: isPerKm || false,
+        pickupLocation: resolvedPickup,
+        dropoffLocation: resolvedDropoff,
+        isPerKm: resolvedIsPerKm,
         economySedan: prices?.economySedan ?? null,
         businessSedan: prices?.businessSedan ?? null,
         firstClass: prices?.firstClass ?? null,
@@ -236,10 +305,10 @@ export const addRoute = asyncWrapper(async (req: Request, res: Response) => {
       data: {
         city,
         routeType,
-        routeName,
-        pickupLocation,
-        dropoffLocation,
-        isPerKm: isPerKm || false,
+        routeName: resolvedRouteName,
+        pickupLocation: resolvedPickup,
+        dropoffLocation: resolvedDropoff,
+        isPerKm: resolvedIsPerKm,
         economySedan: prices?.economySedan ?? null,
         businessSedan: prices?.businessSedan ?? null,
         firstClass: prices?.firstClass ?? null,
@@ -257,7 +326,7 @@ export const addRoute = asyncWrapper(async (req: Request, res: Response) => {
       userId: req.user!.id,
       userName: req.user!.name || req.user!.email,
       action: "created",
-      routeName,
+      routeName: resolvedRouteName,
       city,
       routeType,
     },
@@ -265,7 +334,10 @@ export const addRoute = asyncWrapper(async (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    message: "Route added successfully",
+    message:
+      routeType === "HOURLY"
+        ? `Tier "${resolvedRouteName}" added successfully`
+        : "Route added successfully",
     data: tariff,
   });
 });

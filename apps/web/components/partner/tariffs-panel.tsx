@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/partner/tariffs-panel.tsx
+// ============================================
 "use client";
 
 // ============================================
@@ -307,7 +310,19 @@ export default function TariffsPanel() {
         </div>
       )}
 
-      {/* Standard Tariff Table (One Way / Hourly) */}
+      {/* Standard Tariff Table (One Way / Hourly)
+          ──────────────────────────────────────────────────────────
+          Column header and first-cell content branch on the active
+          sub-tab to match the admin's tariff management panel:
+            - "Route" header + "Pickup → Drop-off" for ONE_WAY
+            - "Duration Tier" header + tier name (e.g. "6-8 Hours
+              (Day Rate)") for HOURLY
+          Previously the hourly view rendered as a bare arrow " → "
+          because pickup/dropoff are empty strings on hourly tier rows
+          by design — the routeName column carries the meaningful
+          label there. Partners viewing tariffs now see exactly the
+          same row labels the admin used when setting prices, so the
+          mental model lines up across both portals. */}
       {!loadingCity && !isEcoTab && activeRouteData && (
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
@@ -315,7 +330,7 @@ export default function TariffsPanel() {
               <thead className="bg-neutral-800">
                 <tr>
                   <th className="text-left text-xs font-medium px-4 py-3 uppercase text-gray-400 sticky left-0 z-10 bg-neutral-800 min-w-[180px]">
-                    Route
+                    {activeSubTab === "hourly" ? "Duration Tier" : "Route"}
                   </th>
                   {activeRouteData.vehicleColumns.map((v) => (
                     <th
@@ -336,7 +351,9 @@ export default function TariffsPanel() {
                     <td className="px-4 py-3 sticky left-0 z-10 bg-neutral-900">
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-white whitespace-nowrap">
-                          {route.pickupLocation} → {route.dropoffLocation}
+                          {activeSubTab === "hourly"
+                            ? route.routeName
+                            : `${route.pickupLocation} → ${route.dropoffLocation}`}
                         </span>
                         {route.isPerKm && (
                           <span className="text-xs text-blue-400">
@@ -367,7 +384,9 @@ export default function TariffsPanel() {
                       colSpan={activeRouteData.vehicleColumns.length + 1}
                       className="px-4 py-12 text-center text-gray-500"
                     >
-                      No routes available for this category
+                      {activeSubTab === "hourly"
+                        ? "No hourly rates configured for this city yet"
+                        : "No routes available for this category"}
                     </td>
                   </tr>
                 )}

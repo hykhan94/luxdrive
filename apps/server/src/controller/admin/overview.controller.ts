@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/admin/overview.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/admin/overview.controller.ts
 // Admin Dashboard Overview — focused endpoints
 // ============================================
@@ -112,6 +115,13 @@ export const getRecentBookings = asyncWrapper(
           attentionReason: true,
           vehicleClass: true,
           source: true,
+          // Trip-type fields — needed so admin can see at a glance
+          // which bookings are hourly vs one-way (mirrors the
+          // visual treatment in the partner dashboard).
+          tripType: true,
+          hours: true,
+          hourlyDuration: true,
+          city: true,
           customer: {
             select: { id: true, name: true, email: true },
           },
@@ -136,6 +146,13 @@ export const getRecentBookings = asyncWrapper(
           customer: booking.customer?.name || booking.guestName || "Guest",
           customerEmail: booking.customer?.email || null,
           vendor: booking.vendor?.companyName || "Unassigned",
+          // `partner` is the partner companyName if the booking came in
+          // via the partner portal; null when the customer booked
+          // directly. Frontend uses null-ness to render either a
+          // partner chip or a "Direct customer" chip — that distinction
+          // matters operationally (which team handles questions, who
+          // owes whom) so we surface it intentionally rather than
+          // hiding it in a subtitle.
           partner: booking.partner?.companyName || null,
           date: booking.tripDate,
           time: booking.tripTime,
@@ -143,6 +160,10 @@ export const getRecentBookings = asyncWrapper(
           amount: booking.totalPrice,
           vehicleClass: booking.vehicleClass,
           source: booking.source,
+          tripType: booking.tripType,
+          hours: booking.hours,
+          hourlyDuration: (booking as any).hourlyDuration || null,
+          city: booking.city,
           isUnread: !booking.isReadByAdmin,
           needsAttention: booking.needsAttention,
           attentionReason: booking.attentionReason,

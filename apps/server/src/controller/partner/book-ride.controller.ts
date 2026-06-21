@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/partner/book-ride.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/partner/booking.controller.ts
 // Partner Portal — Book a Ride
 // ============================================
@@ -37,6 +40,156 @@ const VEHICLE_TO_TARIFF_COLUMN: Record<string, string> = {
 
 // VAT rate in Saudi Arabia
 const VAT_RATE = 0.15;
+
+// ============== HOURLY PRICING ==============
+
+// Fixed duration tiers for HOURLY bookings — must match the admin
+// tariff controller's HOURLY_DURATION_TIERS. The three tiers together
+// define the rate table: short bookings use PER_HOUR, half/full-day
+// bookings use DAY_RATE, and overage beyond 8 hours stacks
+// EXTRA_HOUR on top of DAY_RATE.
+const HOURLY_TIER_DAY_RATE = "6-8 Hours (Day Rate)";
+const HOURLY_TIER_EXTRA_HOUR = "Extra Hour (After 8 Hours)";
+const HOURLY_TIER_PER_HOUR = "Per Hour Rate";
+
+// Bracket boundaries. Hours < DAY_RATE_MIN use per-hour pricing;
+// DAY_RATE_MIN ≤ hours ≤ DAY_RATE_MAX use the flat day rate; hours
+// > DAY_RATE_MAX add extra-hour overage on top of day rate.
+const HOURLY_DAY_RATE_MIN = 6;
+const HOURLY_DAY_RATE_MAX = 8;
+
+export type HourlyBreakdownLine = {
+  label: string; // human-readable, e.g. "Day rate (6-8 hours)"
+  hours: number | null; // null for flat-rate line (day rate)
+  rate: number; // per-unit rate in SAR
+  amount: number; // line total in SAR
+};
+
+export type HourlyQuote = {
+  subtotal: number; // sum of all line amounts (pre-peak, pre-VAT)
+  hours: number;
+  tier: "PER_HOUR" | "DAY_RATE" | "DAY_RATE_PLUS_EXTRA";
+  breakdown: HourlyBreakdownLine[];
+};
+
+/**
+ * Calculate the pre-peak, VAT-inclusive subtotal for an HOURLY booking.
+ *
+ * Reads all three duration-tier rows for (city, HOURLY) from RouteTariff
+ * and applies the bracket logic:
+ *   hours <  6  → hours × perHourRate              (PER_HOUR)
+ *   6 ≤ hours ≤ 8 → dayRate                       (DAY_RATE)
+ *   hours >  8  → dayRate + (hours - 8) × extraHourRate (DAY_RATE_PLUS_EXTRA)
+ *
+ * Throws BadRequestError with a precise message when the tier required
+ * for the requested hours is missing or has a null price for this vehicle
+ * class (e.g. partner asks for 10 hours of King Long but the Extra Hour
+ * rate for King Long isn't set).
+ *
+ * The returned subtotal is in SAR and VAT-inclusive (admin tariff
+ * prices are entered VAT-inclusive). Peak pricing and VAT extraction
+ * happen in the caller.
+ */
+async function calculateHourlyPrice(
+  city: string,
+  vehicleClass: string,
+  hours: number,
+): Promise<HourlyQuote> {
+  if (!Number.isFinite(hours) || hours <= 0) {
+    throw new BadRequestError("hours must be a positive number");
+  }
+
+  const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
+  if (!column) {
+    throw new BadRequestError(`Invalid vehicle class: ${vehicleClass}`);
+  }
+
+  // Pull all three tier rows for this city in one query.
+  const tierRows = await prisma.routeTariff.findMany({
+    where: { city: city as any, routeType: "HOURLY", isActive: true },
+  });
+
+  const tierByName = new Map(tierRows.map((r) => [r.routeName, r]));
+
+  const priceFromTier = (tierName: string): number | null => {
+    const row = tierByName.get(tierName);
+    if (!row) return null;
+    const raw = (row as any)[column];
+    return raw == null ? null : Number(raw);
+  };
+
+  const lines: HourlyBreakdownLine[] = [];
+  let tier: HourlyQuote["tier"];
+
+  if (hours < HOURLY_DAY_RATE_MIN) {
+    // Short booking — straight per-hour multiplication.
+    const perHour = priceFromTier(HOURLY_TIER_PER_HOUR);
+    if (perHour == null) {
+      throw new BadRequestError(
+        `Per Hour Rate is not configured for ${vehicleClass} in ${city}. Bookings shorter than ${HOURLY_DAY_RATE_MIN} hours require this tier.`,
+      );
+    }
+    tier = "PER_HOUR";
+    lines.push({
+      label: `Per-hour rate × ${hours} hour${hours === 1 ? "" : "s"}`,
+      hours,
+      rate: perHour,
+      amount: perHour * hours,
+    });
+  } else if (hours <= HOURLY_DAY_RATE_MAX) {
+    // Half/full-day flat rate.
+    const dayRate = priceFromTier(HOURLY_TIER_DAY_RATE);
+    if (dayRate == null) {
+      throw new BadRequestError(
+        `Day Rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}.`,
+      );
+    }
+    tier = "DAY_RATE";
+    lines.push({
+      label: `Day rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours)`,
+      hours: null,
+      rate: dayRate,
+      amount: dayRate,
+    });
+  } else {
+    // Day rate plus extra-hour overage.
+    const dayRate = priceFromTier(HOURLY_TIER_DAY_RATE);
+    const extraRate = priceFromTier(HOURLY_TIER_EXTRA_HOUR);
+    if (dayRate == null) {
+      throw new BadRequestError(
+        `Day Rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}.`,
+      );
+    }
+    if (extraRate == null) {
+      throw new BadRequestError(
+        `Extra Hour rate (after ${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}. Required for bookings longer than ${HOURLY_DAY_RATE_MAX} hours.`,
+      );
+    }
+    const extraHours = hours - HOURLY_DAY_RATE_MAX;
+    tier = "DAY_RATE_PLUS_EXTRA";
+    lines.push({
+      label: `Day rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours)`,
+      hours: null,
+      rate: dayRate,
+      amount: dayRate,
+    });
+    lines.push({
+      label: `Extra hour × ${extraHours} hour${extraHours === 1 ? "" : "s"}`,
+      hours: extraHours,
+      rate: extraRate,
+      amount: extraRate * extraHours,
+    });
+  }
+
+  const subtotal = lines.reduce((sum, l) => sum + l.amount, 0);
+
+  return {
+    subtotal: Math.round(subtotal * 100) / 100,
+    hours,
+    tier,
+    breakdown: lines,
+  };
+}
 
 // Keywords that indicate an airport route
 const AIRPORT_KEYWORDS = [
@@ -238,7 +391,7 @@ export const getVehicleOptions = asyncWrapper(
     const partner = await getPartnerForUser(req.user!.id);
     requireOperational(partner.status);
 
-    const { routeId, isElectric } = req.query;
+    const { routeId, isElectric, hours } = req.query;
 
     if (!routeId) throw new BadRequestError("routeId is required");
 
@@ -294,6 +447,94 @@ export const getVehicleOptions = asyncWrapper(
       { key: "KING_LONG", label: "King Long (49-Seater)", column: "kingLong" },
     ];
 
+    // ============== HOURLY BRANCH ==============
+    // For HOURLY routes, the per-vehicle price comes from the bracket
+    // calculator across all three tier rows for the city (NOT the single
+    // routeId column). The `hours` query param drives the calc.
+    //
+    // If hours isn't provided yet, fall back to returning the
+    // single-row column prices as a rough preview, AND mark each
+    // vehicle as `pendingHours: true` so the frontend knows the prices
+    // are placeholders. This keeps the picker usable while the partner
+    // hasn't yet chosen hours (e.g. UI lets them browse vehicles
+    // first).
+    if (route.routeType === "HOURLY") {
+      const parsedHours = hours == null ? NaN : Number(hours);
+      const hoursValid = Number.isFinite(parsedHours) && parsedHours > 0;
+
+      const vehiclesHourly = await Promise.all(
+        vehicleClasses.map(async (vc) => {
+          if (!hoursValid) {
+            return {
+              vehicleClass: vc.key,
+              label: vc.label,
+              basePrice: null as number | null,
+              price: null as number | null,
+              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
+              available: false,
+              pendingHours: true,
+              unavailableReason: "Select hours to see price",
+              isPeakActive: peakMultiplier > 1.0,
+              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
+            };
+          }
+          try {
+            const quote = await calculateHourlyPrice(
+              route.city,
+              vc.key,
+              parsedHours,
+            );
+            const afterPeak = quote.subtotal * peakMultiplier;
+            return {
+              vehicleClass: vc.key,
+              label: vc.label,
+              basePrice: quote.subtotal,
+              price: Math.round(afterPeak * 100) / 100,
+              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
+              available: true,
+              pendingHours: false,
+              unavailableReason: null,
+              isPeakActive: peakMultiplier > 1.0,
+              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
+            };
+          } catch (err: any) {
+            // Calculator rejected this vehicle class — usually a
+            // missing tier price. Surface the calculator's exact
+            // reason so the partner (and admin via support tickets)
+            // sees what to configure.
+            return {
+              vehicleClass: vc.key,
+              label: vc.label,
+              basePrice: null,
+              price: null,
+              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
+              available: false,
+              pendingHours: false,
+              unavailableReason: err?.message || "Not available",
+              isPeakActive: peakMultiplier > 1.0,
+              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
+            };
+          }
+        }),
+      );
+
+      res.json({
+        success: true,
+        data: {
+          routeName: route.routeName,
+          isPerKm: false,
+          isHourly: true,
+          hours: hoursValid ? parsedHours : null,
+          vehicles: vehiclesHourly.filter((v) => v.available),
+          allVehicles: vehiclesHourly,
+          peakActive: peakMultiplier > 1.0,
+          peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
+        },
+      });
+      return;
+    }
+
+    // ============== ONE_WAY BRANCH (original logic) ==============
     // Filter out ELECTRIC for non-Riyadh (it's handled separately)
     const vehicles = vehicleClasses.map((vc) => {
       const basePrice = (route as any)[vc.column];
@@ -335,13 +576,14 @@ export const getPriceBreakdown = asyncWrapper(
     const partner = await getPartnerForUser(req.user!.id);
     requireOperational(partner.status);
 
-    const { routeId, vehicleClass, isElectric } = req.body;
+    const { routeId, vehicleClass, isElectric, hours } = req.body;
 
     if (!routeId || !vehicleClass) {
       throw new BadRequestError("routeId and vehicleClass are required");
     }
 
     let basePrice: number;
+    let hourlyQuote: HourlyQuote | null = null;
 
     if (isElectric) {
       const route = await prisma.electricTariff.findUnique({
@@ -356,15 +598,35 @@ export const getPriceBreakdown = asyncWrapper(
       });
       if (!route) throw new NotFoundError("Route");
 
-      const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
-      if (!column) throw new BadRequestError("Invalid vehicle class");
-
-      const routePrice = (route as any)[column];
-      if (!routePrice)
-        throw new BadRequestError(
-          `Price not set for ${vehicleClass} on this route`,
+      if (route.routeType === "HOURLY") {
+        // HOURLY uses bracket pricing across all three tier rows for the
+        // city, NOT the single row picked by the partner. The picked row
+        // just signals intent — the calculator decides which tier(s) apply
+        // based on hours.
+        const parsedHours = Number(hours);
+        if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+          throw new BadRequestError(
+            "hours is required and must be a positive number for hourly bookings",
+          );
+        }
+        hourlyQuote = await calculateHourlyPrice(
+          route.city,
+          vehicleClass,
+          parsedHours,
         );
-      basePrice = Number(routePrice);
+        basePrice = hourlyQuote.subtotal;
+      } else {
+        // ONE_WAY — existing single-row lookup.
+        const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
+        if (!column) throw new BadRequestError("Invalid vehicle class");
+
+        const routePrice = (route as any)[column];
+        if (!routePrice)
+          throw new BadRequestError(
+            `Price not set for ${vehicleClass} on this route`,
+          );
+        basePrice = Number(routePrice);
+      }
     }
 
     // Check peak pricing
@@ -393,6 +655,22 @@ export const getPriceBreakdown = asyncWrapper(
         vatRate: VAT_RATE,
         vatAmount: Math.round(vatAmount * 100) / 100,
         totalPrice: Math.round(totalPrice * 100) / 100,
+        // Present only for hourly bookings. Frontend renders this as
+        // line items above the VAT/total summary so partners see how
+        // the bracket logic resolved their hours selection.
+        hourly: hourlyQuote
+          ? {
+              hours: hourlyQuote.hours,
+              tier: hourlyQuote.tier,
+              breakdown: hourlyQuote.breakdown.map((l) => ({
+                label: l.label,
+                hours: l.hours,
+                rate: Math.round(l.rate * 100) / 100,
+                amount: Math.round(l.amount * 100) / 100,
+              })),
+              subtotalBeforePeak: hourlyQuote.subtotal,
+            }
+          : null,
       },
     });
   },
@@ -436,6 +714,8 @@ export const createBooking = asyncWrapper(
       // Vehicle
       vehicleClass,
       passengers,
+      // Hours — required for HOURLY, ignored for ONE_WAY
+      hours: hoursFromBody,
       // Optional
       notes,
     } = req.body;
@@ -549,33 +829,57 @@ export const createBooking = asyncWrapper(
       if (!route.isActive)
         throw new BadRequestError("This route is currently inactive");
 
-      const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
-      if (!column)
-        throw new BadRequestError("Invalid vehicle class for standard route");
-
-      const routePrice = (route as any)[column];
-      if (!routePrice) {
-        throw new BadRequestError(
-          `${vehicleClass} is not available on this route (price not set by admin)`,
-        );
-      }
-
-      basePrice = Number(routePrice);
-      routeName = route.routeName;
-      routeIsAirport = isAirportRoute(
-        route.routeName,
-        route.pickupLocation,
-        route.dropoffLocation,
-      );
-
-      // For hourly routes, extract hours from route name if available
-      if (tripType === "HOURLY") {
-        hourlyDuration = route.routeName;
-        // Try to extract hours from route name like "6-8 Hours (Day Rate)"
-        const hoursMatch = route.routeName.match(/(\d+)/);
-        if (hoursMatch) {
-          hours = parseInt(hoursMatch[1]);
+      if (route.routeType === "HOURLY") {
+        // HOURLY pricing comes from the bracket calculator, not the
+        // single tier row picked in the form. The selected row just
+        // signals "this is an hourly booking" — the calculator decides
+        // which tier(s) apply based on hours.
+        const parsedHours = Number(hoursFromBody);
+        if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+          throw new BadRequestError(
+            "hours is required and must be a positive number for hourly bookings",
+          );
         }
+        const quote = await calculateHourlyPrice(
+          route.city,
+          vehicleClass,
+          parsedHours,
+        );
+        basePrice = quote.subtotal;
+        hours = parsedHours;
+        // Human-readable summary stored on the booking for invoicing
+        // and customer-facing displays. Reflects what was actually
+        // computed (which tier(s) applied).
+        if (quote.tier === "PER_HOUR") {
+          hourlyDuration = `${parsedHours} hour${parsedHours === 1 ? "" : "s"} (per-hour rate)`;
+        } else if (quote.tier === "DAY_RATE") {
+          hourlyDuration = `${parsedHours} hour${parsedHours === 1 ? "" : "s"} (day rate)`;
+        } else {
+          const extra = parsedHours - HOURLY_DAY_RATE_MAX;
+          hourlyDuration = `${parsedHours} hours (day rate + ${extra} extra hour${extra === 1 ? "" : "s"})`;
+        }
+        routeName = route.routeName;
+        routeIsAirport = false; // hourly never airport
+      } else {
+        // ONE_WAY — single-row lookup.
+        const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
+        if (!column)
+          throw new BadRequestError("Invalid vehicle class for standard route");
+
+        const routePrice = (route as any)[column];
+        if (!routePrice) {
+          throw new BadRequestError(
+            `${vehicleClass} is not available on this route (price not set by admin)`,
+          );
+        }
+
+        basePrice = Number(routePrice);
+        routeName = route.routeName;
+        routeIsAirport = isAirportRoute(
+          route.routeName,
+          route.pickupLocation,
+          route.dropoffLocation,
+        );
       }
     }
 
@@ -608,6 +912,15 @@ export const createBooking = asyncWrapper(
     const booking = await prisma.booking.create({
       data: {
         bookingRef: await generateBookingRef("PARTNER", partner.companyName),
+        // Opaque, non-guessable token for the public customer trip
+        // card at /trip/{token}. We use crypto.randomUUID() (built
+        // into Node 14.17+, no extra deps) — 128 bits of entropy is
+        // more than enough to make brute-force enumeration of valid
+        // tokens infeasible. Stays on the row permanently so old
+        // confirmation links remain useful for a while, but the
+        // public endpoint refuses to render once trip_date + 30
+        // days is in the past.
+        shareToken: crypto.randomUUID(),
         // Partner link
         partnerId: partner.id,
         source: "PARTNER",

@@ -62,7 +62,10 @@ export default function ContactPreview() {
               <MapPin className="w-6 h-6 text-[#C9A961]" />
             </div>
             <h3 className="text-white font-semibold mb-2">Location</h3>
-            <p className="text-gray-400 text-sm">Riyadh, Saudi Arabia</p>
+            <p className="text-gray-400 text-sm">
+              Level 7, Building 4.07, King Abdullah Financial District, Riyadh,
+              Saudi Arabia
+            </p>
           </div>
 
           <div className="p-6 rounded-xl bg-[#141414] border border-neutral-800 hover:border-[#C9A961]/50 transition-all duration-300 text-center group">

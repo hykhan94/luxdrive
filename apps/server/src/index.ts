@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/server/src/index.ts
+// ============================================
 import express, { Request, Response } from "express";
 import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
@@ -13,6 +16,7 @@ import vendorRoutes from "./route/vendor";
 import { isAdmin, isAuthenticated } from "./middleware/auth";
 import uploadRoutes from "./route/upload/index";
 import imagesRoutes from "./route/images.route";
+import publicRoutes from "./route/public/index";
 import "./lib/cron";
 
 const app = express();
@@ -97,6 +101,12 @@ app.use("/api/v1/upload", isAuthenticated, uploadRoutes);
 // objects. Reduces bandwidth massively for list views that display
 // small avatars and card photos.
 app.use("/api/v1/images", imagesRoutes);
+
+// Public routes — no auth, deliberately separated so the no-auth
+// surface area is obvious. Currently exposes only the customer
+// trip card endpoint at /api/v1/public/trip/:token, which backs
+// the WhatsApp-shared link customers receive after booking.
+app.use("/api/v1/public", publicRoutes);
 
 // 404 Handler
 app.use(notFoundHandler);

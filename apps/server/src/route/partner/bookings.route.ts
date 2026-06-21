@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/route/partner/bookings.route.ts
+// ============================================
+// ============================================
 // apps/server/src/route/partner/bookings-repo.route.ts
 // Partner Portal — Bookings Repository Routes
 // ============================================

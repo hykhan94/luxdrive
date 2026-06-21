@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/vendor/bookings.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/vendor/bookings.controller.ts
 // Vendor Portal — Bookings Section
 // ============================================
@@ -9,6 +12,7 @@ import { getReadUrl } from "../../lib/gcs";
 import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError, BadRequestError } from "../../utils/AppError";
 import { requireOperational, requireApprovedAndDocsValid } from "./_shared";
+import { buildPOHtml } from "../../utils/helpers/po.helpers";
 
 // ============== GCS (for signed photo URLs) ==============
 // Driver photoUrl in the DB is the raw GCS path (e.g. "drivers/abc/photo.jpg").
@@ -1578,5 +1582,87 @@ export const exportBookingsCsv = asyncWrapper(
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     res.send(csvContent);
+  },
+);
+
+// ============== DOWNLOAD PURCHASE ORDER ==============
+//
+// Vendor downloads a PO for a booking assigned to them. Same shared
+// `buildPOHtml` helper drives all three perspectives (admin/partner/
+// vendor); calling with `"vendor"` perspective applies the isolation
+// gates:
+//   • Vendor Information section visible (it's the caller's own)
+//   • Partner Information section HIDDEN (vendor ↔ partner isolation)
+//   • "Direct customer" header tag suppressed (vendor doesn't learn
+//     whether the booking was partner-routed or direct)
+//   • "Vendor: Not yet assigned" fallback in Vehicle & Driver only
+//     renders if no vendor at all is set (won't happen here since
+//     we scope to bookings assigned to this vendor)
+//
+// Access is scoped: only bookings with vendorId = this vendor can be
+// fetched. A vendor trying to pull another vendor's PO gets a clean
+// 404 — same shape as the rest of this controller's read endpoints.
+// `partner: null` is passed deliberately rather than booking.partner;
+// we don't even load the partner relation so there's nothing to leak
+// even if the helper's perspective gate had a bug.
+
+export const downloadBookingPO = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const vendor = await getVendorForUser(req.user!.id);
+    requireOperational(vendor.status);
+
+    const { bookingId } = req.params;
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, vendorId: vendor.id },
+      include: {
+        customer: {
+          select: { id: true, name: true, email: true, phone: true },
+        },
+        // Vendor is the caller's own — full profile fields needed
+        // for the Vendor Information section.
+        vendor: {
+          select: {
+            id: true,
+            companyName: true,
+            crNumber: true,
+            vatNumber: true,
+            contactPerson: true,
+            contactPhone: true,
+            address: true,
+          },
+        },
+        driver: { select: { firstName: true, lastName: true, phone: true } },
+        vehicle: {
+          select: {
+            make: true,
+            model: true,
+            year: true,
+            plateNumber: true,
+            color: true,
+          },
+        },
+        // Partner deliberately NOT included — vendor must not see
+        // partner identity. The helper's `"vendor"` perspective also
+        // gates the section, but omitting the include is belt-and-
+        // braces: no partner data ever reaches the renderer.
+      },
+    });
+
+    if (!booking) throw new NotFoundError("Booking");
+
+    const poHtml = buildPOHtml(booking, null, "vendor");
+
+    res.json({
+      success: true,
+      data: {
+        bookingRef: booking.bookingRef,
+        html: poHtml,
+        meta: {
+          fileName: `PO-${booking.bookingRef}.pdf`,
+          title: `Purchase Order — ${booking.bookingRef}`,
+        },
+      },
+    });
   },
 );

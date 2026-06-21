@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/partner/bookings.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/partner/bookings-repo.controller.ts
 // Partner Portal — Bookings Repository (All Bookings List)
 // ============================================
@@ -9,6 +12,7 @@ import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError } from "../../utils/AppError";
 import { requireOperational } from "./_shared";
 import { getReadUrl } from "../../lib/gcs";
+import { buildPOHtml } from "../../utils/helpers/po.helpers";
 
 // ============== HELPERS ==============
 
@@ -282,6 +286,7 @@ export const getBookingsList = asyncWrapper(
           tripDate: true,
           tripTime: true,
           hours: true,
+          hourlyDuration: true,
           city: true,
           vehicleClass: true,
           passengers: true,
@@ -305,6 +310,7 @@ export const getBookingsList = asyncWrapper(
       dropoffAddress: b.dropoffAddress,
       tripType: b.tripType,
       hours: b.hours,
+      hourlyDuration: (b as any).hourlyDuration || null,
       tripDate: b.tripDate,
       tripTime: b.tripTime,
       createdAt: b.createdAt,
@@ -449,6 +455,15 @@ export const getBookingDetail = asyncWrapper(
       data: {
         id: booking.id,
         bookingRef: booking.bookingRef,
+        // Public trip-card token for the WhatsApp share flow. The
+        // partner UI constructs the customer-facing trip card URL
+        // (https://luxdriveksa.com/trip/{shareToken}) and includes
+        // it in the WhatsApp message body. Falls back to null if
+        // the booking was created before the shareToken column
+        // landed and hasn't been backfilled yet — the frontend
+        // gracefully hides the trip-card link in that case and
+        // sends the older inline-details message instead.
+        shareToken: (booking as any).shareToken || null,
         status: booking.status,
         statusLabel: STATUS_LABELS[booking.status] || booking.status,
 
@@ -750,7 +765,14 @@ export const downloadBookingPO = asyncWrapper(
           },
         },
         vendor: {
-          select: { companyName: true },
+          select: {
+            companyName: true,
+            crNumber: true,
+            vatNumber: true,
+            contactPerson: true,
+            contactPhone: true,
+            address: true,
+          },
         },
       },
     });
@@ -758,7 +780,7 @@ export const downloadBookingPO = asyncWrapper(
     if (!booking) throw new NotFoundError("Booking");
 
     // Build PO HTML content
-    const poHtml = buildPOHtml(booking, partner);
+    const poHtml = buildPOHtml(booking, partner, "partner");
 
     // Return HTML for now — frontend can render this in a print-friendly window
     // or convert to PDF using browser's print-to-PDF
@@ -779,149 +801,3 @@ export const downloadBookingPO = asyncWrapper(
     });
   },
 );
-
-// ============== PO HTML BUILDER ==============
-
-function buildPOHtml(booking: any, partner: any): string {
-  const basePrice = Number(booking.basePrice);
-  const vatAmount = Number(booking.vatAmount);
-  const totalPrice = Number(booking.totalPrice);
-  const peakMultiplier = Number(booking.peakMultiplier);
-  const peakSurcharge = basePrice - basePrice / peakMultiplier;
-
-  const tripDate = new Date(booking.tripDate).toLocaleDateString("en-SA", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  const createdDate = new Date(booking.createdAt).toLocaleDateString("en-SA", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  const driverInfo = booking.driver
-    ? `${booking.driver.firstName} ${booking.driver.lastName} — ${booking.driver.phone}`
-    : "Not yet assigned";
-
-  const vehicleInfo = booking.vehicle
-    ? `${booking.vehicle.make} ${booking.vehicle.model} ${booking.vehicle.year} (${booking.vehicle.plateNumber}) — ${booking.vehicle.color || ""}`
-    : "Not yet assigned";
-
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Purchase Order — ${booking.bookingRef}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a1a; padding: 40px; max-width: 800px; margin: 0 auto; }
-    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; border-bottom: 3px solid #c8a961; padding-bottom: 20px; }
-    .logo { font-size: 28px; font-weight: 800; color: #c8a961; letter-spacing: 1px; }
-    .logo span { color: #333; }
-    .po-info { text-align: right; }
-    .po-info h2 { font-size: 20px; color: #333; margin-bottom: 4px; }
-    .po-info p { font-size: 12px; color: #666; }
-    .section { margin-bottom: 24px; }
-    .section-title { font-size: 13px; font-weight: 700; color: #c8a961; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid #e5e5e5; padding-bottom: 6px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .field { margin-bottom: 6px; }
-    .field-label { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
-    .field-value { font-size: 14px; color: #1a1a1a; font-weight: 500; }
-    .pricing-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    .pricing-table th { text-align: left; font-size: 11px; color: #999; text-transform: uppercase; padding: 8px 12px; border-bottom: 1px solid #e5e5e5; }
-    .pricing-table td { padding: 8px 12px; font-size: 14px; border-bottom: 1px solid #f0f0f0; }
-    .pricing-table .total-row td { border-top: 2px solid #c8a961; font-weight: 700; font-size: 16px; color: #c8a961; }
-    .pricing-table .amount { text-align: right; }
-    .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-    .status-PENDING { background: #fef3c7; color: #92400e; }
-    .status-CONFIRMED { background: #d1fae5; color: #065f46; }
-    .status-COMPLETED { background: #dbeafe; color: #1e40af; }
-    .status-CANCELLED { background: #fee2e2; color: #991b1b; }
-    .status-IN_PROGRESS { background: #e0e7ff; color: #3730a3; }
-    .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #e5e5e5; font-size: 11px; color: #999; text-align: center; }
-    @media print { body { padding: 20px; } }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <div class="logo">LUX<span>DRIVE</span></div>
-      <p style="font-size: 12px; color: #666; margin-top: 4px;">Premium Chauffeur Services</p>
-    </div>
-    <div class="po-info">
-      <h2>Purchase Order</h2>
-      <p><strong>${booking.bookingRef}</strong></p>
-      <p>Date: ${createdDate}</p>
-      <p>Status: <span class="status-badge status-${booking.status}">${STATUS_LABELS[booking.status] || booking.status}</span></p>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Partner Information</div>
-    <div class="grid">
-      <div class="field"><div class="field-label">Company</div><div class="field-value">${partner.companyName}</div></div>
-      <div class="field"><div class="field-label">CR Number</div><div class="field-value">${partner.crNumber || "—"}</div></div>
-      <div class="field"><div class="field-label">VAT Number</div><div class="field-value">${partner.vatNumber || "—"}</div></div>
-      <div class="field"><div class="field-label">Contact</div><div class="field-value">${partner.contactPerson || "—"} — ${partner.contactPhone || "—"}</div></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Customer Information</div>
-    <div class="grid">
-      <div class="field"><div class="field-label">Guest Name</div><div class="field-value">${booking.guestName || "—"}</div></div>
-      <div class="field"><div class="field-label">Phone</div><div class="field-value">${booking.guestPhone || "—"}</div></div>
-      <div class="field"><div class="field-label">Email</div><div class="field-value">${booking.guestEmail || "—"}</div></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Trip Details</div>
-    <div class="grid">
-      <div class="field"><div class="field-label">Trip Type</div><div class="field-value">${booking.tripType}${booking.hours ? ` (${booking.hours} hours)` : ""}</div></div>
-      <div class="field"><div class="field-label">City</div><div class="field-value">${booking.city}</div></div>
-      <div class="field"><div class="field-label">Route</div><div class="field-value">${booking.route || "—"}</div></div>
-      <div class="field"><div class="field-label">Date & Time</div><div class="field-value">${tripDate} at ${booking.tripTime}</div></div>
-      <div class="field"><div class="field-label">Pickup</div><div class="field-value">${booking.pickupAddress}</div></div>
-      <div class="field"><div class="field-label">Dropoff</div><div class="field-value">${booking.dropoffAddress}</div></div>
-      ${booking.flightNumber ? `<div class="field"><div class="field-label">Flight Number</div><div class="field-value">${booking.flightNumber}</div></div>` : ""}
-      ${(booking as any).terminalNo ? `<div class="field"><div class="field-label">Terminal</div><div class="field-value">${(booking as any).terminalNo}</div></div>` : ""}
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Vehicle & Driver</div>
-    <div class="grid">
-      <div class="field"><div class="field-label">Vehicle Class</div><div class="field-value">${booking.vehicleClass} (${booking.passengers} pax)</div></div>
-      <div class="field"><div class="field-label">Assigned Vehicle</div><div class="field-value">${vehicleInfo}</div></div>
-      <div class="field"><div class="field-label">Driver</div><div class="field-value">${driverInfo}</div></div>
-      <div class="field"><div class="field-label">Vendor</div><div class="field-value">${booking.vendor?.companyName || "Not yet assigned"}</div></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Pricing</div>
-    <table class="pricing-table">
-      <thead><tr><th>Description</th><th class="amount">Amount (SAR)</th></tr></thead>
-      <tbody>
-        <tr><td>Base Fare — ${booking.vehicleClass} / ${booking.route || booking.tripType}</td><td class="amount">${(basePrice / peakMultiplier).toFixed(2)}</td></tr>
-        ${peakMultiplier > 1 ? `<tr><td>Peak Pricing Surcharge (×${peakMultiplier})</td><td class="amount">${peakSurcharge.toFixed(2)}</td></tr>` : ""}
-        <tr><td>VAT (15%)</td><td class="amount">${vatAmount.toFixed(2)}</td></tr>
-        <tr class="total-row"><td>Total</td><td class="amount">SAR ${totalPrice.toFixed(2)}</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  ${booking.notes ? `<div class="section"><div class="section-title">Notes</div><p style="font-size: 13px; color: #666;">${booking.notes}</p></div>` : ""}
-
-  <div class="footer">
-    <p>LuxDrive — Premium Chauffeur Services, Kingdom of Saudi Arabia</p>
-    <p>This is a system-generated purchase order. For inquiries, contact your account manager.</p>
-  </div>
-</body>
-</html>`;
-}

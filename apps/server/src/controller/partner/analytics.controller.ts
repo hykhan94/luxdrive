@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/partner/analytics.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/partner/analytics.controller.ts
 // Partner Portal — Reports & Analytics
 // ============================================
@@ -229,11 +232,15 @@ export const getAnalytics = asyncWrapper(
 
     // ============================================
     // 4. TRIP TYPE SPLIT + CURRENT MONTH WEEKLY TREND
-    //    Counts ALL bookings regardless of status (per doc)
+    //    Switched from "all statuses" to COMPLETED-only to align with
+    //    the rest of the operational metrics. A partner's true mix of
+    //    one-way vs hourly should reflect what was actually driven,
+    //    not what was ordered — high-cancellation hourly bookings
+    //    would otherwise inflate the hourly share.
     // ============================================
     const tripTypeSplit = await prisma.booking.groupBy({
       by: ["tripType"],
-      where: { partnerId: partner.id },
+      where: { partnerId: partner.id, status: "COMPLETED" },
       _count: { id: true },
     });
 
@@ -269,7 +276,11 @@ export const getAnalytics = asyncWrapper(
     ];
 
     // Current month weekly trend (Week 1, 2, 3, 4, 5)
-    // Counts ALL bookings (any status) made in that week
+    // Counts COMPLETED rides delivered in each week of this month.
+    // Past weeks: how many rides were actually run. Current/future
+    // weeks: still on COMPLETED (they'll just be lower because the
+    // week isn't done) — same accounting basis throughout, so the
+    // chart compares like-with-like across the strip.
     const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const currentMonthEnd = new Date(
       now.getFullYear(),
@@ -299,6 +310,7 @@ export const getAnalytics = asyncWrapper(
       const ridesInWeek = await prisma.booking.count({
         where: {
           partnerId: partner.id,
+          status: "COMPLETED",
           tripDate: { gte: weekStart, lte: weekEnd },
         },
       });
@@ -322,16 +334,18 @@ export const getAnalytics = asyncWrapper(
 
     // ============================================
     // 5. VEHICLE CATEGORY BREAKDOWN
-    //    From profile approval date till now
+    //    Restricted to COMPLETED bookings — a vehicle class with many
+    //    cancellations isn't actually "used" in any operational sense.
+    //    The totalEarned per class also only makes sense on completion
+    //    since revenue is recognised at delivery. Date floor is still
+    //    the partner's join date so pre-join data (if any) is excluded.
     // ============================================
     const vehicleUsageRaw = await prisma.booking.groupBy({
       by: ["vehicleClass"],
       where: {
         partnerId: partner.id,
         createdAt: { gte: partnerJoinDate },
-        status: {
-          notIn: ["CANCELLED"],
-        },
+        status: "COMPLETED",
       },
       _count: { id: true },
       _sum: { totalPrice: true },
@@ -356,14 +370,16 @@ export const getAnalytics = asyncWrapper(
 
     // ============================================
     // 6. CITY DISTRIBUTION
+    //    COMPLETED-only. "Where my driver operates" is a fact about
+    //    delivered service, not aspiration. A cancelled Jeddah booking
+    //    doesn't put a wheel in Jeddah; counting it overstates that
+    //    city's share.
     // ============================================
     const cityDistributionRaw = await prisma.booking.groupBy({
       by: ["city"],
       where: {
         partnerId: partner.id,
-        status: {
-          notIn: ["CANCELLED"],
-        },
+        status: "COMPLETED",
       },
       _count: { id: true },
       _sum: { totalPrice: true },
@@ -387,15 +403,19 @@ export const getAnalytics = asyncWrapper(
     }));
 
     // ============================================
-    // 7. TOP 5 MOST BOOKED ROUTES
+    // 7. TOP 5 MOST OPERATED ROUTES
+    //    The label "top routes" conventionally means "where we
+    //    actually drive most often" — completion-based. A route with
+    //    five attempted-and-cancelled bookings isn't a "top route";
+    //    it's a problem route. Cancellation pattern is a separate
+    //    signal worth surfacing eventually, but it doesn't belong in
+    //    a "most operated" ranking.
     // ============================================
     const topRoutesRaw = await prisma.booking.groupBy({
       by: ["route"],
       where: {
         partnerId: partner.id,
-        status: {
-          notIn: ["CANCELLED"],
-        },
+        status: "COMPLETED",
         route: { not: null },
       },
       _count: { id: true },

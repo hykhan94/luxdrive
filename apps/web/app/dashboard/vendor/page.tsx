@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/app/dashboard/vendor/page.tsx
+// ============================================
 "use client";
 
 import { useEffect, useState, useCallback, useRef, Suspense } from "react";
@@ -243,10 +246,18 @@ function VendorDashboardInner() {
   });
   const [badgesLoaded, setBadgesLoaded] = useState(false);
 
-  // Booking sub-tab (passed from dashboard calendar click)
+  // Booking sub-tab. Set explicitly by the caller of onTabChange —
+  // dashboard's New Requests banner passes "new", the Recent Bookings
+  // "View all" link passes "all", calendar clicks bypass this via
+  // setBookingsDateFilter (which lands the bookings panel on "all"
+  // regardless). The default of "all" is the conservative pick when
+  // there's no explicit caller signal: a fresh sidebar click on
+  // "Bookings" should show everything, not the New Requests-only
+  // queue, since that queue is already surfaced via the sidebar
+  // badge and the dashboard banner.
   const [bookingSubTab, setBookingSubTab] = useState<
-    "new" | "active" | "completed"
-  >("new");
+    "new" | "active" | "completed" | "all"
+  >("all");
   const [bookingsDateFilter, setBookingsDateFilter] = useState<string | null>(
     null,
   );

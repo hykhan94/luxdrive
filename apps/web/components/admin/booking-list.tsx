@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/admin/booking-list.tsx
+// ============================================
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
@@ -13,11 +16,16 @@ import {
   ChevronLeft,
   Building2,
   AlertTriangle,
+  AlertCircle,
   Loader2,
   XCircle,
   User,
   Eye,
   RefreshCw,
+  ArrowRight,
+  Briefcase,
+  Car,
+  Download,
 } from "lucide-react";
 import { useNotification } from "@/lib/notification-context";
 
@@ -36,7 +44,21 @@ type SourceFilter = "all" | "direct" | "partner";
 // old AWAITING_VENDOR / VENDOR_REJECTED states with two new ones:
 // ASSIGNMENT_OFFERED (first offer outstanding to a vendor) and
 // ASSIGNMENT_RE_OFFERED (price-revised re-offer after a PRICE_TOO_LOW
-// rejection). Old keys deliberately removed.
+// rejection).
+//
+// Granular labels are kept here so admins see the actual lifecycle
+// stage at a glance:
+//   PENDING                 → "Pending"           (no offer yet)
+//   ASSIGNMENT_OFFERED      → "Offer Sent"        (offer outstanding)
+//   ASSIGNMENT_RE_OFFERED   → "Re-offer Pending"  (second-round offer)
+// The previous concern that "Offer Sent" misled admins (since the
+// cascade can flip a booking to ASSIGNMENT_OFFERED without an
+// explicit admin click) is now addressed in the detail panel
+// itself: an "Awaiting Vendor Response" banner names the vendor
+// who holds the offer, timestamps when it was sent, and explicitly
+// warns the admin that picking a new vendor will revoke the
+// outstanding offer. Label + banner reinforce each other; neither
+// hides the state.
 const statusConfig: Record<string, { label: string; color: string }> = {
   pending: {
     label: "Pending",
@@ -85,10 +107,446 @@ interface Booking {
   statusDisplay: string;
   amount: number;
   vehicleClass: string | null;
+  // Trip-type fields — match the partner portal's payload so the
+  // same visual treatment ports across (TripTypeBadge, CityBadge,
+  // smart Route cell rendering).
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+  city: string;
   isUnread: boolean;
   needsAttention: boolean;
   attentionReason: string | null;
   highlightType: string;
+}
+
+// ============================================================
+// TRIP DESCRIPTOR BADGES — admin booking list
+//
+// Visual language ported from the partner portal's bookings-panel
+// so the same booking reads identically wherever an internal user
+// sees it. The badges are intentionally compact (10px text, tiny
+// icons) to coexist with the existing dense table without
+// inflating row height.
+//
+//   HOURLY  → violet, Clock, hours-or-duration label
+//   ONE_WAY → teal, ArrowRight, "One Way"
+//   City    → sky, MapPin (HOURLY only; one-way's city is
+//              implicit in its route)
+//
+// SourceBadge distinguishes partner-routed bookings (gold,
+// briefcase, "via {Partner}") from direct customer bookings (gray,
+// person, "Direct customer"). Always rendered — the answer to
+// "where did this come from" is operationally important.
+// ============================================================
+
+const CITY_LABEL_LIST: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+const VEHICLE_CLASS_LABEL_LIST: Record<string, string> = {
+  ECONOMY_SEDAN: "Economy Sedan",
+  BUSINESS_SEDAN: "Business Sedan",
+  FIRST_CLASS: "First Class",
+  BUSINESS_SUV: "Business SUV",
+  HIACE: "Hiace",
+  COASTER: "Coaster",
+  KING_LONG: "King Long",
+  ELECTRIC: "Electric",
+};
+
+function TripTypeBadge({
+  tripType,
+  hours,
+}: {
+  tripType: string;
+  hours: number | null;
+}) {
+  const isHourly = tripType === "HOURLY";
+  const label = isHourly ? (hours ? `${hours}h` : "Hourly") : "One Way";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${
+        isHourly
+          ? "bg-violet-500/10 text-violet-400 border-violet-500/20"
+          : "bg-teal-500/10 text-teal-400 border-teal-500/20"
+      }`}
+    >
+      {isHourly ? (
+        <Clock className="w-2.5 h-2.5" />
+      ) : (
+        <ArrowRight className="w-2.5 h-2.5" />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function CityBadge({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-sky-500/10 text-sky-300 border-sky-500/20 whitespace-nowrap">
+      <MapPin className="w-2.5 h-2.5" />
+      {CITY_LABEL_LIST[city] || city}
+    </span>
+  );
+}
+
+function VehicleClassBadge({ vehicleClass }: { vehicleClass: string | null }) {
+  if (!vehicleClass) return null;
+  const label =
+    VEHICLE_CLASS_LABEL_LIST[vehicleClass] || vehicleClass.replace(/_/g, " ");
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-neutral-800/80 text-gray-300 border-neutral-600 whitespace-nowrap">
+      <Car className="w-2.5 h-2.5" />
+      {label}
+    </span>
+  );
+}
+
+function SourceBadge({ partner }: { partner: { companyName: string } | null }) {
+  if (partner) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-luxury-gold/10 text-luxury-gold border-luxury-gold/30 whitespace-nowrap max-w-[180px]"
+        title={`Booked via ${partner.companyName}`}
+      >
+        <Briefcase className="w-2.5 h-2.5 flex-shrink-0" />
+        <span className="truncate">via {partner.companyName}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-neutral-700/30 text-gray-400 border-neutral-600/40 whitespace-nowrap">
+      <User className="w-2.5 h-2.5" />
+      Direct customer
+    </span>
+  );
+}
+
+// ============================================================
+// PO DOWNLOAD
+//
+// Fetches the server-rendered PO HTML and opens it in a new window
+// with print-to-PDF auto-triggered. Same flow as the partner portal's
+// PO download: the browser becomes the PDF generator. Server-side PDF
+// (Puppeteer/wkhtmltopdf) is a later upgrade — this works everywhere
+// today without extra infrastructure.
+//
+// Errors surface via the notification context that the caller is
+// expected to have available; we re-throw rather than swallow so the
+// caller can show feedback.
+// ============================================================
+async function downloadPOWindow(bookingId: string): Promise<void> {
+  const res: any = await adminApi.getBookingPO(bookingId);
+  const html = res?.data?.html;
+  const title = res?.data?.meta?.title || "Purchase Order";
+  if (!html) throw new Error("No PO content returned");
+  const win = window.open("", "_blank");
+  if (!win) {
+    throw new Error("Popup blocked — allow popups to download the PO");
+  }
+  win.document.title = title;
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  // Give the document a moment to lay out, then trigger print.
+  setTimeout(() => {
+    try {
+      win.focus();
+      win.print();
+    } catch {
+      /* user can still print manually via Cmd/Ctrl+P */
+    }
+  }, 300);
+}
+
+// ============================================================
+// BookingMap — Google Static Map showing the trip's location(s)
+//
+// Same geometry as the partner portal version: dark map style to
+// match the panel chrome, green P pin at pickup, red D pin at
+// drop-off (ONE_WAY only) with a faint connector line, single P
+// pin centered for HOURLY since there's no fixed destination.
+//
+// Click anywhere on the map opens Google Maps in a new tab:
+//   ONE_WAY → /maps/dir/?origin=...&destination=...  (directions)
+//   HOURLY  → /maps/search/?query=lat,lng           (point lookup)
+// The hover affordance pill in the bottom-right tells the admin
+// the click is interactive without cluttering the static image.
+// Returns null if the API key isn't configured or coords missing,
+// so the rest of the detail panel keeps rendering cleanly.
+// ============================================================
+function BookingMap({
+  tripType,
+  pickupLat,
+  pickupLng,
+  dropoffLat,
+  dropoffLng,
+}: {
+  tripType: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  dropoffLat: number | null;
+  dropoffLng: number | null;
+}) {
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!apiKey || pickupLat == null || pickupLng == null) return null;
+
+  const isHourly = tripType === "HOURLY";
+  const hasDropoff = !isHourly && dropoffLat != null && dropoffLng != null;
+
+  const darkStyle = [
+    "feature:all|element:geometry|color:0x1f2937",
+    "feature:all|element:labels.text.fill|color:0x9ca3af",
+    "feature:all|element:labels.text.stroke|color:0x111827",
+    "feature:water|element:geometry|color:0x0f172a",
+    "feature:road|element:geometry|color:0x374151",
+    "feature:road.highway|element:geometry|color:0x4b5563",
+    "feature:road|element:labels.text.fill|color:0xd1d5db",
+    "feature:poi|element:geometry|color:0x1f2937",
+    "feature:poi|element:labels|visibility:off",
+    "feature:transit|visibility:off",
+    "feature:administrative|element:geometry.stroke|color:0x374151",
+  ]
+    .map((s) => `&style=${encodeURIComponent(s)}`)
+    .join("");
+
+  const pickupMarker = `&markers=${encodeURIComponent(
+    `color:0x10b981|label:P|${pickupLat},${pickupLng}`,
+  )}`;
+
+  let dropoffMarker = "";
+  let path = "";
+  if (hasDropoff) {
+    dropoffMarker = `&markers=${encodeURIComponent(
+      `color:0xef4444|label:D|${dropoffLat},${dropoffLng}`,
+    )}`;
+    // 50% alpha (0x...80) keeps the straight line subtle — viewers
+    // shouldn't read it as an actual driving route.
+    path = `&path=${encodeURIComponent(
+      `color:0x14b8a680|weight:4|${pickupLat},${pickupLng}|${dropoffLat},${dropoffLng}`,
+    )}`;
+  }
+
+  const url =
+    `https://maps.googleapis.com/maps/api/staticmap` +
+    `?size=600x220&scale=2&maptype=roadmap` +
+    pickupMarker +
+    dropoffMarker +
+    path +
+    darkStyle +
+    `&key=${apiKey}`;
+
+  const externalUrl = hasDropoff
+    ? `https://www.google.com/maps/dir/?api=1` +
+      `&origin=${pickupLat},${pickupLng}` +
+      `&destination=${dropoffLat},${dropoffLng}` +
+      `&travelmode=driving`
+    : `https://www.google.com/maps/search/?api=1` +
+      `&query=${pickupLat},${pickupLng}`;
+
+  return (
+    <a
+      href={externalUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block rounded-lg overflow-hidden border border-neutral-700 bg-neutral-950 hover:border-luxury-gold/40 transition-colors group relative"
+      title={
+        hasDropoff
+          ? "Open route in Google Maps"
+          : "Open pickup location in Google Maps"
+      }
+    >
+      <img
+        src={url}
+        alt={hasDropoff ? "Pickup and drop-off locations" : "Pickup location"}
+        className="w-full h-auto block"
+        loading="lazy"
+      />
+      <div className="absolute bottom-2 right-2 px-2 py-1 rounded-md bg-black/70 border border-white/10 text-[11px] text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 backdrop-blur-sm">
+        <ChevronRight className="w-3 h-3" />
+        {hasDropoff ? "View route in Google Maps" : "View on Google Maps"}
+      </div>
+    </a>
+  );
+}
+
+// ============================================================
+// ServiceDayTimeline — 24-hour strip for HOURLY bookings
+//
+// Linear day-strip placing the booked window inside the day's full
+// context. The map shows WHERE, this shows WHEN — and crucially,
+// *when in the day* (early morning vs evening vs overnight). The
+// strip handles midnight wraparound by rendering two violet bars
+// on the same axis with a "Spans midnight" caption.
+//
+// Geometry constants and the minute→x mapping are kept inside the
+// component so layout changes only need to touch one place.
+// ============================================================
+function ServiceDayTimeline({
+  startTime,
+  hours,
+}: {
+  startTime: string;
+  hours: number | null;
+}) {
+  if (!startTime || !hours || hours <= 0) return null;
+
+  const [hhStr, mmStr] = startTime.split(":");
+  const hh = parseInt(hhStr, 10);
+  const mm = parseInt(mmStr, 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+
+  const startMinutes = hh * 60 + mm;
+  const endMinutes = startMinutes + hours * 60;
+  const wrapsMidnight = endMinutes > 24 * 60;
+
+  const VB_W = 480;
+  const VB_H = 72;
+  const AXIS_LEFT = 28;
+  const AXIS_RIGHT = 460;
+  const AXIS_Y = 44;
+  const BAR_H = 14;
+  const AXIS_LEN = AXIS_RIGHT - AXIS_LEFT;
+
+  const minuteToX = (m: number) => {
+    const clamped = Math.max(0, Math.min(1440, m));
+    return AXIS_LEFT + (clamped / 1440) * AXIS_LEN;
+  };
+
+  const startX = minuteToX(startMinutes);
+  const segment1EndX = wrapsMidnight ? minuteToX(1440) : minuteToX(endMinutes);
+  const segment2EndX = wrapsMidnight ? minuteToX(endMinutes - 1440) : AXIS_LEFT;
+  const segment2Width = wrapsMidnight ? segment2EndX - AXIS_LEFT : 0;
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const startLabel = `${pad(hh)}:${pad(mm)}`;
+  const endTotalMin = endMinutes % 1440;
+  const endLabel = `${pad(Math.floor(endTotalMin / 60))}:${pad(endTotalMin % 60)}`;
+
+  const startAnchor: "start" | "middle" | "end" =
+    startX > VB_W * 0.8 ? "end" : startX < VB_W * 0.1 ? "start" : "middle";
+  const endX = wrapsMidnight ? segment2EndX : segment1EndX;
+  const endAnchor: "start" | "middle" | "end" =
+    endX > VB_W * 0.9 ? "end" : endX < VB_W * 0.1 ? "start" : "middle";
+
+  const hourTicks = [0, 6, 12, 18, 24];
+
+  return (
+    <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <Clock className="w-3.5 h-3.5 text-violet-400" />
+          <p className="text-xs uppercase tracking-wide text-violet-300">
+            Service Day
+          </p>
+        </div>
+        {wrapsMidnight && (
+          <span className="text-[10px] text-violet-300/70 italic">
+            Spans midnight
+          </span>
+        )}
+      </div>
+      <svg
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        className="w-full h-auto"
+        role="img"
+        aria-label={`Booking from ${startLabel} for ${hours} hours${wrapsMidnight ? ", spans midnight" : ""}`}
+      >
+        <line
+          x1={AXIS_LEFT}
+          y1={AXIS_Y + BAR_H / 2}
+          x2={AXIS_RIGHT}
+          y2={AXIS_Y + BAR_H / 2}
+          stroke="#3f3f46"
+          strokeWidth="1"
+        />
+        {hourTicks.map((h) => {
+          const x = minuteToX(h * 60);
+          return (
+            <g key={h}>
+              <line
+                x1={x}
+                y1={AXIS_Y + BAR_H / 2 - 3}
+                x2={x}
+                y2={AXIS_Y + BAR_H / 2 + 3}
+                stroke="#52525b"
+                strokeWidth="1"
+              />
+              <text
+                x={x}
+                y={AXIS_Y + BAR_H + 14}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#6b7280"
+              >
+                {h === 24 ? "00" : pad(h)}
+              </text>
+            </g>
+          );
+        })}
+        <rect
+          x={startX}
+          y={AXIS_Y}
+          width={Math.max(2, segment1EndX - startX)}
+          height={BAR_H}
+          rx={3}
+          fill="#8b5cf6"
+        />
+        {wrapsMidnight && segment2Width > 0 && (
+          <rect
+            x={AXIS_LEFT}
+            y={AXIS_Y}
+            width={Math.max(2, segment2Width)}
+            height={BAR_H}
+            rx={3}
+            fill="#8b5cf6"
+            opacity={0.6}
+          />
+        )}
+        <line
+          x1={startX}
+          y1={AXIS_Y - 6}
+          x2={startX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={startX}
+          y={AXIS_Y - 9}
+          textAnchor={startAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {startLabel}
+        </text>
+        <line
+          x1={endX}
+          y1={AXIS_Y - 6}
+          x2={endX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={endX}
+          y={AXIS_Y - 9}
+          textAnchor={endAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {endLabel}
+          {wrapsMidnight ? " +1d" : ""}
+        </text>
+      </svg>
+    </div>
+  );
 }
 
 interface BookingDetail {
@@ -106,6 +564,20 @@ interface BookingDetail {
   vehicleClass: string | null;
   vehicleClassDisplay: string | null;
   passengers: number | null;
+  // Trip-type and locational fields — match the partner detail
+  // payload so the Service Window / Trip Route cards, the static
+  // map, and the Service Day timeline can all consume the same
+  // shape across portals.
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+  city: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  dropoffLat: number | null;
+  dropoffLng: number | null;
+  flightNumber: string | null;
+  terminalNo: string | null;
   vendorAssignment: any;
   availableVendors: { count: number; rejectedCount: number };
   actions: {
@@ -153,6 +625,11 @@ interface StatusCounts {
   inProgress: number;
   completed: number;
   cancelled: number;
+  // Subset of `pending` that actually requires admin action right
+  // now — never-offered PENDING bookings + stuck offer-state ones
+  // with no live offer. Used to badge only the Pending tab so admins
+  // see real work, not all pending-bucket rows.
+  needsAction: number;
 }
 
 // Reasons admin can record on behalf of a vendor. Backend accepts these
@@ -193,6 +670,7 @@ export default function BookingList({
     inProgress: 0,
     completed: 0,
     cancelled: 0,
+    needsAction: 0,
   });
   const [alerts, setAlerts] = useState({ unreadCount: 0, attentionCount: 0 });
   const [isLoading, setIsLoading] = useState(true);
@@ -283,6 +761,7 @@ export default function BookingList({
               inProgress: 0,
               completed: 0,
               cancelled: 0,
+              needsAction: 0,
             },
           );
           setAlerts(res.data.alerts || { unreadCount: 0, attentionCount: 0 });
@@ -651,15 +1130,42 @@ export default function BookingList({
           )}
         </div>
         <div className="flex flex-wrap gap-1.5">
-          {statusTabs.map((tab) => (
-            <button
-              key={tab.value}
-              onClick={() => setStatusFilter(tab.value)}
-              className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${statusFilter === tab.value ? "bg-luxury-gold text-black font-semibold" : "bg-neutral-800 text-gray-400 hover:text-white"}`}
-            >
-              {tab.label} ({tab.count})
-            </button>
-          ))}
+          {statusTabs.map((tab) => {
+            // Only the Pending tab gets a count badge, and only when
+            // there's actually work waiting. Matches the vendor
+            // portal's "New Requests" badge approach — counts are
+            // for work queues, not passive filters. The badge here
+            // counts a narrower set than the tab itself filters
+            // (needsAction ⊂ pending), so admins see "5 need
+            // action" even when the tab opens to a longer list of
+            // pending-bucket bookings.
+            const showBadge = tab.value === "pending" && counts.needsAction > 0;
+            const isActive = statusFilter === tab.value;
+            return (
+              <button
+                key={tab.value}
+                onClick={() => setStatusFilter(tab.value)}
+                className={`px-3 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1.5 ${
+                  isActive
+                    ? "bg-luxury-gold text-black font-semibold"
+                    : "bg-neutral-800 text-gray-400 hover:text-white"
+                }`}
+              >
+                {tab.label}
+                {showBadge && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                      isActive
+                        ? "bg-black/20 text-black"
+                        : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                    }`}
+                  >
+                    {counts.needsAction}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -715,7 +1221,7 @@ export default function BookingList({
                       className={`hover:bg-neutral-800/30 transition-colors ${b.highlightType === "attention" ? "bg-red-500/5" : b.highlightType === "unread" ? "bg-blue-500/5" : ""}`}
                     >
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 mb-1">
                           {b.isUnread && (
                             <span className="w-2 h-2 bg-blue-400 rounded-full flex-shrink-0" />
                           )}
@@ -726,11 +1232,19 @@ export default function BookingList({
                             {b.bookingRef}
                           </span>
                         </div>
-                        {b.partner && (
-                          <p className="text-xs text-purple-400 mt-0.5">
-                            {b.partner.companyName}
-                          </p>
-                        )}
+                        {/* Trip type + city + vehicle class descriptors */}
+                        <div className="flex flex-wrap items-center gap-1 mb-1">
+                          <TripTypeBadge
+                            tripType={b.tripType}
+                            hours={b.hours}
+                          />
+                          {b.tripType === "HOURLY" && (
+                            <CityBadge city={b.city} />
+                          )}
+                          <VehicleClassBadge vehicleClass={b.vehicleClass} />
+                        </div>
+                        {/* Source — always rendered. */}
+                        <SourceBadge partner={b.partner} />
                       </td>
                       <td className="px-4 py-3">
                         <p className="text-white text-sm">{b.customer.name}</p>
@@ -741,12 +1255,29 @@ export default function BookingList({
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <p className="text-white text-sm truncate max-w-[140px]">
-                          {b.route.pickup || "—"}
-                        </p>
-                        <p className="text-xs text-gray-500 truncate max-w-[140px]">
-                          → {b.route.dropoff || "—"}
-                        </p>
+                        {/* Smart route cell.
+                            HOURLY: pickup-only with green pin (no
+                              fixed drop-off; arrow would mislead).
+                            ONE_WAY: pickup → drop-off, same compact
+                              two-line layout as before. */}
+                        {b.tripType === "HOURLY" ? (
+                          <div className="flex items-start gap-1.5 max-w-[180px]">
+                            <MapPin className="w-3 h-3 text-emerald-400 mt-0.5 flex-shrink-0" />
+                            <p className="text-white text-sm truncate">
+                              {b.route.pickup || "—"}
+                            </p>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="text-white text-sm truncate max-w-[180px]">
+                              {b.route.pickup || "—"}
+                            </p>
+                            <p className="text-xs text-gray-500 truncate max-w-[180px] flex items-center gap-1">
+                              <ArrowRight className="w-3 h-3 flex-shrink-0" />
+                              {b.route.dropoff || "—"}
+                            </p>
+                          </>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <p className="text-white text-sm">
@@ -760,9 +1291,20 @@ export default function BookingList({
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <p className="text-sm text-gray-300">
-                          {b.vendor?.companyName || "Unassigned"}
-                        </p>
+                        {/* Vendor cell. Unassigned gets an amber
+                            warning pill — visible call-to-action for
+                            admin's queue. Assigned vendors render
+                            plainly. */}
+                        {b.vendor ? (
+                          <p className="text-sm text-gray-300">
+                            {b.vendor.companyName}
+                          </p>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-amber-500/10 text-amber-400 border-amber-500/30">
+                            <AlertCircle className="w-3 h-3" />
+                            Unassigned
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span
@@ -775,12 +1317,38 @@ export default function BookingList({
                         SAR {Number(b.amount).toLocaleString()}
                       </td>
                       <td className="px-4 py-3">
-                        <button
-                          onClick={() => handleSelectBooking(b.id)}
-                          className="p-1.5 text-gray-400 hover:text-luxury-gold hover:bg-luxury-gold/10 rounded transition-colors"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        {/* Action cell: view + PO download. The PO
+                            button matches the partner-portal pattern;
+                            opens the PO HTML in a new tab with print
+                            triggered. */}
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleSelectBooking(b.id)}
+                            className="p-1.5 text-gray-400 hover:text-luxury-gold hover:bg-luxury-gold/10 rounded transition-colors"
+                            title="View details"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              try {
+                                await downloadPOWindow(b.id);
+                              } catch (err) {
+                                showNotification(
+                                  "error",
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Could not open PO",
+                                );
+                              }
+                            }}
+                            className="p-1.5 text-gray-400 hover:text-luxury-gold hover:bg-luxury-gold/10 rounded transition-colors"
+                            title="Download Purchase Order"
+                          >
+                            <Download className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -814,18 +1382,71 @@ export default function BookingList({
                       {getStatusLabel(b.status)}
                     </span>
                   </div>
+
+                  {/* Badges row — trip type, city (HOURLY), vehicle,
+                      source. Wraps on narrow viewports; identical
+                      badge set to the desktop table. */}
+                  <div className="flex flex-wrap items-center gap-1 mb-2">
+                    <TripTypeBadge tripType={b.tripType} hours={b.hours} />
+                    {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
+                    <VehicleClassBadge vehicleClass={b.vehicleClass} />
+                    <SourceBadge partner={b.partner} />
+                  </div>
+
                   <p className="text-white text-sm">{b.customer.name}</p>
-                  <p className="text-xs text-gray-500 truncate">
-                    {b.route.pickup} → {b.route.dropoff}
-                  </p>
+                  {/* Route — same HOURLY/ONE_WAY branching as desktop. */}
+                  {b.tripType === "HOURLY" ? (
+                    <p className="text-xs text-gray-500 truncate flex items-center gap-1">
+                      <MapPin className="w-3 h-3 text-emerald-400 flex-shrink-0" />
+                      {b.route.pickup || "—"}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-500 truncate">
+                      {b.route.pickup} → {b.route.dropoff}
+                    </p>
+                  )}
+
                   <div className="flex items-center justify-between mt-2 pt-2 border-t border-neutral-700">
-                    <span className="text-xs text-gray-400">
-                      {new Date(b.tripDate).toLocaleDateString()} ·{" "}
-                      {b.vendor?.companyName || "Unassigned"}
-                    </span>
-                    <span className="text-sm text-white font-medium">
-                      SAR {Number(b.amount).toLocaleString()}
-                    </span>
+                    <div className="text-xs">
+                      <span className="text-gray-400">
+                        {new Date(b.tripDate).toLocaleDateString()}
+                      </span>
+                      <span className="text-gray-500 mx-1">·</span>
+                      {b.vendor ? (
+                        <span className="text-gray-400">
+                          {b.vendor.companyName}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-amber-400">
+                          <AlertCircle className="w-3 h-3" />
+                          Unassigned
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            await downloadPOWindow(b.id);
+                          } catch (err) {
+                            showNotification(
+                              "error",
+                              err instanceof Error
+                                ? err.message
+                                : "Could not open PO",
+                            );
+                          }
+                        }}
+                        className="p-1 text-gray-400 hover:text-luxury-gold rounded"
+                        title="Download PO"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="text-sm text-white font-medium">
+                        SAR {Number(b.amount).toLocaleString()}
+                      </span>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -964,49 +1585,236 @@ export default function BookingList({
                     </div>
                   </div>
 
-                  {/* Trip Details */}
-                  <div className="bg-neutral-800 rounded-xl p-4 mb-4">
-                    <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
-                      <MapPin className="w-4 h-4 text-luxury-gold" /> Trip
-                      Details
-                    </h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Pickup</span>
-                        <span className="text-white text-right max-w-[60%]">
-                          {selectedBooking.pickup || "—"}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Dropoff</span>
-                        <span className="text-white text-right max-w-[60%]">
-                          {selectedBooking.dropoff || "—"}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Date</span>
-                        <span className="text-white">
-                          {new Date(
-                            selectedBooking.tripDate,
-                          ).toLocaleDateString()}{" "}
-                          {selectedBooking.tripTime || ""}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Vehicle</span>
-                        <span className="text-white">
-                          {selectedBooking.vehicleClassDisplay || "—"}
-                        </span>
-                      </div>
-                      {selectedBooking.passengers && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Passengers</span>
-                          <span className="text-white">
-                            {selectedBooking.passengers}
+                  {/* Trip Details — trip-type-aware
+                      ──────────────────────────────────────────────
+                      Same dual-card pattern used in the partner
+                      portal's booking detail. HOURLY gets a violet
+                      Service Window card (duration / starts /
+                      ends-approx + pickup-only); ONE_WAY gets a
+                      teal Trip Route card (pickup → dots → drop-
+                      off). Both pair with a static map below; the
+                      Service Window also gets a Service Day
+                      timeline SVG so the admin can see *when* the
+                      booking sits in the day at a glance. Vehicle
+                      class + passenger count moved out of this
+                      block into their own row underneath since
+                      they're metadata about the booking, not the
+                      trip itself. */}
+                  {selectedBooking.tripType === "HOURLY" ? (
+                    (() => {
+                      // Best-effort end-of-service computation.
+                      // Failures (malformed time, edge math) just
+                      // suppress the end-time line rather than
+                      // throw and break the panel.
+                      let approxEnd: string | null = null;
+                      try {
+                        if (selectedBooking.hours && selectedBooking.tripTime) {
+                          const [hh, mm] = selectedBooking.tripTime
+                            .split(":")
+                            .map((n) => parseInt(n, 10));
+                          if (Number.isFinite(hh) && Number.isFinite(mm)) {
+                            const start = new Date();
+                            start.setHours(hh, mm, 0, 0);
+                            const end = new Date(
+                              start.getTime() +
+                                selectedBooking.hours * 3_600_000,
+                            );
+                            const pad = (n: number) =>
+                              String(n).padStart(2, "0");
+                            const sameDay =
+                              end.getDate() === start.getDate() &&
+                              end.getMonth() === start.getMonth();
+                            approxEnd = `${pad(end.getHours())}:${pad(
+                              end.getMinutes(),
+                            )}${sameDay ? "" : " (next day)"}`;
+                          }
+                        }
+                      } catch {
+                        approxEnd = null;
+                      }
+                      return (
+                        <div className="space-y-3 mb-4">
+                          <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
+                            <div className="flex items-center gap-2">
+                              <Clock className="w-4 h-4 text-violet-400" />
+                              <p className="text-xs uppercase tracking-wide text-violet-300">
+                                Service Window
+                              </p>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  Duration
+                                </p>
+                                <p className="text-white font-medium">
+                                  {selectedBooking.hours
+                                    ? `${selectedBooking.hours} hours`
+                                    : "By the Hour"}
+                                </p>
+                                {selectedBooking.hourlyDuration &&
+                                  selectedBooking.hourlyDuration !==
+                                    `${selectedBooking.hours} hours` && (
+                                    <p className="text-[11px] text-gray-500 mt-0.5">
+                                      {selectedBooking.hourlyDuration}
+                                    </p>
+                                  )}
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  Starts
+                                </p>
+                                <p className="text-white font-medium">
+                                  {selectedBooking.tripTime || "—"}
+                                </p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">
+                                  {new Date(
+                                    selectedBooking.tripDate,
+                                  ).toLocaleDateString("en-SA", {
+                                    weekday: "short",
+                                    month: "short",
+                                    day: "numeric",
+                                  })}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  Ends (approx.)
+                                </p>
+                                <p className="text-white font-medium">
+                                  {approxEnd || "—"}
+                                </p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">
+                                  No fixed drop-off
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-2 pt-3 border-t border-violet-500/15">
+                              <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                              <div className="min-w-0">
+                                <p className="text-[11px] text-gray-500">
+                                  Pickup
+                                </p>
+                                <p className="text-sm text-white">
+                                  {selectedBooking.pickup || "—"}
+                                </p>
+                              </div>
+                            </div>
+                            {selectedBooking.flightNumber && (
+                              <p className="text-xs text-gray-400">
+                                Flight: {selectedBooking.flightNumber}
+                                {selectedBooking.terminalNo
+                                  ? ` · Terminal: ${selectedBooking.terminalNo}`
+                                  : ""}
+                              </p>
+                            )}
+                          </div>
+                          <ServiceDayTimeline
+                            startTime={selectedBooking.tripTime || ""}
+                            hours={selectedBooking.hours}
+                          />
+                          <BookingMap
+                            tripType="HOURLY"
+                            pickupLat={selectedBooking.pickupLat}
+                            pickupLng={selectedBooking.pickupLng}
+                            dropoffLat={null}
+                            dropoffLng={null}
+                          />
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="space-y-3 mb-4">
+                      <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <ArrowRight className="w-4 h-4 text-teal-400" />
+                          <p className="text-xs uppercase tracking-wide text-teal-300">
+                            Trip Route
+                          </p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] text-gray-500">Pickup</p>
+                            <p className="text-sm text-white">
+                              {selectedBooking.pickup || "—"}
+                            </p>
+                          </div>
+                        </div>
+                        {/* Vertical connector dots — same visual cue
+                            travel apps use for flight legs, signals
+                            "these two addresses belong to one trip". */}
+                        <div className="flex items-center gap-2 pl-1.5">
+                          <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                          <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                          <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <MapPin className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] text-gray-500">
+                              Drop-off
+                            </p>
+                            <p className="text-sm text-white">
+                              {selectedBooking.dropoff || "—"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="pt-3 border-t border-teal-500/15 flex items-center justify-between text-xs">
+                          <span className="text-gray-500">
+                            {new Date(
+                              selectedBooking.tripDate,
+                            ).toLocaleDateString("en-SA", {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                            })}
+                          </span>
+                          <span className="text-white font-medium">
+                            {selectedBooking.tripTime || "—"}
                           </span>
                         </div>
-                      )}
+                        {selectedBooking.flightNumber && (
+                          <p className="text-xs text-gray-400">
+                            Flight: {selectedBooking.flightNumber}
+                            {selectedBooking.terminalNo
+                              ? ` · Terminal: ${selectedBooking.terminalNo}`
+                              : ""}
+                          </p>
+                        )}
+                      </div>
+                      <BookingMap
+                        tripType="ONE_WAY"
+                        pickupLat={selectedBooking.pickupLat}
+                        pickupLng={selectedBooking.pickupLng}
+                        dropoffLat={selectedBooking.dropoffLat}
+                        dropoffLng={selectedBooking.dropoffLng}
+                      />
                     </div>
+                  )}
+
+                  {/* Vehicle / Passenger meta — small row beneath the
+                      Service Window / Trip Route card. Previously this
+                      lived inside the old Trip Details box; pulling it
+                      out keeps the location card focused on the trip
+                      and frees the vehicle/passenger metadata to read
+                      as its own small fact line. */}
+                  <div className="bg-neutral-800 rounded-xl p-3 mb-4 flex items-center gap-4 text-sm">
+                    <div className="flex items-center gap-2">
+                      <Car className="w-4 h-4 text-luxury-gold" />
+                      <span className="text-gray-400">Vehicle:</span>
+                      <span className="text-white">
+                        {selectedBooking.vehicleClassDisplay || "—"}
+                      </span>
+                    </div>
+                    {selectedBooking.passengers && (
+                      <div className="flex items-center gap-2">
+                        <User className="w-4 h-4 text-luxury-gold" />
+                        <span className="text-gray-400">Passengers:</span>
+                        <span className="text-white">
+                          {selectedBooking.passengers}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Pricing */}
@@ -1193,6 +2001,140 @@ export default function BookingList({
                           Record Vendor Rejection (Offline)
                         </button>
                       </div>
+                    ) : selectedBooking.vendorAssignment?.status ===
+                      "awaiting" ? (
+                      /* ============== AWAITING VENDOR RESPONSE ==============
+                          Booking is in ASSIGNMENT_OFFERED or
+                          ASSIGNMENT_RE_OFFERED — an offer has been
+                          sent to a specific vendor and the system is
+                          waiting for them to accept/reject. Surface
+                          this prominently so the admin sees:
+                            - WHO holds the offer (vendor name)
+                            - WHEN it was sent (offerSentAt timestamp)
+                            - HOW MUCH was offered (vendorPayoutAmount)
+                            - That picking a NEW vendor below will
+                              revoke the current outstanding offer
+                          The previous UI just said "No vendor
+                          assigned" which was wrong — there IS a
+                          vendor on the booking, they just haven't
+                          responded yet. That mismatch led admins
+                          to casually click through to the vendor
+                          selector and unintentionally override an
+                          in-flight offer. */
+                      (() => {
+                        const va = selectedBooking.vendorAssignment;
+                        const sentAt = va.offerSentAt
+                          ? new Date(va.offerSentAt)
+                          : null;
+                        // Compose a friendly "N {min/hour/day} ago" string
+                        // from the timestamp. Falls back to absolute time
+                        // for unusual ranges.
+                        let relative: string | null = null;
+                        let absolute: string | null = null;
+                        if (sentAt && !isNaN(sentAt.getTime())) {
+                          const diffMs = Date.now() - sentAt.getTime();
+                          const mins = Math.floor(diffMs / 60_000);
+                          if (mins < 1) relative = "just now";
+                          else if (mins < 60) relative = `${mins}m ago`;
+                          else if (mins < 60 * 24)
+                            relative = `${Math.floor(mins / 60)}h ago`;
+                          else relative = `${Math.floor(mins / 1440)}d ago`;
+                          absolute = sentAt.toLocaleString("en-SA", {
+                            month: "short",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        }
+                        const isReOffer = !!va.isReOffer;
+                        const accentColor = isReOffer ? "amber" : "purple";
+                        return (
+                          <div className="space-y-3">
+                            <div
+                              className={`rounded-xl border p-4 ${
+                                accentColor === "amber"
+                                  ? "border-amber-500/30 bg-amber-500/5"
+                                  : "border-purple-500/30 bg-purple-500/5"
+                              }`}
+                            >
+                              <div className="flex items-start gap-3">
+                                {/* Pulsing dot — small motion cue
+                                    that the booking is in a "live,
+                                    waiting" state rather than just
+                                    static metadata. Same accent
+                                    color as the panel border. */}
+                                <div className="relative flex-shrink-0 mt-1">
+                                  <span
+                                    className={`absolute inset-0 rounded-full animate-ping ${
+                                      accentColor === "amber"
+                                        ? "bg-amber-400/40"
+                                        : "bg-purple-400/40"
+                                    }`}
+                                  />
+                                  <span
+                                    className={`relative block w-2.5 h-2.5 rounded-full ${
+                                      accentColor === "amber"
+                                        ? "bg-amber-400"
+                                        : "bg-purple-400"
+                                    }`}
+                                  />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p
+                                    className={`text-xs font-semibold uppercase tracking-wide ${
+                                      accentColor === "amber"
+                                        ? "text-amber-300"
+                                        : "text-purple-300"
+                                    }`}
+                                  >
+                                    {isReOffer
+                                      ? "Awaiting Vendor Response · Re-offer"
+                                      : "Awaiting Vendor Response"}
+                                  </p>
+                                  <p className="text-white text-sm font-medium mt-1">
+                                    {va.vendor?.companyName ||
+                                      "Selected vendor"}
+                                  </p>
+                                  {va.vendorPayoutAmount != null && (
+                                    <p className="text-xs text-gray-400 mt-0.5">
+                                      Offered payout: SAR{" "}
+                                      {Number(
+                                        va.vendorPayoutAmount,
+                                      ).toLocaleString()}
+                                    </p>
+                                  )}
+                                  {relative && (
+                                    <p className="text-xs text-gray-400 mt-1.5 flex items-center gap-1.5">
+                                      <Clock className="w-3 h-3" />
+                                      Sent {relative}
+                                      {absolute && (
+                                        <span className="text-gray-500">
+                                          · {absolute}
+                                        </span>
+                                      )}
+                                      {va.offerAttemptNumber != null &&
+                                        va.offerAttemptNumber > 1 && (
+                                          <span className="text-gray-500">
+                                            · attempt {va.offerAttemptNumber}
+                                          </span>
+                                        )}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                              <p className="mt-3 pt-3 border-t border-white/10 text-xs text-gray-400 flex items-start gap-1.5">
+                                <AlertCircle className="w-3.5 h-3.5 text-gray-400 flex-shrink-0 mt-0.5" />
+                                <span>
+                                  Choosing a different vendor below will revoke
+                                  this offer. The current vendor will be
+                                  notified that the booking is no longer
+                                  available.
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })()
                     ) : (
                       <p className="text-sm text-gray-500">
                         No vendor assigned
@@ -1235,6 +2177,21 @@ export default function BookingList({
                     {selectedBooking.actions.canAssignVendor &&
                       !isReOfferState && (
                         <div className="mt-4 pt-4 border-t border-neutral-700">
+                          {/* Override heading — only shown when an
+                              offer is already outstanding. Makes it
+                              explicit that the vendor selector is for
+                              overriding, not initial assignment, so
+                              the admin opts in deliberately rather
+                              than thinking they're just "picking a
+                              vendor for the first time". */}
+                          {selectedBooking.vendorAssignment?.status ===
+                            "awaiting" && (
+                            <p className="text-xs text-amber-300 mb-2 flex items-center gap-1.5">
+                              <AlertCircle className="w-3 h-3" />
+                              Override — pick a different vendor (revokes the
+                              current offer)
+                            </p>
+                          )}
                           {/* Three states:
                               1. Not yet loaded (first paint of a freshly
                                  selected booking before the auto-load

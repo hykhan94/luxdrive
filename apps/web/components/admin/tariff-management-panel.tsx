@@ -28,6 +28,17 @@ const CITIES = [
   { id: "MADINAH", name: "Madinah", province: "Western Province" },
 ];
 
+// Fixed duration tiers for HOURLY tariffs. Industry-standard chauffeur
+// pricing structure — admins pick from this list rather than free-typing
+// so labels stay consistent across cities and with the partner-side
+// book-ride flow that displays them. Must match the backend's
+// HOURLY_DURATION_TIERS constant.
+const HOURLY_DURATION_TIERS = [
+  "6-8 Hours (Day Rate)",
+  "Extra Hour (After 8 Hours)",
+  "Per Hour Rate",
+] as const;
+
 interface VehicleClassInfo {
   key: string;
   name: string;
@@ -101,6 +112,7 @@ export default function TariffManagementPanel() {
   const [newRoute, setNewRoute] = useState({
     pickup: "",
     dropoff: "",
+    durationTier: "",
     isPerKm: false,
   });
   const [deleteTarget, setDeleteTarget] = useState<{
@@ -273,25 +285,54 @@ export default function TariffManagementPanel() {
   };
 
   const handleAddRoute = async () => {
-    if (!newRoute.pickup || !newRoute.dropoff) return;
+    // Validation branches on tab. For hourly, durationTier must be
+    // selected; for one-way, pickup AND dropoff must both be present.
+    if (activeTab === "hourly") {
+      if (!newRoute.durationTier) return;
+    } else {
+      if (!newRoute.pickup || !newRoute.dropoff) return;
+    }
     setIsSaving(true);
     try {
-      const res = await api.post(`${ADMIN_BASE}/routes`, {
-        city: activeCity,
-        routeType: activeTab === "hourly" ? "HOURLY" : "ONE_WAY",
-        pickupLocation: newRoute.pickup,
-        dropoffLocation: newRoute.dropoff,
-        isPerKm: newRoute.isPerKm,
-      });
+      const payload =
+        activeTab === "hourly"
+          ? {
+              city: activeCity,
+              routeType: "HOURLY" as const,
+              durationTier: newRoute.durationTier,
+            }
+          : {
+              city: activeCity,
+              routeType: "ONE_WAY" as const,
+              pickupLocation: newRoute.pickup,
+              dropoffLocation: newRoute.dropoff,
+              isPerKm: newRoute.isPerKm,
+            };
+      const res = await api.post(`${ADMIN_BASE}/routes`, payload);
       if (res.success) {
-        showNotification("success", res.message || "Route added");
+        showNotification(
+          "success",
+          res.message ||
+            (activeTab === "hourly" ? "Tier added" : "Route added"),
+        );
         setShowAddRouteModal(false);
-        setNewRoute({ pickup: "", dropoff: "", isPerKm: false });
+        setNewRoute({
+          pickup: "",
+          dropoff: "",
+          durationTier: "",
+          isPerKm: false,
+        });
         fetchCityTariffs(activeCity);
         fetchChangeHistory(1);
       }
     } catch (err: any) {
-      showNotification("error", err.message || "Failed to add route");
+      showNotification(
+        "error",
+        err.message ||
+          (activeTab === "hourly"
+            ? "Failed to add tier"
+            : "Failed to add route"),
+      );
     } finally {
       setIsSaving(false);
     }
@@ -364,13 +405,34 @@ export default function TariffManagementPanel() {
             <Percent className="w-4 h-4" />
             <span className="hidden sm:inline">Bulk Update</span>
           </button>
-          <button
-            onClick={() => setShowAddRouteModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-luxury-gold text-black rounded-lg hover:bg-luxury-gold/90 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span className="hidden sm:inline">Add Route</span>
-          </button>
+          {activeTab !== "eco" &&
+            (() => {
+              // For Hourly: disable + relabel if all three tiers
+              // already exist for this city, so the admin gets clear
+              // feedback rather than opening an empty-dropdown modal.
+              const allTiersAdded =
+                activeTab === "hourly" &&
+                HOURLY_DURATION_TIERS.every((tier) =>
+                  hourlyRoutes.some((r) => r.routeName === tier),
+                );
+              return (
+                <button
+                  onClick={() => setShowAddRouteModal(true)}
+                  disabled={allTiersAdded}
+                  title={
+                    allTiersAdded
+                      ? "All three hourly tiers are already added for this city"
+                      : undefined
+                  }
+                  className="flex items-center gap-2 px-4 py-2 bg-luxury-gold text-black rounded-lg hover:bg-luxury-gold/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span className="hidden sm:inline">
+                    {activeTab === "hourly" ? "Add Tier" : "Add Route"}
+                  </span>
+                </button>
+              );
+            })()}
         </div>
       </div>
 
@@ -476,7 +538,7 @@ export default function TariffManagementPanel() {
               <thead className="bg-neutral-800">
                 <tr>
                   <th className="text-left text-xs font-medium px-4 py-3 uppercase text-gray-400 sticky left-0 z-10 bg-neutral-800">
-                    Route
+                    {activeTab === "hourly" ? "Duration Tier" : "Route"}
                   </th>
                   {displayVehicleClasses.map((v) => (
                     <th
@@ -507,7 +569,9 @@ export default function TariffManagementPanel() {
                       <td className="px-4 py-3 sticky left-0 z-10 bg-neutral-900">
                         <div className="flex items-center gap-2">
                           <span className="text-sm text-white whitespace-nowrap">
-                            {route.pickupLocation} → {route.dropoffLocation}
+                            {activeTab === "hourly"
+                              ? route.routeName
+                              : `${route.pickupLocation} → ${route.dropoffLocation}`}
                           </span>
                           {route.isTBD && (
                             <span className="px-1.5 py-0.5 text-xs bg-yellow-500/20 text-yellow-400 rounded border border-yellow-500/30">
@@ -620,7 +684,9 @@ export default function TariffManagementPanel() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-sm text-white font-medium">
-                        {route.pickupLocation} → {route.dropoffLocation}
+                        {activeTab === "hourly"
+                          ? route.routeName
+                          : `${route.pickupLocation} → ${route.dropoffLocation}`}
                       </span>
                       {route.isTBD && (
                         <span className="px-1.5 py-0.5 text-[10px] bg-yellow-500/20 text-yellow-400 rounded">
@@ -1130,7 +1196,7 @@ export default function TariffManagementPanel() {
           <div className="relative w-full max-w-md mx-4 bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl">
             <div className="flex items-center justify-between p-5 border-b border-neutral-800">
               <h3 className="text-lg font-semibold text-white">
-                Add New Route
+                {activeTab === "hourly" ? "Add Hourly Tier" : "Add New Route"}
               </h3>
               <button
                 onClick={() => setShowAddRouteModal(false)}
@@ -1140,60 +1206,118 @@ export default function TariffManagementPanel() {
               </button>
             </div>
             <div className="p-5 space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">
-                  Pickup Location
-                </label>
-                <input
-                  type="text"
-                  value={newRoute.pickup}
-                  onChange={(e) =>
-                    setNewRoute((prev) => ({ ...prev, pickup: e.target.value }))
-                  }
-                  placeholder="e.g. Riyadh City"
-                  className="w-full px-4 py-2.5 bg-neutral-800 border border-neutral-700 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-luxury-gold"
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">
-                  Drop-off Location
-                </label>
-                <input
-                  type="text"
-                  value={newRoute.dropoff}
-                  onChange={(e) =>
-                    setNewRoute((prev) => ({
-                      ...prev,
-                      dropoff: e.target.value,
-                    }))
-                  }
-                  placeholder="e.g. New Destination"
-                  className="w-full px-4 py-2.5 bg-neutral-800 border border-neutral-700 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-luxury-gold"
-                />
-              </div>
-              <div className="flex items-center gap-3 p-3 bg-neutral-800 rounded-lg">
-                <input
-                  type="checkbox"
-                  id="isPerKm"
-                  checked={newRoute.isPerKm}
-                  onChange={(e) =>
-                    setNewRoute((prev) => ({
-                      ...prev,
-                      isPerKm: e.target.checked,
-                    }))
-                  }
-                  className="w-4 h-4 rounded border-neutral-600 text-luxury-gold focus:ring-luxury-gold bg-neutral-700"
-                />
-                <label htmlFor="isPerKm" className="text-sm text-gray-300">
-                  This is a per-kilometer route
-                </label>
-              </div>
-              <p className="text-xs text-gray-500">
-                New route will be added to{" "}
-                {CITIES.find((c) => c.id === activeCity)?.name} as{" "}
-                {activeTab === "hourly" ? "Hourly" : "One Way"}. You can set
-                prices after adding.
-              </p>
+              {activeTab === "hourly" ? (
+                // Hourly tier picker. Tiers are a fixed three-value set;
+                // already-added tiers for this city are disabled in the
+                // dropdown so the admin can't create duplicates. If all
+                // three exist the dropdown shows only disabled options
+                // and the submit button stays disabled.
+                <>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">
+                      Duration Tier
+                    </label>
+                    <select
+                      value={newRoute.durationTier}
+                      onChange={(e) =>
+                        setNewRoute((prev) => ({
+                          ...prev,
+                          durationTier: e.target.value,
+                        }))
+                      }
+                      className="w-full px-4 py-2.5 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:outline-none focus:border-luxury-gold"
+                    >
+                      <option value="">Select a tier…</option>
+                      {HOURLY_DURATION_TIERS.map((tier) => {
+                        const alreadyAdded = hourlyRoutes.some(
+                          (r) => r.routeName === tier,
+                        );
+                        return (
+                          <option
+                            key={tier}
+                            value={tier}
+                            disabled={alreadyAdded}
+                          >
+                            {tier}
+                            {alreadyAdded ? "  (already added)" : ""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                  <div className="p-3 bg-neutral-800/60 border border-neutral-800 rounded-lg">
+                    <p className="text-xs text-gray-400 leading-relaxed">
+                      Hourly tariffs are organised by duration tier, not by
+                      pickup/drop-off. Pick a tier, then set the per-vehicle
+                      prices after adding.
+                    </p>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Tier will be added to{" "}
+                    {CITIES.find((c) => c.id === activeCity)?.name}.
+                  </p>
+                </>
+              ) : (
+                // One Way — original pickup / dropoff / per-km inputs.
+                <>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">
+                      Pickup Location
+                    </label>
+                    <input
+                      type="text"
+                      value={newRoute.pickup}
+                      onChange={(e) =>
+                        setNewRoute((prev) => ({
+                          ...prev,
+                          pickup: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g. Riyadh City"
+                      className="w-full px-4 py-2.5 bg-neutral-800 border border-neutral-700 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-luxury-gold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">
+                      Drop-off Location
+                    </label>
+                    <input
+                      type="text"
+                      value={newRoute.dropoff}
+                      onChange={(e) =>
+                        setNewRoute((prev) => ({
+                          ...prev,
+                          dropoff: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g. New Destination"
+                      className="w-full px-4 py-2.5 bg-neutral-800 border border-neutral-700 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-luxury-gold"
+                    />
+                  </div>
+                  <div className="flex items-center gap-3 p-3 bg-neutral-800 rounded-lg">
+                    <input
+                      type="checkbox"
+                      id="isPerKm"
+                      checked={newRoute.isPerKm}
+                      onChange={(e) =>
+                        setNewRoute((prev) => ({
+                          ...prev,
+                          isPerKm: e.target.checked,
+                        }))
+                      }
+                      className="w-4 h-4 rounded border-neutral-600 text-luxury-gold focus:ring-luxury-gold bg-neutral-700"
+                    />
+                    <label htmlFor="isPerKm" className="text-sm text-gray-300">
+                      This is a per-kilometer route
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    New route will be added to{" "}
+                    {CITIES.find((c) => c.id === activeCity)?.name} as One Way.
+                    You can set prices after adding.
+                  </p>
+                </>
+              )}
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-neutral-800">
               <button
@@ -1204,11 +1328,16 @@ export default function TariffManagementPanel() {
               </button>
               <button
                 onClick={handleAddRoute}
-                disabled={!newRoute.pickup || !newRoute.dropoff || isSaving}
+                disabled={
+                  isSaving ||
+                  (activeTab === "hourly"
+                    ? !newRoute.durationTier
+                    : !newRoute.pickup || !newRoute.dropoff)
+                }
                 className="px-4 py-2 bg-luxury-gold hover:bg-luxury-gold/90 disabled:opacity-50 text-black rounded-lg transition-colors flex items-center gap-2"
               >
                 {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-                Add Route
+                {activeTab === "hourly" ? "Add Tier" : "Add Route"}
               </button>
             </div>
           </div>

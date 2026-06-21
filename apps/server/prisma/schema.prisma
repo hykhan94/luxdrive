@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/server/prisma/schema.prisma
+// ============================================
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -859,6 +862,16 @@ model DriverDocument {
 model Booking {
   id         String @id @default(cuid())
   bookingRef String @unique
+
+  // Public-facing trip card token. Customers receive a short
+  // WhatsApp message with a link to /trip/{shareToken}. The token
+  // is opaque (non-guessable) so it can serve as a no-auth read
+  // gate for the trip card page without exposing booking IDs in
+  // URLs. Generated on creation in the controller layer via the
+  // nanoid helper; permanent on the row, but the trip-card
+  // endpoint refuses to render once the booking is >30 days past
+  // its trip date.
+  shareToken String? @unique
 
   // Relations
   customerId String?

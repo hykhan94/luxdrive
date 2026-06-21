@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/route/vendor/bookings.route.ts
+// ============================================
+// ============================================
 // apps/server/src/route/vendor/bookings.route.ts
 // Vendor Portal — Bookings Routes
 // ============================================
@@ -13,6 +16,7 @@ import {
   startTrip,
   completeTrip,
   exportBookingsCsv,
+  downloadBookingPO,
 } from "../../controller/vendor/bookings.controller";
 
 const router = Router();
@@ -40,5 +44,9 @@ router.patch("/:bookingId/start", startTrip);
 
 // Complete trip (IN_PROGRESS → COMPLETED)
 router.patch("/:bookingId/complete", completeTrip);
+
+// PO download — vendor perspective (partner section hidden, source
+// tag suppressed). Scoped to bookings belonging to this vendor.
+router.get("/:bookingId/po", downloadBookingPO);
 
 export default router;

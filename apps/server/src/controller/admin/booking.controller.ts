@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/admin/booking.controller.ts
+// ============================================
+// ============================================
 // apps/server/src/controller/admin/booking.controller.ts
 // ============================================
 
@@ -14,6 +17,7 @@ import {
   getVendorStatusDisplay,
 } from "../../utils/helpers/booking.helpers";
 import { findEligibleVendors } from "../../lib/offer-cascade";
+import { buildPOHtml } from "../../utils/helpers/po.helpers";
 import {
   notifyVendorOfOffer,
   notifyVendorOfReOffer,
@@ -147,6 +151,32 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
     else if (item.status === "CANCELLED") counts.cancelled = item._count.status;
   });
 
+  // "Needs action" — bookings genuinely waiting on admin, not the
+  // broader Pending-tab grouping. The Pending tab also catches
+  // bookings that are already offered to a vendor and just awaiting
+  // *that vendor's* response, which is not admin work. Two genuine
+  // admin-owed states:
+  //   (a) status = PENDING — booking has never been offered, admin
+  //       owes the initial dispatch decision.
+  //   (b) status = ASSIGNMENT_OFFERED/RE_OFFERED with NO live PENDING
+  //       offer row — stale state where the cascade failed to seat
+  //       a new offer after a rejection. Admin needs to step in and
+  //       reassign manually.
+  // Mirrors the vendor portal's "New Requests" badge — count only
+  // truly actionable items, never the passive in-flight rows.
+  const needsActionCount = await prisma.booking.count({
+    where: {
+      OR: [
+        { status: "PENDING" },
+        {
+          status: { in: ["ASSIGNMENT_OFFERED", "ASSIGNMENT_RE_OFFERED"] },
+          assignmentOffers: { none: { status: "PENDING" } },
+        },
+      ],
+    },
+  });
+  (counts as any).needsAction = needsActionCount;
+
   const formattedBookings = bookings.map((booking) => ({
     id: booking.id,
     bookingRef: booking.bookingRef,
@@ -172,6 +202,16 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
     statusDisplay: formatStatusForUI(booking.status),
     amount: booking.totalPrice,
     vehicleClass: booking.vehicleClass,
+    // Trip-type fields. Mirrors the partner portal's booking list
+    // payload exactly so the same visual treatment ports across:
+    // violet HOURLY chip with hours/duration, teal ONE_WAY chip,
+    // sky CITY chip for HOURLY. The Route cell in the table also
+    // branches on tripType (pickup-only for HOURLY since there's
+    // no fixed drop-off).
+    tripType: booking.tripType,
+    hours: booking.hours,
+    hourlyDuration: (booking as any).hourlyDuration || null,
+    city: booking.city,
     isUnread: !booking.isReadByAdmin,
     needsAttention: booking.needsAttention,
     attentionReason: booking.attentionReason,
@@ -264,7 +304,36 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
     rejectedAt: o.respondedAt,
     attemptNumber: o.attemptNumber,
   }));
-  const vendorAssignment = buildVendorAssignment(booking, rejectionReasons);
+
+  // Active pending offer — the single source of truth about whether
+  // an offer is currently outstanding. We query unconditionally
+  // (NOT gated on booking.status) because booking.status/vendorId can
+  // desync from the offer table in practice:
+  //   - the vendor reject endpoint does the booking-clearing update
+  //     and the cascade in separate operations (not one transaction),
+  //     so a crash between them can leave an orphan;
+  //   - manual DB intervention from older bug-fix scripts can leave
+  //     bookings with cleared vendorId but live offers;
+  //   - any future state-machine path that forgets to keep the two
+  //     tables in sync.
+  // Whatever the cause, if a PENDING offer row exists, the booking
+  // IS awaiting a response — that's what matters. The vendor relation
+  // is included so the helper can identify who holds the offer even
+  // when booking.vendorId was cleared.
+  const activeOffer = await prisma.bookingAssignmentOffer.findFirst({
+    where: { bookingId: booking.id, status: "PENDING" },
+    orderBy: { offeredAt: "desc" },
+    include: {
+      vendor: { select: { id: true, companyName: true } },
+    },
+  });
+
+  const vendorAssignment = buildVendorAssignment(
+    booking,
+    rejectionReasons,
+    activeOffer,
+  );
+
   const timeline = buildStatusTimeline(booking, rejectionReasons);
 
   // For the "available vendors" pool we use the exact same eligibility
@@ -302,6 +371,24 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
       vehicleClass: booking.vehicleClass,
       vehicleClassDisplay: formatVehicleClass(booking.vehicleClass),
       passengers: booking.passengers,
+      // Trip-type fields — power the Service Window / Trip Route
+      // cards, the Service Day timeline, and the static map on the
+      // detail panel. Ported from the partner portal so admin and
+      // partner see the same booking the same way.
+      tripType: booking.tripType,
+      hours: booking.hours,
+      hourlyDuration: (booking as any).hourlyDuration || null,
+      city: booking.city,
+      // Geolocation. Both pickup and drop-off lat/lng are stored as
+      // optional Decimal columns; cast to Number for JSON. Drop-off
+      // is irrelevant for HOURLY (no fixed destination) but we send
+      // it regardless and let the frontend ignore based on tripType.
+      pickupLat: booking.pickupLat ? Number(booking.pickupLat) : null,
+      pickupLng: booking.pickupLng ? Number(booking.pickupLng) : null,
+      dropoffLat: booking.dropoffLat ? Number(booking.dropoffLat) : null,
+      dropoffLng: booking.dropoffLng ? Number(booking.dropoffLng) : null,
+      flightNumber: booking.flightNumber || null,
+      terminalNo: (booking as any).terminalNo || null,
       vendorAssignment,
       availableVendors: {
         count: availableVendorsCount,
@@ -321,9 +408,27 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
         canCancel: !["COMPLETED", "CANCELLED", "IN_PROGRESS"].includes(
           booking.status,
         ),
+        // "Needs reassignment" means admin owes action — vendor is
+        // not committed and no live offer is in flight either. Two
+        // ways this happens:
+        //   (a) booking is in ASSIGNMENT_OFFERED/RE_OFFERED state
+        //       BUT no PENDING offer row exists (stale state — the
+        //       cascade failed, or the offer was rejected and the
+        //       cascade-to-next-vendor never created a new one).
+        //   (b) booking is in PENDING after a rejection (rejection
+        //       history exists, no live offer).
+        // The presence of `activeOffer` is the canonical "live
+        // offer" check. Previously this flag was set whenever the
+        // booking was in offer state — which incorrectly flagged
+        // every freshly-assigned booking as "needs reassignment"
+        // the instant admin clicked Assign Vendor, since admin sees
+        // ASSIGNMENT_OFFERED right away. Now: only fire when the
+        // offer state has actually gone stale.
         needsReassignment:
-          booking.status === "ASSIGNMENT_OFFERED" ||
-          booking.status === "ASSIGNMENT_RE_OFFERED",
+          ((booking.status === "ASSIGNMENT_OFFERED" ||
+            booking.status === "ASSIGNMENT_RE_OFFERED") &&
+            !activeOffer) ||
+          (booking.status === "PENDING" && rejectionReasons.length > 0),
       },
       timeline,
       totalAmount: booking.totalPrice,
@@ -574,19 +679,35 @@ export const assignVendor = asyncWrapper(
       );
     }
 
-    // And if there's already a PENDING offer outstanding for this booking,
-    // refuse — admin would be double-offering, which the unique constraint
-    // (bookingId, vendorId, attemptNumber) would catch anyway but a
-    // cleaner error message is friendlier.
+    // Outstanding-offer handling — supports override semantics.
+    //   • If the existing PENDING offer is to the SAME vendor admin is
+    //     trying to (re)assign — refuse with a clear error. That's a
+    //     no-op or accidental double-click; the unique constraint on
+    //     (bookingId, vendorId, attemptNumber) would catch it anyway.
+    //   • If it's to a DIFFERENT vendor — admin is overriding. Mark
+    //     the previous offer REJECTED and create the new one in a
+    //     single transaction below. Vendor X gets a notification that
+    //     their offer was withdrawn; Vendor Y gets the standard
+    //     new-offer notification.
+    // The "Override" framing in the frontend (`Override — pick a
+    // different vendor (revokes the current offer)`) is now backed
+    // by real backend behaviour. Previously this branch threw, which
+    // contradicted the UI promise.
     const existingPending = await prisma.bookingAssignmentOffer.findFirst({
       where: { bookingId: id, status: "PENDING" },
-      include: { vendor: { select: { companyName: true } } },
+      include: {
+        vendor: { select: { id: true, companyName: true, userId: true } },
+      },
     });
-    if (existingPending) {
+    if (existingPending && existingPending.vendorId === vendorId) {
       throw new BadRequestError(
-        `An offer is already pending with ${existingPending.vendor?.companyName ?? "another vendor"}. Wait for their response or have them reject first.`,
+        `Booking is already offered to ${existingPending.vendor?.companyName ?? "this vendor"}. Wait for their response.`,
       );
     }
+    const isOverride = !!existingPending;
+    const displacedVendorId = existingPending?.vendorId ?? null;
+    const displacedVendorUserId = existingPending?.vendor?.userId ?? null;
+    const displacedVendorName = existingPending?.vendor?.companyName ?? null;
 
     const vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundError("Vendor");
@@ -630,9 +751,33 @@ export const assignVendor = asyncWrapper(
       }
     }
 
-    // Create offer row + transition booking in a single transaction.
-    // Array form keeps the typing simple for the custom Prisma client.
-    const [offer, updatedBooking] = await prisma.$transaction([
+    // Create offer row + transition booking + (when overriding) close
+    // the previously-outstanding offer — all in one transaction so we
+    // never leave the booking in an inconsistent state.
+    //
+    // When `isOverride`, we mark the displaced offer REJECTED with
+    // reason CAR_DRIVER_UNAVAILABLE. None of the three current enum
+    // values exactly captures "admin withdrew the offer", but
+    // CAR_DRIVER_UNAVAILABLE is the closest pragmatic match (admin
+    // determined the previous vendor wasn't going to fulfill). The
+    // audit log entry below preserves the truth of WHO closed the
+    // offer (admin, not vendor). A future schema migration could add
+    // a WITHDRAWN_BY_ADMIN status or rejection reason for cleaner
+    // audit fidelity; tracked separately.
+    const txOps: any[] = [];
+    if (isOverride && existingPending) {
+      txOps.push(
+        prisma.bookingAssignmentOffer.update({
+          where: { id: existingPending.id },
+          data: {
+            status: "REJECTED",
+            rejectionReason: "CAR_DRIVER_UNAVAILABLE",
+            respondedAt: new Date(),
+          },
+        }),
+      );
+    }
+    txOps.push(
       prisma.bookingAssignmentOffer.create({
         data: {
           bookingId: id,
@@ -642,6 +787,8 @@ export const assignVendor = asyncWrapper(
           status: "PENDING",
         },
       }),
+    );
+    txOps.push(
       prisma.booking.update({
         where: { id },
         data: {
@@ -655,18 +802,89 @@ export const assignVendor = asyncWrapper(
         },
         include: { vendor: { select: { companyName: true } } },
       }),
-    ]);
+    );
+    const results = await prisma.$transaction(txOps);
+    // The new offer is either the second op (override case, after the
+    // displaced-offer update) or the first op (fresh case). Booking
+    // update is always last.
+    const offer = isOverride ? results[1] : results[0];
+    const updatedBooking = results[results.length - 1];
 
     await notifyVendorOfOffer(offer.id);
 
+    // Notify the displaced vendor that admin withdrew their offer.
+    // Inlined (rather than going through offer-notifications.ts) since
+    // this is an admin-action notification, conceptually distinct from
+    // vendor-action notifications that file lives for. If this becomes
+    // a pattern (e.g. admin-initiated revokes from other endpoints),
+    // promote to a `notifyVendorOfWithdrawal` helper.
+    if (isOverride && displacedVendorUserId) {
+      try {
+        await prisma.notification.create({
+          data: {
+            userId: displacedVendorUserId,
+            title: "Booking Offer Withdrawn",
+            message: `The offer for booking ${booking.bookingRef} has been withdrawn by admin and reassigned. You no longer need to respond.`,
+            type: "BOOKING_OFFER_WITHDRAWN",
+            data: {
+              bookingId: id,
+              bookingRef: booking.bookingRef,
+              reassignedTo: vendorId,
+            },
+          },
+        });
+      } catch (err) {
+        // Don't fail the override on a notification glitch — admin
+        // already committed the swap; vendor will simply not see the
+        // proactive message but their UI will still reflect the
+        // booking is no longer in their pending-offers list.
+        console.error("Failed to notify displaced vendor:", err);
+      }
+    }
+
+    // Audit log — distinguish a clean assign from an override so
+    // dispute resolution can trace decision history. The displaced
+    // vendor id is captured for that purpose.
+    await prisma.auditLog
+      .create({
+        data: {
+          userId: req.user!.id,
+          action: isOverride
+            ? "BOOKING_OFFER_OVERRIDDEN_BY_ADMIN"
+            : "BOOKING_ASSIGNED_TO_VENDOR",
+          entity: "Booking",
+          entityId: id,
+          changes: {
+            bookingRef: booking.bookingRef,
+            newVendorId: vendorId,
+            payoutAmount: payoutNum,
+            ...(isOverride
+              ? {
+                  displacedVendorId,
+                  displacedVendorName,
+                  displacedOfferId: existingPending?.id,
+                }
+              : {}),
+          },
+        },
+      })
+      .catch((err) => {
+        console.error("Audit log write failed:", err);
+      });
+
     res.json({
       success: true,
-      message: `Booking offered to ${updatedBooking.vendor?.companyName} at SAR ${payoutNum.toFixed(2)}`,
+      message: isOverride
+        ? `Booking reassigned from ${displacedVendorName ?? "previous vendor"} to ${updatedBooking.vendor?.companyName} at SAR ${payoutNum.toFixed(2)}.`
+        : `Booking offered to ${updatedBooking.vendor?.companyName} at SAR ${payoutNum.toFixed(2)}`,
       data: {
         id: updatedBooking.id,
         status: updatedBooking.status,
         offerId: offer.id,
         payoutAmount: payoutNum,
+        ...(isOverride
+          ? { displacedVendorId, displacedOfferId: existingPending?.id }
+          : {}),
       },
     });
   },
@@ -1014,5 +1232,71 @@ export const recordVendorRejection = asyncWrapper(
         data: { id, nextAction: "CANCELLED" },
       });
     }
+  },
+);
+
+// ============== DOWNLOAD PURCHASE ORDER PDF ==============
+//
+// Admin can download a PO for any booking, regardless of whether it
+// came in via the partner portal or directly from a customer. The PO
+// itself is identical to the one a partner downloads for their own
+// booking — same template, same trip-type branching, same pricing
+// breakdown — generated by the shared `buildPOHtml` helper. The only
+// difference is that direct customer bookings have no Partner
+// Information section: that block is omitted entirely and the PO
+// header carries a small "Direct customer" source tag instead.
+
+export const downloadBookingPO = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    const booking = await prisma.booking.findUnique({
+      where: { id },
+      include: {
+        customer: {
+          select: { id: true, name: true, email: true, phone: true },
+        },
+        partner: true,
+        vendor: {
+          select: {
+            id: true,
+            companyName: true,
+            crNumber: true,
+            vatNumber: true,
+            contactPerson: true,
+            contactPhone: true,
+            address: true,
+          },
+        },
+        driver: { select: { firstName: true, lastName: true, phone: true } },
+        vehicle: {
+          select: {
+            make: true,
+            model: true,
+            year: true,
+            plateNumber: true,
+            color: true,
+          },
+        },
+      },
+    });
+
+    if (!booking) throw new NotFoundError("Booking");
+
+    const poHtml = buildPOHtml(booking, booking.partner, "admin");
+
+    res.json({
+      success: true,
+      data: {
+        bookingRef: booking.bookingRef,
+        html: poHtml,
+        meta: {
+          fileName: `PO-${booking.bookingRef}.pdf`,
+          title: `Purchase Order — ${booking.bookingRef}`,
+          partner: booking.partner?.companyName || "Direct customer",
+          date: new Date().toISOString(),
+        },
+      },
+    });
   },
 );

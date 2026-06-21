@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/server/src/controller/vendor/dashboard.controller.ts
+// ============================================
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { getReadUrl } from "../../lib/gcs";
@@ -319,10 +322,23 @@ export const getRecentBookings = asyncWrapper(
           pickupAddress: true,
           dropoffAddress: true,
           tripType: true,
+          // Trip-type detail fields drive the violet HOURLY chip with
+          // hours label, the sky CityBadge (HOURLY only), and the
+          // smart route cell (HOURLY shows pickup-only). Same shape
+          // partner + admin recent-bookings consume.
+          hours: true,
+          hourlyDuration: true,
+          city: true,
           tripDate: true,
           tripTime: true,
           vehicleClass: true,
           totalPrice: true,
+          // Vendor cares about their payout, not the customer's
+          // total price. Surfaced alongside totalPrice — the row
+          // can show vendorPayoutAmount as the headline number for
+          // the vendor; totalPrice is left here in case anything
+          // downstream still expects it.
+          vendorPayoutAmount: true,
           status: true,
           // source / partner intentionally not selected — vendor-facing
           // responses don't carry booking-origin attribution.
@@ -341,10 +357,16 @@ export const getRecentBookings = asyncWrapper(
       pickupAddress: b.pickupAddress,
       dropoffAddress: b.dropoffAddress,
       tripType: b.tripType,
+      hours: b.hours,
+      hourlyDuration: (b as any).hourlyDuration || null,
+      city: b.city,
       tripDate: b.tripDate,
       tripTime: b.tripTime,
       vehicleClass: b.vehicleClass,
       totalPrice: Number(b.totalPrice),
+      vendorPayoutAmount: b.vendorPayoutAmount
+        ? Number(b.vendorPayoutAmount)
+        : null,
       status: b.status,
       // isPartnerBooking / partnerName intentionally omitted.
       driverName: b.driver

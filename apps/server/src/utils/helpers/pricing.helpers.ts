@@ -114,14 +114,20 @@ export function formatVehicleClassDisplay(vehicleClass: string): {
   const displayMap: Record<string, { name: string; description: string }> = {
     ECONOMY_SEDAN: {
       name: "Economy Sedan",
-      description: "Ford Taurus or Similar",
+      description: "Ford Taurus / Lexus or Similar",
     },
     BUSINESS_SEDAN: {
       name: "Business Sedan",
-      description: "Mercedes E-Class or Similar",
+      description: "Mercedes E-Class / BMW 5 series or Similar",
     },
-    BUSINESS_SUV: { name: "Business SUV", description: "GMC Yukon or Similar" },
-    FIRST_CLASS: { name: "First Class", description: "Rolls Royce or Similar" },
+    BUSINESS_SUV: {
+      name: "Business SUV",
+      description: "GMC Yukon / Chevrolet Tahoe or Similar",
+    },
+    FIRST_CLASS: {
+      name: "First Class",
+      description: "BMW 7 series / Mercedes Benz S Class or Similar",
+    },
     ELECTRIC: { name: "Electric", description: "Lucid Air or Similar" },
     HIACE: { name: "Hiace", description: "Toyota Hiace" },
     COASTER: { name: "Coaster", description: "Toyota Coaster" },

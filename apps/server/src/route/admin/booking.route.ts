@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/route/admin/booking.route.ts
+// ============================================
+// ============================================
 // apps/server/src/route/admin/booking.route.ts
 // ============================================
 
@@ -16,6 +19,7 @@ import {
   resolveAttention,
   markAsRead,
   markAllAsRead,
+  downloadBookingPO,
 } from "../../controller/admin/booking.controller";
 
 const router = Router();
@@ -43,5 +47,8 @@ router.post("/:id/vendor-rejection", recordVendorRejection);
 // Status Management
 router.patch("/:id/status", updateBookingStatus);
 router.patch("/:id/cancel", cancelBooking);
+
+// Download Purchase Order PDF (HTML for browser print-to-PDF)
+router.get("/:id/po", downloadBookingPO);
 
 export default router;

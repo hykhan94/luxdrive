@@ -3533,7 +3533,9 @@ export default function VendorManagementPanel({
                                       ? photoRejected
                                         ? "bg-red-500/5 border-red-500/20"
                                         : "bg-amber-500/5 border-amber-500/20"
-                                      : "bg-neutral-800/50 border-neutral-800"
+                                      : photoReplaced
+                                        ? "bg-blue-500/5 border-blue-500/30"
+                                        : "bg-neutral-800/50 border-neutral-800"
                               }`}
                             >
                               <div className="flex items-center justify-between mb-2">
@@ -3749,7 +3751,9 @@ export default function VendorManagementPanel({
                                       ? idRejected
                                         ? "bg-red-500/5 border-red-500/20"
                                         : "bg-amber-500/5 border-amber-500/20"
-                                      : "bg-neutral-800/50 border-neutral-800"
+                                      : idReplaced
+                                        ? "bg-blue-500/5 border-blue-500/30"
+                                        : "bg-neutral-800/50 border-neutral-800"
                               }`}
                             >
                               <div className="flex items-center justify-between mb-2">
@@ -3994,7 +3998,9 @@ export default function VendorManagementPanel({
                                       ? licRejected
                                         ? "bg-red-500/5 border-red-500/20"
                                         : "bg-amber-500/5 border-amber-500/20"
-                                      : "bg-neutral-800/50 border-neutral-800"
+                                      : licReplaced
+                                        ? "bg-blue-500/5 border-blue-500/30"
+                                        : "bg-neutral-800/50 border-neutral-800"
                               }`}
                             >
                               <div className="flex items-center justify-between mb-2">
@@ -4783,7 +4789,9 @@ export default function VendorManagementPanel({
                                           ? docRejected
                                             ? "bg-red-500/5 border-red-500/20"
                                             : "bg-amber-500/5 border-amber-500/20"
-                                          : "bg-neutral-800/50 border-neutral-800"
+                                          : fileReplaced
+                                            ? "bg-blue-500/5 border-blue-500/30"
+                                            : "bg-neutral-800/50 border-neutral-800"
                                   }`}
                                 >
                                   <div className="flex items-center justify-between mb-2">

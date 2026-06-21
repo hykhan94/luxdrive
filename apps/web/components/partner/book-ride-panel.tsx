@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/partner/book-ride-panel.tsx
+// ============================================
 "use client";
 
 // ============================================
@@ -54,6 +57,12 @@ interface VehicleOption {
   available: boolean;
   isPeakActive: boolean;
   peakMultiplier: number | null;
+  // Set by backend on HOURLY responses only. unavailableReason surfaces
+  // the calculator's exact rejection ("Per Hour Rate is not configured
+  // for X in Y"); pendingHours signals the partner hasn't picked hours
+  // yet so prices are placeholders.
+  unavailableReason?: string | null;
+  pendingHours?: boolean;
 }
 
 interface PriceBreakdownData {
@@ -64,6 +73,20 @@ interface PriceBreakdownData {
   vatRate: number;
   vatAmount: number;
   totalPrice: number;
+  // Populated only for HOURLY bookings — backend returns a structured
+  // breakdown of how the bracket logic resolved (day rate vs per-hour
+  // vs day + extras).
+  hourly?: {
+    hours: number;
+    tier: "PER_HOUR" | "DAY_RATE" | "DAY_RATE_PLUS_EXTRA";
+    breakdown: Array<{
+      label: string;
+      hours: number | null;
+      rate: number;
+      amount: number;
+    }>;
+    subtotalBeforePeak: number;
+  } | null;
 }
 
 // ============== CONSTANTS ==============
@@ -305,7 +328,18 @@ export default function BookRidePanel({
     }));
     try {
       const res = await partnerApi.getAvailableRoutes({ city, tripType });
-      if (res.data?.routes) setRoutes(res.data.routes);
+      const fetchedRoutes: RouteOption[] = res.data?.routes || [];
+      setRoutes(fetchedRoutes);
+
+      // For HOURLY, the partner shouldn't be choosing among the three
+      // tier rows — that's a calculator-internal detail. Auto-pick the
+      // first available hourly row so the backend's routeId requirement
+      // is satisfied transparently. The calculator (called downstream)
+      // doesn't care which tier we hand it; it derives the right rate
+      // from `hours` regardless.
+      if (tripType === "HOURLY" && fetchedRoutes.length > 0) {
+        setFormData((prev) => ({ ...prev, routeId: fetchedRoutes[0].id }));
+      }
     } catch (err: any) {
       showNotification("error", err.message || "Failed to load routes");
     } finally {
@@ -319,34 +353,63 @@ export default function BookRidePanel({
 
   // ============== FETCH VEHICLES when route selected ==============
   const fetchVehicles = useCallback(
-    async (routeId: string) => {
+    async (routeId: string, hoursForHourly: string | null) => {
       if (!routeId) return;
       setLoadingVehicles(true);
       setVehicles([]);
       setPriceBreakdown(null);
       setFormData((prev) => ({ ...prev, vehicleClass: "" }));
       try {
-        const res = await partnerApi.getVehicleOptions({ routeId });
+        // For HOURLY, hours drives the calculator-based per-vehicle
+        // pricing. If hours isn't set yet, backend returns vehicles
+        // with placeholder prices and pendingHours=true; we still
+        // render them as disabled so the user knows what to do next.
+        const params: Record<string, any> = { routeId };
+        if (tripType === "HOURLY" && hoursForHourly) {
+          params.hours = Number(hoursForHourly);
+        }
+        const res = await partnerApi.getVehicleOptions(params);
         if (res.data?.vehicles) setVehicles(res.data.vehicles);
+        // Also accept allVehicles for HOURLY so users can see why a
+        // class is unavailable. Falls back to vehicles[] when backend
+        // doesn't return allVehicles.
+        if (tripType === "HOURLY" && res.data?.allVehicles) {
+          setVehicles(res.data.allVehicles);
+        }
       } catch (err: any) {
         showNotification("error", err.message || "Failed to load vehicles");
       } finally {
         setLoadingVehicles(false);
       }
     },
-    [showNotification],
+    [showNotification, tripType],
   );
 
   // ============== FETCH PRICE when vehicle selected ==============
   const fetchPrice = useCallback(
-    async (routeId: string, vehicleClass: string) => {
+    async (
+      routeId: string,
+      vehicleClass: string,
+      hoursForHourly: string | number | null,
+    ) => {
       if (!routeId || !vehicleClass) return;
+      // For HOURLY, hours is mandatory. Don't kick off a request that
+      // we already know will return a "hours required" error — just
+      // wait until the partner picks a value.
+      if (tripType === "HOURLY" && !hoursForHourly) {
+        setPriceBreakdown(null);
+        return;
+      }
       setLoadingPrice(true);
       setPriceBreakdown(null);
       try {
         const res = await partnerApi.getPriceBreakdown({
           routeId,
           vehicleClass,
+          // Backend reads hours when the route is HOURLY; harmless on ONE_WAY.
+          ...(tripType === "HOURLY" && hoursForHourly
+            ? { hours: Number(hoursForHourly) }
+            : {}),
         });
         if (res.data) setPriceBreakdown(res.data);
       } catch (err: any) {
@@ -355,10 +418,12 @@ export default function BookRidePanel({
         setLoadingPrice(false);
       }
     },
-    [showNotification],
+    [showNotification, tripType],
   );
 
-  // Route selected → pre-fill hint text + fetch vehicles
+  // Route selected → pre-fill hint text + fetch vehicles. For HOURLY,
+  // also re-trigger when hours changes so the per-vehicle preview
+  // prices reflect the new bracket.
   useEffect(() => {
     if (selectedRoute) {
       setFormData((prev) => ({
@@ -371,16 +436,30 @@ export default function BookRidePanel({
         dropoffLat: null,
         dropoffLng: null,
       }));
-      fetchVehicles(selectedRoute.id);
+      fetchVehicles(
+        selectedRoute.id,
+        tripType === "HOURLY" ? formData.hours : null,
+      );
     }
-  }, [selectedRoute?.id, fetchVehicles]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRoute?.id, tripType === "HOURLY" ? formData.hours : null]);
 
-  // Vehicle selected → fetch price
+  // Vehicle selected → fetch price. For HOURLY, also depends on hours.
   useEffect(() => {
     if (formData.routeId && formData.vehicleClass) {
-      fetchPrice(formData.routeId, formData.vehicleClass);
+      fetchPrice(
+        formData.routeId,
+        formData.vehicleClass,
+        tripType === "HOURLY" ? formData.hours : null,
+      );
     }
-  }, [formData.routeId, formData.vehicleClass, fetchPrice]);
+  }, [
+    formData.routeId,
+    formData.vehicleClass,
+    formData.hours,
+    tripType,
+    fetchPrice,
+  ]);
 
   // Pre-fill from rebook
   useEffect(() => {
@@ -401,7 +480,16 @@ export default function BookRidePanel({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.routeId || !formData.vehicleClass) {
-      showNotification("error", "Please select a route and vehicle");
+      showNotification(
+        "error",
+        tripType === "HOURLY"
+          ? "Please select hours and a vehicle"
+          : "Please select a route and vehicle",
+      );
+      return;
+    }
+    if (tripType === "HOURLY" && !formData.hours) {
+      showNotification("error", "Please select the number of hours");
       return;
     }
     if (!formData.pickupAddress) {
@@ -596,46 +684,92 @@ export default function BookRidePanel({
             </div>
           </div>
 
-          {/* STEP 3: Route */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">
-              Step 3: Select Route *
-            </label>
-            {loadingRoutes ? (
-              <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
-                <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
-                <span className="text-sm text-gray-400">Loading routes...</span>
-              </div>
-            ) : (
-              <select
-                required
-                value={formData.routeId}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    routeId: e.target.value,
-                    pickupAddress: "",
-                    pickupLat: null,
-                    pickupLng: null,
-                    dropoffAddress: "",
-                    dropoffLat: null,
-                    dropoffLng: null,
-                  })
-                }
-                className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-              >
-                <option value="">Select a route...</option>
-                {routes
-                  .filter((r) => !r.isExtraHour)
-                  .map((route) => (
-                    <option key={route.id} value={route.id}>
-                      {route.pickupLocation} → {route.dropoffLocation}
-                      {route.isPerKm ? " (Per KM)" : ""}
+          {/* STEP 3: Route (ONE_WAY) or Hours (HOURLY) */}
+          {tripType === "HOURLY" ? (
+            // For HOURLY, the partner picks hours — not a tier. The
+            // routeId is auto-set by fetchRoutes() to satisfy the
+            // backend; the calculator derives the rate from hours.
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                Step 3: Hours *
+              </label>
+              {loadingRoutes ? (
+                <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
+                  <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
+                  <span className="text-sm text-gray-400">
+                    Loading hourly rates...
+                  </span>
+                </div>
+              ) : routes.length === 0 ? (
+                <div className="flex items-center gap-2 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                  <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <p className="text-sm text-amber-400">
+                    Hourly bookings are not available for{" "}
+                    {CITIES.find((c) => c.id === city)?.name || city}. Please
+                    contact admin or pick a different city.
+                  </p>
+                </div>
+              ) : (
+                <select
+                  required
+                  value={formData.hours}
+                  onChange={(e) =>
+                    setFormData({ ...formData, hours: e.target.value })
+                  }
+                  className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
+                >
+                  <option value="">Select number of hours...</option>
+                  {[4, 6, 8, 10, 12].map((h) => (
+                    <option key={h} value={h}>
+                      {h} hours
                     </option>
                   ))}
-              </select>
-            )}
-          </div>
+                </select>
+              )}
+            </div>
+          ) : (
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                Step 3: Select Route *
+              </label>
+              {loadingRoutes ? (
+                <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
+                  <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
+                  <span className="text-sm text-gray-400">
+                    Loading routes...
+                  </span>
+                </div>
+              ) : (
+                <select
+                  required
+                  value={formData.routeId}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      routeId: e.target.value,
+                      pickupAddress: "",
+                      pickupLat: null,
+                      pickupLng: null,
+                      dropoffAddress: "",
+                      dropoffLat: null,
+                      dropoffLng: null,
+                    })
+                  }
+                  className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
+                >
+                  <option value="">Select a route...</option>
+                  {routes
+                    .filter((r) => !r.isExtraHour)
+                    .map((route) => (
+                      <option key={route.id} value={route.id}>
+                        {route.pickupLocation} → {route.dropoffLocation}
+                        {route.isPerKm ? " (Per KM)" : ""}
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
+          )}
 
           {/* STEP 4: Precise Pickup & Dropoff with Google Places */}
           {selectedRoute && (
@@ -680,33 +814,35 @@ export default function BookRidePanel({
                       })
                     }
                   />
-                  <PlacesAutocompleteInput
-                    label="Drop-off Address *"
-                    value={formData.dropoffAddress}
-                    placeholder={
-                      selectedRoute.dropoffLocation ||
-                      "Search drop-off location..."
-                    }
-                    required={tripType === "ONE_WAY"}
-                    cityBias={cityBias}
-                    icon="dropoff"
-                    onChange={(val) =>
-                      setFormData({
-                        ...formData,
-                        dropoffAddress: val,
-                        dropoffLat: null,
-                        dropoffLng: null,
-                      })
-                    }
-                    onSelect={(addr, lat, lng) =>
-                      setFormData({
-                        ...formData,
-                        dropoffAddress: addr,
-                        dropoffLat: lat,
-                        dropoffLng: lng,
-                      })
-                    }
-                  />
+                  {tripType === "ONE_WAY" && (
+                    <PlacesAutocompleteInput
+                      label="Drop-off Address *"
+                      value={formData.dropoffAddress}
+                      placeholder={
+                        selectedRoute.dropoffLocation ||
+                        "Search drop-off location..."
+                      }
+                      required
+                      cityBias={cityBias}
+                      icon="dropoff"
+                      onChange={(val) =>
+                        setFormData({
+                          ...formData,
+                          dropoffAddress: val,
+                          dropoffLat: null,
+                          dropoffLng: null,
+                        })
+                      }
+                      onSelect={(addr, lat, lng) =>
+                        setFormData({
+                          ...formData,
+                          dropoffAddress: addr,
+                          dropoffLat: lat,
+                          dropoffLng: lng,
+                        })
+                      }
+                    />
+                  )}
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -729,25 +865,27 @@ export default function BookRidePanel({
                       placeholder={selectedRoute.pickupLocation}
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2 flex items-center gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 text-red-400" /> Drop-off
-                      Address *
-                    </label>
-                    <input
-                      type="text"
-                      required={tripType === "ONE_WAY"}
-                      value={formData.dropoffAddress}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          dropoffAddress: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                      placeholder={selectedRoute.dropoffLocation}
-                    />
-                  </div>
+                  {tripType === "ONE_WAY" && (
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-2 flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-red-400" /> Drop-off
+                        Address *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={formData.dropoffAddress}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            dropoffAddress: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
+                        placeholder={selectedRoute.dropoffLocation}
+                      />
+                    </div>
+                  )}
                   {mapsError && (
                     <p className="sm:col-span-2 text-xs text-amber-400 flex items-center gap-1">
                       <AlertCircle className="w-3.5 h-3.5" /> Google Maps
@@ -768,15 +906,17 @@ export default function BookRidePanel({
                   Pickup{" "}
                   {formData.pickupLat ? "pinpointed" : "not pinpointed yet"}
                 </span>
-                <span
-                  className={`flex items-center gap-1 ${formData.dropoffLat ? "text-green-400" : "text-gray-500"}`}
-                >
+                {tripType === "ONE_WAY" && (
                   <span
-                    className={`w-1.5 h-1.5 rounded-full ${formData.dropoffLat ? "bg-green-400" : "bg-gray-600"}`}
-                  />
-                  Drop-off{" "}
-                  {formData.dropoffLat ? "pinpointed" : "not pinpointed yet"}
-                </span>
+                    className={`flex items-center gap-1 ${formData.dropoffLat ? "text-green-400" : "text-gray-500"}`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${formData.dropoffLat ? "bg-green-400" : "bg-gray-600"}`}
+                    />
+                    Drop-off{" "}
+                    {formData.dropoffLat ? "pinpointed" : "not pinpointed yet"}
+                  </span>
+                )}
               </div>
 
               {/* Airport fields */}
@@ -835,10 +975,9 @@ export default function BookRidePanel({
             </div>
           )}
 
-          {/* STEP 5: Date, Time, Passengers, Hours */}
-          <div
-            className={`grid gap-4 ${tripType === "HOURLY" ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"}`}
-          >
+          {/* STEP 5: Date, Time, Passengers
+              (Hours moved to Step 3 for HOURLY trip type.) */}
+          <div className="grid gap-4 grid-cols-3">
             <div>
               <label className="block text-sm text-gray-400 mb-2">Date *</label>
               <input
@@ -882,27 +1021,6 @@ export default function BookRidePanel({
                 ))}
               </select>
             </div>
-            {tripType === "HOURLY" && (
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">
-                  Hours
-                </label>
-                <select
-                  value={formData.hours}
-                  onChange={(e) =>
-                    setFormData({ ...formData, hours: e.target.value })
-                  }
-                  className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                >
-                  <option value="">Select...</option>
-                  {[4, 6, 8, 10, 12].map((h) => (
-                    <option key={h} value={h}>
-                      {h} hours
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
           </div>
 
           {/* Passenger limit warning */}
@@ -929,6 +1047,14 @@ export default function BookRidePanel({
                   Loading vehicles...
                 </span>
               </div>
+            ) : tripType === "HOURLY" && !formData.hours && formData.routeId ? (
+              // HOURLY-specific empty state: backend can't price vehicles
+              // until the partner selects hours. Don't show a sea of
+              // disabled options — just tell them what to do next.
+              <p className="text-sm text-gray-400 px-4 py-3 bg-neutral-800/50 border border-neutral-700 rounded-lg flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-luxury-gold flex-shrink-0" />
+                Select hours above to see vehicle prices.
+              </p>
             ) : vehicles.length === 0 && formData.routeId ? (
               <p className="text-sm text-gray-500 px-4 py-3 bg-neutral-800 rounded-lg">
                 No vehicles available for this route.
@@ -951,19 +1077,32 @@ export default function BookRidePanel({
                     key={cat}
                     label={CATEGORY_LABELS[cat] || cat.toUpperCase()}
                   >
-                    {items.map((v) => (
-                      <option
-                        key={v.vehicleClass}
-                        value={v.vehicleClass}
-                        disabled={!v.available}
-                      >
-                        {v.label}{" "}
-                        {v.price !== null
-                          ? `- SAR ${v.price.toLocaleString()}`
-                          : ""}{" "}
-                        {!v.available ? "(Unavailable)" : ""}
-                      </option>
-                    ))}
+                    {items.map((v) => {
+                      // For HOURLY unavailable vehicles, surface the
+                      // calculator's exact reason (e.g. "Per Hour Rate
+                      // not configured for King Long in Riyadh") so
+                      // the partner knows what's wrong and can escalate
+                      // to admin if needed.
+                      const reason =
+                        !v.available && (v as any).unavailableReason
+                          ? ` — ${(v as any).unavailableReason}`
+                          : !v.available
+                            ? " (Unavailable)"
+                            : "";
+                      return (
+                        <option
+                          key={v.vehicleClass}
+                          value={v.vehicleClass}
+                          disabled={!v.available}
+                        >
+                          {v.label}{" "}
+                          {v.price !== null
+                            ? `- SAR ${v.price.toLocaleString()}`
+                            : ""}
+                          {reason}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 ))}
               </select>
@@ -1001,6 +1140,20 @@ export default function BookRidePanel({
               </span>
             </div>
           )}
+          {/* HOURLY pre-quote hint: vehicle picked but hours not yet selected. */}
+          {!loadingPrice &&
+            !priceBreakdown &&
+            tripType === "HOURLY" &&
+            formData.routeId &&
+            formData.vehicleClass &&
+            !formData.hours && (
+              <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800/50 border border-neutral-700 rounded-lg">
+                <AlertCircle className="w-4 h-4 text-luxury-gold flex-shrink-0" />
+                <span className="text-sm text-gray-300">
+                  Select the number of hours to see the price.
+                </span>
+              </div>
+            )}
           {priceBreakdown && !loadingPrice && (
             <div
               className={`p-4 rounded-lg transition-all ${isEcoSelected ? "bg-gradient-to-r from-green-500/10 to-transparent border-2 border-green-500/40" : "bg-gradient-to-r from-luxury-gold/10 to-transparent border border-luxury-gold/30"}`}
@@ -1023,8 +1176,29 @@ export default function BookRidePanel({
                 )}
               </div>
               <div className="space-y-2 text-sm">
+                {/* Hourly bracket breakdown — shown only when backend
+                    returned an hourly quote (HOURLY trip type). The
+                    line items here explain how the partner's chosen
+                    hours mapped onto day rate / per-hour rate / extras,
+                    so the price isn't a mystery number. */}
+                {priceBreakdown.hourly && (
+                  <>
+                    {priceBreakdown.hourly.breakdown.map((line, i) => (
+                      <div
+                        key={i}
+                        className="flex justify-between text-gray-300"
+                      >
+                        <span>{line.label}</span>
+                        <span>SAR {line.amount.toLocaleString()}</span>
+                      </div>
+                    ))}
+                    <div className="border-t border-neutral-700/50 my-1" />
+                  </>
+                )}
                 <div className="flex justify-between text-gray-400">
-                  <span>Base Fare</span>
+                  <span>
+                    {priceBreakdown.hourly ? "Subtotal (ex. VAT)" : "Base Fare"}
+                  </span>
                   <span>SAR {priceBreakdown.basePrice.toLocaleString()}</span>
                 </div>
                 {priceBreakdown.peakSurcharge > 0 && (

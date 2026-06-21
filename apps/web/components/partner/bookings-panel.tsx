@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/partner/bookings-panel.tsx
+// ============================================
 "use client";
 
 // ============================================
@@ -34,6 +37,14 @@ import {
 } from "@/components/ui/empty";
 import { CalendarX } from "lucide-react";
 import { proxiedImageUrl } from "@/lib/image-url";
+import {
+  type BookingShareInput,
+  buildCalendarUrl,
+  buildBookingMapsUrl,
+  buildWhatsAppUrl,
+  WhatsAppIcon,
+  formatBookingDate,
+} from "@/lib/booking-share";
 
 // ============== TYPES ==============
 
@@ -48,6 +59,11 @@ interface BookingListItem {
   dropoffAddress: string;
   tripType: string;
   hours: number | null;
+  // Stored on the booking at creation time, e.g.
+  //   "10 hours (day rate + 2 extra hours)"
+  //   "4 hours (per-hour rate)"
+  // Used in TripTypeBadge when present; falls back to `${hours} Hours`.
+  hourlyDuration: string | null;
   tripDate: string;
   tripTime: string;
   createdAt: string;
@@ -86,6 +102,13 @@ interface TimelineStep {
 interface BookingDetail {
   id: string;
   bookingRef: string;
+  // Public trip-card token. Used to construct the customer-facing
+  // URL (NEXT_PUBLIC_SITE_URL + /trip/{shareToken}) that ships
+  // inside the WhatsApp confirmation. Nullable because pre-shareToken
+  // bookings may not have one yet — the message builder falls back
+  // to an inline-detail format in that case so older bookings still
+  // get a useful confirmation.
+  shareToken: string | null;
   status: string;
   statusLabel: string;
   timeline: TimelineStep[];
@@ -95,8 +118,13 @@ interface BookingDetail {
     city: string;
     route: string;
     hours: number | null;
+    hourlyDuration: string | null;
     pickupAddress: string;
+    pickupLat: number | null;
+    pickupLng: number | null;
     dropoffAddress: string;
+    dropoffLat: number | null;
+    dropoffLng: number | null;
     tripDate: string;
     tripTime: string;
     flightNumber: string | null;
@@ -144,6 +172,430 @@ const TAB_OPTIONS = [
 type TabFilter = (typeof TAB_OPTIONS)[number];
 
 const PAGINATION_OPTIONS = [5, 10, 15, 20];
+
+// ============== TRIP DESCRIPTOR BADGES ==============
+// Visual language is intentionally aligned with the vendor portal's
+// bookings table so partners and vendors recognise the same trip
+// types at a glance:
+//   - One Way   → teal,   ArrowRight icon
+//   - By Hour   → violet, Clock icon (with duration label)
+//   - City      → sky,    MapPin icon (HOURLY only — for ONE_WAY the
+//                 city is implicit in the pickup/dropoff)
+// VehicleClassBadge picks neutral chrome so it can sit next to either
+// trip-type colour without clashing.
+
+const CITY_LABEL: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+function TripTypeBadge({
+  tripType,
+  hours,
+  hourlyDuration,
+}: {
+  tripType: string;
+  hours?: number | null;
+  hourlyDuration?: string | null;
+}) {
+  const isHourly = tripType === "HOURLY";
+  // Prefer a compact label in the badge to avoid table-row blow-out:
+  // backend may store "10 hours (day rate + 2 extra hours)" which is
+  // useful in the detail panel but too long here. Fall back to that
+  // descriptive string only when raw `hours` isn't available.
+  const label = isHourly
+    ? hours
+      ? `${hours} Hours`
+      : hourlyDuration || "By the Hour"
+    : "One Way";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-md border whitespace-nowrap ${
+        isHourly
+          ? "bg-violet-500/10 text-violet-400 border-violet-500/20"
+          : "bg-teal-500/10 text-teal-400 border-teal-500/20"
+      }`}
+    >
+      {isHourly ? (
+        <Clock className="w-3 h-3" />
+      ) : (
+        <ArrowRight className="w-3 h-3" />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function CityBadge({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-md border bg-sky-500/10 text-sky-300 border-sky-500/20 whitespace-nowrap">
+      <MapPin className="w-3 h-3" />
+      {CITY_LABEL[city] || city}
+    </span>
+  );
+}
+
+function VehicleClassBadge({ vehicleClass }: { vehicleClass: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-md border bg-neutral-800 text-gray-300 border-neutral-700 whitespace-nowrap">
+      <Car className="w-3 h-3" />
+      {vehicleClass.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// ============== BOOKING MAP ==============
+// Renders a Google Static Maps thumbnail beneath the location card.
+// Implementation choice: Static Maps over interactive embed because:
+//   - Single HTTP request, no JS deps, instant render in the slide-in
+//   - Constant height (no re-layout shifts while panel is opening)
+//   - Cheaper per view than full Maps JS — the detail panel may be
+//     opened many times in a session
+//
+// For ONE_WAY: two markers (P = pickup, D = dropoff) plus a faint
+// straight-line connector. We intentionally don't fetch the actual road
+// route (Directions API call per render gets expensive) — the connector
+// is just a visual hint that A and B are linked. The viewer's mental
+// model fills in the rest.
+//
+// For HOURLY: a single pickup marker, since there's no fixed dropoff.
+//
+// Gracefully renders nothing when lat/lng aren't available or the
+// public API key isn't configured. The addresses above remain visible.
+
+function BookingMap({
+  tripType,
+  pickupLat,
+  pickupLng,
+  dropoffLat,
+  dropoffLng,
+}: {
+  tripType: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  dropoffLat: number | null;
+  dropoffLng: number | null;
+}) {
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  // Need both a key and a valid pickup coordinate to render anything.
+  if (!apiKey || pickupLat == null || pickupLng == null) return null;
+
+  const isHourly = tripType === "HOURLY";
+  const hasDropoff = !isHourly && dropoffLat != null && dropoffLng != null;
+
+  // Static dark style — keeps the map readable against the panel's
+  // bg-neutral-900 backdrop without being so dark that pins disappear.
+  // Style params have to be URL-encoded fragments; each `&style=...`
+  // contributes one rule.
+  const darkStyle = [
+    "feature:all|element:geometry|color:0x1f2937",
+    "feature:all|element:labels.text.fill|color:0x9ca3af",
+    "feature:all|element:labels.text.stroke|color:0x111827",
+    "feature:water|element:geometry|color:0x0f172a",
+    "feature:road|element:geometry|color:0x374151",
+    "feature:road.highway|element:geometry|color:0x4b5563",
+    "feature:road|element:labels.text.fill|color:0xd1d5db",
+    "feature:poi|element:geometry|color:0x1f2937",
+    "feature:poi|element:labels|visibility:off",
+    "feature:transit|visibility:off",
+    "feature:administrative|element:geometry.stroke|color:0x374151",
+  ]
+    .map((s) => `&style=${encodeURIComponent(s)}`)
+    .join("");
+
+  // Pickup marker — green dot labelled P
+  const pickupMarker = `&markers=${encodeURIComponent(
+    `color:0x10b981|label:P|${pickupLat},${pickupLng}`,
+  )}`;
+
+  let dropoffMarker = "";
+  let path = "";
+  if (hasDropoff) {
+    dropoffMarker = `&markers=${encodeURIComponent(
+      `color:0xef4444|label:D|${dropoffLat},${dropoffLng}`,
+    )}`;
+    // 0x...80 = 50% alpha — keeps the straight line subtle so viewers
+    // don't read it as an actual driving route.
+    path = `&path=${encodeURIComponent(
+      `color:0x14b8a680|weight:4|${pickupLat},${pickupLng}|${dropoffLat},${dropoffLng}`,
+    )}`;
+  }
+
+  // size+scale: 600×220 at @2 = retina-sharp on standard monitors
+  // without exploding bandwidth. Auto-zoom from markers/path means we
+  // don't have to compute bounds client-side.
+  const url =
+    `https://maps.googleapis.com/maps/api/staticmap` +
+    `?size=600x220&scale=2&maptype=roadmap` +
+    pickupMarker +
+    dropoffMarker +
+    path +
+    darkStyle +
+    `&key=${apiKey}`;
+
+  // Click target. ONE_WAY opens the Google Maps directions flow
+  // pre-filled with origin + destination; HOURLY opens a point lookup
+  // on the pickup, which lets the partner explore the surrounding
+  // area (nearby restaurants, parking, etc.) since there's no fixed
+  // destination to plot.
+  const externalUrl = hasDropoff
+    ? `https://www.google.com/maps/dir/?api=1` +
+      `&origin=${pickupLat},${pickupLng}` +
+      `&destination=${dropoffLat},${dropoffLng}` +
+      `&travelmode=driving`
+    : `https://www.google.com/maps/search/?api=1` +
+      `&query=${pickupLat},${pickupLng}`;
+
+  return (
+    <a
+      href={externalUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block rounded-lg overflow-hidden border border-neutral-800 bg-neutral-950 hover:border-luxury-gold/40 transition-colors group relative"
+      title={
+        hasDropoff
+          ? "Open route in Google Maps"
+          : "Open pickup location in Google Maps"
+      }
+    >
+      <img
+        src={url}
+        alt={hasDropoff ? "Pickup and drop-off locations" : "Pickup location"}
+        className="w-full h-auto block"
+        loading="lazy"
+      />
+      {/* Subtle "open in Maps" affordance — fades in on hover so the
+          static map stays clean by default. Bottom-right is the
+          conventional spot for map-action overlays. */}
+      <div className="absolute bottom-2 right-2 px-2 py-1 rounded-md bg-black/70 border border-white/10 text-[11px] text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 backdrop-blur-sm">
+        <ChevronRight className="w-3 h-3" />
+        {hasDropoff ? "View route in Google Maps" : "View on Google Maps"}
+      </div>
+    </a>
+  );
+}
+
+// ============== SERVICE DAY TIMELINE ==============
+// Novel visualization for HOURLY bookings: a 24-hour strip placing the
+// booked window inside the day's full context. The map shows WHERE,
+// this shows WHEN — and crucially, *when in the day* (early morning vs
+// late evening vs overnight). For a driver dispatcher that distinction
+// matters more than the start/end numbers alone.
+//
+// Why a linear day strip instead of a clock face or duration ring:
+//   - Clock faces are pretty but slow to read; partners want answers
+//     in a glance, not a puzzle.
+//   - The day's "shape" matters — a 10-hour booking starting at 06:00
+//     covers the productive day; the same 10 hours starting at 20:00
+//     is an overnight job. The strip makes that obvious without text.
+//   - Midnight wraparound is handled visually as a second segment on
+//     the same axis, which is more intuitive than abstract clock math.
+//
+// Visual contract:
+//   - 24-hour axis, 00 → 24 left-to-right
+//   - Booked window rendered as a solid violet bar (or two bars when
+//     it wraps past midnight)
+//   - Hour ticks at 00 / 06 / 12 / 18 / 24, labelled below
+//   - Start and end times annotated above the bar with thin connectors
+//   - "Today" / "Tomorrow" suffix on the end time when it wraps
+
+function ServiceDayTimeline({
+  startTime,
+  hours,
+}: {
+  startTime: string; // "HH:MM" 24h
+  hours: number | null;
+}) {
+  if (!startTime || !hours || hours <= 0) return null;
+
+  const [hhStr, mmStr] = startTime.split(":");
+  const hh = parseInt(hhStr, 10);
+  const mm = parseInt(mmStr, 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+
+  const startMinutes = hh * 60 + mm;
+  const endMinutes = startMinutes + hours * 60;
+  const wrapsMidnight = endMinutes > 24 * 60;
+
+  // SVG geometry. ViewBox is 480×72 so the strip stretches via CSS to
+  // whatever width the card gives it. All x-positions below derive
+  // from this layout — change once, propagates everywhere.
+  const VB_W = 480;
+  const VB_H = 72;
+  const AXIS_LEFT = 28;
+  const AXIS_RIGHT = 460;
+  const AXIS_Y = 44;
+  const BAR_H = 14;
+  const AXIS_LEN = AXIS_RIGHT - AXIS_LEFT;
+
+  // Map a minute-of-day (0..1440) onto the axis. Values > 1440 are
+  // clamped to the right edge — used so a wrapped-past-midnight end
+  // doesn't paint into the next-day segment by mistake.
+  const minuteToX = (m: number) => {
+    const clamped = Math.max(0, Math.min(1440, m));
+    return AXIS_LEFT + (clamped / 1440) * AXIS_LEN;
+  };
+
+  const startX = minuteToX(startMinutes);
+  // For a wrapping booking we render two violet bars:
+  //   segment 1: start → 24:00 today
+  //   segment 2: 00:00 → end-minutes-mod-1440 tomorrow
+  // For a same-day booking, segment 2's width is 0.
+  const segment1EndX = wrapsMidnight ? minuteToX(1440) : minuteToX(endMinutes);
+  const segment2EndX = wrapsMidnight ? minuteToX(endMinutes - 1440) : AXIS_LEFT;
+  const segment2Width = wrapsMidnight ? segment2EndX - AXIS_LEFT : 0;
+
+  // Compute display strings for start/end so labels stay accurate
+  // (endMinutes-mod-1440 when wrapping).
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const startLabel = `${pad(hh)}:${pad(mm)}`;
+  const endTotalMin = endMinutes % 1440;
+  const endLabel = `${pad(Math.floor(endTotalMin / 60))}:${pad(endTotalMin % 60)}`;
+
+  // Anchor logic for the start label: if the booking starts in the
+  // last quarter of the day, anchor right so the label doesn't run
+  // off the bar. Mirror for end label on early-morning ends.
+  const startAnchor =
+    startX > VB_W * 0.8 ? "end" : startX < VB_W * 0.1 ? "start" : "middle";
+  const endX = wrapsMidnight ? segment2EndX : segment1EndX;
+  const endAnchor =
+    endX > VB_W * 0.9 ? "end" : endX < VB_W * 0.1 ? "start" : "middle";
+
+  const hourTicks = [0, 6, 12, 18, 24];
+
+  return (
+    <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <Clock className="w-3.5 h-3.5 text-violet-400" />
+          <p className="text-xs uppercase tracking-wide text-violet-300">
+            Service Day
+          </p>
+        </div>
+        {wrapsMidnight && (
+          <span className="text-[10px] text-violet-300/70 italic">
+            Spans midnight
+          </span>
+        )}
+      </div>
+      <svg
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        className="w-full h-auto"
+        role="img"
+        aria-label={`Booking from ${startLabel} for ${hours} hours${wrapsMidnight ? ", spans midnight" : ""}`}
+      >
+        {/* Axis baseline */}
+        <line
+          x1={AXIS_LEFT}
+          y1={AXIS_Y + BAR_H / 2}
+          x2={AXIS_RIGHT}
+          y2={AXIS_Y + BAR_H / 2}
+          stroke="#3f3f46"
+          strokeWidth="1"
+        />
+
+        {/* Hour ticks + labels */}
+        {hourTicks.map((h) => {
+          const x = minuteToX(h * 60);
+          return (
+            <g key={h}>
+              <line
+                x1={x}
+                y1={AXIS_Y + BAR_H / 2 - 3}
+                x2={x}
+                y2={AXIS_Y + BAR_H / 2 + 3}
+                stroke="#52525b"
+                strokeWidth="1"
+              />
+              <text
+                x={x}
+                y={AXIS_Y + BAR_H + 14}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#6b7280"
+              >
+                {h === 24 ? "00" : pad(h)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Booked segment(s) — violet bars. When the booking wraps
+            past midnight we draw two bars and let the eye stitch them
+            back together; the "Spans midnight" caption tells the
+            viewer what's happening. */}
+        <rect
+          x={startX}
+          y={AXIS_Y}
+          width={Math.max(2, segment1EndX - startX)}
+          height={BAR_H}
+          rx={3}
+          fill="#8b5cf6"
+        />
+        {wrapsMidnight && segment2Width > 0 && (
+          <rect
+            x={AXIS_LEFT}
+            y={AXIS_Y}
+            width={Math.max(2, segment2Width)}
+            height={BAR_H}
+            rx={3}
+            fill="#8b5cf6"
+            opacity={0.6}
+          />
+        )}
+
+        {/* Start time annotation */}
+        <line
+          x1={startX}
+          y1={AXIS_Y - 6}
+          x2={startX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={
+            startAnchor === "start"
+              ? startX
+              : startAnchor === "end"
+                ? startX
+                : startX
+          }
+          y={AXIS_Y - 9}
+          textAnchor={startAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {startLabel}
+        </text>
+
+        {/* End time annotation */}
+        <line
+          x1={endX}
+          y1={AXIS_Y - 6}
+          x2={endX}
+          y2={AXIS_Y}
+          stroke="#a78bfa"
+          strokeWidth="1"
+        />
+        <text
+          x={endX}
+          y={AXIS_Y - 9}
+          textAnchor={endAnchor}
+          fontSize="10"
+          fill="#c4b5fd"
+          fontWeight="500"
+        >
+          {endLabel}
+          {wrapsMidnight ? " +1d" : ""}
+        </text>
+      </svg>
+    </div>
+  );
+}
 
 function getStatusColor(status: string) {
   switch (status.toUpperCase()) {
@@ -195,6 +647,188 @@ function formatDate(dateStr: string) {
 // Chauffeur card is the centerpiece — driver photo (from photoUrl) +
 // vehicle make/model/year/color/plate are all real fields that were
 // already in the API response but the prior modal ignored.
+
+// ============== CUSTOMER QUICK-SHARE ==============
+//
+// Partner-side counterpart to the vendor portal's driver-share
+// helpers. Same machinery (URL templates from @/lib/booking-share)
+// but the message body is rewritten for a customer recipient: it's
+// a hospitality-style booking confirmation, not an operational
+// dispatch brief.
+//
+// Where the vendor's WhatsApp message goes to the driver and reads
+// like a job order ("GUEST", "PICKUP", "VEHICLE", "Plate"), the
+// partner's message goes to the customer and reads like a hotel-
+// grade confirmation ("Dear ...", "YOUR DRIVER", "YOUR VEHICLE")
+// with a polite closing line and LuxDrive sign-off. The customer
+// shouldn't be addressed as "GUEST" — they are the recipient, not
+// a subject in someone else's record.
+
+function bookingToShareInput(b: BookingDetail): BookingShareInput {
+  // Normalize partner's BookingDetail (vehicle.assigned, driver)
+  // into the shape booking-share expects. Mirrors the same adapter
+  // pattern used on the vendor side.
+  return {
+    bookingRef: b.bookingRef,
+    customer: { name: b.customer.name, phone: b.customer.phone },
+    trip: {
+      tripType: b.trip.tripType,
+      tripDate: b.trip.tripDate,
+      tripTime: b.trip.tripTime,
+      hours: b.trip.hours,
+      pickupAddress: b.trip.pickupAddress,
+      pickupLat: b.trip.pickupLat,
+      pickupLng: b.trip.pickupLng,
+      dropoffAddress: b.trip.dropoffAddress,
+      dropoffLat: b.trip.dropoffLat,
+      dropoffLng: b.trip.dropoffLng,
+      flightNumber: b.trip.flightNumber,
+      terminalNo: b.trip.terminalNo,
+    },
+    vehicle: b.vehicle.assigned
+      ? {
+          year: b.vehicle.assigned.year,
+          make: b.vehicle.assigned.make,
+          model: b.vehicle.assigned.model,
+          plateNumber: b.vehicle.assigned.plateNumber,
+          color: b.vehicle.assigned.color,
+        }
+      : null,
+    driver: b.driver ? { name: b.driver.name, phone: b.driver.phone } : null,
+  };
+}
+
+function partnerCalendarUrl(b: BookingDetail): string {
+  const input = bookingToShareInput(b);
+  // Calendar event title is customer-facing — "LuxDrive Transfer"
+  // reads better in a guest's calendar than "Booking LX-1234 —
+  // Their Own Name" would. Description carries the operational
+  // facts so they have everything in one place when the reminder
+  // fires.
+  return buildCalendarUrl(input, {
+    title: `LuxDrive Transfer — ${b.bookingRef}`,
+    extraDescriptionLines: [
+      b.driver
+        ? `Driver: ${b.driver.name}${b.driver.phone ? " · " + b.driver.phone : ""}`
+        : "",
+      b.vehicle.assigned
+        ? `Vehicle: ${b.vehicle.assigned.year} ${b.vehicle.assigned.make} ${b.vehicle.assigned.model} (${b.vehicle.assigned.plateNumber})`
+        : "",
+    ],
+  });
+}
+
+// Public origin for the customer trip card. Read from the
+// project-standard NEXT_PUBLIC_SITE_URL (same env the root layout
+// uses for metadata). No hardcoded fallback — if the env isn't
+// configured we'd rather emit no link than the wrong one. A
+// staging deploy without this set would otherwise produce
+// confirmation messages pointing customers at the production
+// domain, which is worse than the legacy inline-detail message.
+const PUBLIC_SITE_URL = process.env.NEXT_PUBLIC_SITE_URL;
+
+function buildCustomerMessage(b: BookingDetail): string {
+  const tripDate = formatBookingDate(b.trip.tripDate);
+  const input = bookingToShareInput(b);
+  const tripMapsUrl = buildBookingMapsUrl(input.trip);
+  const calendarUrl = partnerCalendarUrl(b);
+
+  // PRIMARY PATH — bookings with a shareToken AND a configured
+  // site URL get a short hospitality note + the trip-card link.
+  // The customer taps once and opens a beautifully designed page
+  // showing the driver's photo, vehicle, route, and add-to-
+  // calendar button. Replaces the long inline dump that used to
+  // ship the same info as plain text inside WhatsApp.
+  //
+  // The trip card link is the only action the customer needs.
+  // Everything previously listed inline (driver name + phone,
+  // vehicle details, route URL, calendar URL) now lives on that
+  // page, presented far more professionally than WhatsApp's plain
+  // text can manage.
+  if (b.shareToken && PUBLIC_SITE_URL) {
+    const tripCardUrl = `${PUBLIC_SITE_URL.replace(/\/$/, "")}/trip/${b.shareToken}`;
+    return [
+      `*LuxDrive — Booking Confirmation*`,
+      ``,
+      `Dear ${b.customer.name},`,
+      ``,
+      `Your chauffeur transfer is confirmed for ${tripDate} at ${b.trip.tripTime || "—"}.`,
+      ``,
+      `View your booking details, driver, and route:`,
+      tripCardUrl,
+      ``,
+      `Reference: ${b.bookingRef}`,
+      ``,
+      `For any changes or assistance, please reply to this message.`,
+      ``,
+      `—`,
+      `LuxDrive`,
+    ].join("\n");
+  }
+
+  // FALLBACK PATH — older bookings without a shareToken get the
+  // legacy inline-details message. Kept verbatim so partners can
+  // still confirm pre-migration bookings with everything they need.
+  // Once all in-flight bookings have rotated through to having
+  // shareTokens (a few weeks max), this branch can be removed.
+  const isHourly = b.trip.tripType === "HOURLY";
+
+  const lines: string[] = [
+    `*LuxDrive — Booking Confirmation*`,
+    `Reference: ${b.bookingRef}`,
+    ``,
+    `Dear ${b.customer.name},`,
+    ``,
+    `Your chauffeur service is confirmed.`,
+    ``,
+    `SCHEDULE`,
+    `${tripDate} at ${b.trip.tripTime || "—"}`,
+  ];
+  const serviceDetail = isHourly
+    ? `Hourly Service${b.trip.hours ? ` · ${b.trip.hours} hours` : ""}`
+    : `One Way Transfer`;
+  lines.push(serviceDetail);
+
+  lines.push(``, `PICKUP`, b.trip.pickupAddress);
+
+  if (!isHourly && b.trip.dropoffAddress) {
+    lines.push(``, `DROP-OFF`, b.trip.dropoffAddress);
+    lines.push(``, `ROUTE`, tripMapsUrl);
+  } else {
+    lines.push(tripMapsUrl);
+  }
+
+  if (b.trip.flightNumber) {
+    lines.push(``, `FLIGHT`);
+    lines.push(
+      `${b.trip.flightNumber}${b.trip.terminalNo ? ` · Terminal ${b.trip.terminalNo}` : ""}`,
+    );
+  }
+
+  if (b.driver) {
+    lines.push(``, `YOUR DRIVER`, b.driver.name);
+    if (b.driver.phone) lines.push(b.driver.phone);
+  }
+
+  if (b.vehicle.assigned) {
+    lines.push(``, `YOUR VEHICLE`);
+    lines.push(
+      `${b.vehicle.assigned.year} ${b.vehicle.assigned.make} ${b.vehicle.assigned.model}${b.vehicle.assigned.color ? ` — ${b.vehicle.assigned.color}` : ""}`,
+    );
+    lines.push(`Plate ${b.vehicle.assigned.plateNumber}`);
+  }
+
+  lines.push(``, `ADD TO CALENDAR`, calendarUrl);
+  lines.push(
+    ``,
+    `For any changes or assistance, please reply to this message.`,
+    ``,
+    `—`,
+    `LuxDrive`,
+  );
+
+  return lines.join("\n");
+}
 
 // Driver photo: 64px circle, gold-bordered. Direct <img> + the
 // resize-proxy helper. Falls back to the User icon when no photo
@@ -397,6 +1031,54 @@ function BookingDetailModal({
                   {booking.customer.email}
                 </p>
               )}
+              {/* Quick-share row — sends the booking confirmation
+                  to the customer's WhatsApp and lets the partner
+                  drop the trip onto a calendar in one tap each.
+
+                  The WhatsApp button targets the *customer's* phone
+                  (this is what differentiates it from the vendor
+                  portal's version, which targets the driver). The
+                  pre-composed message is hospitality-style ("Dear
+                  ${"{name}"}, your chauffeur service is confirmed")
+                  and embeds the calendar link so the customer can
+                  add the event to their own calendar by tapping
+                  inside WhatsApp.
+
+                  Both buttons only render when a customer phone is
+                  on the booking — direct-customer bookings always
+                  have one; agency-routed bookings without a guest
+                  number wouldn't have a usable wa.me target, so we
+                  hide the WhatsApp button. Calendar is shown either
+                  way since it doesn't need a phone, but we keep
+                  the row hidden together so it doesn't look
+                  half-broken when the phone is missing. */}
+              {booking.customer.phone && booking.customer.phone !== "—" && (
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                  <a
+                    href={buildWhatsAppUrl(
+                      booking.customer.phone,
+                      buildCustomerMessage(booking),
+                    )}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[#25D366]/15 text-[#25D366] border border-[#25D366]/30 hover:bg-[#25D366]/25 transition-colors"
+                    title="Send booking confirmation to guest on WhatsApp"
+                  >
+                    <WhatsAppIcon className="w-3.5 h-3.5" />
+                    Send via WhatsApp
+                  </a>
+                  <a
+                    href={partnerCalendarUrl(booking)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-blue-500/10 text-blue-300 border border-blue-500/30 hover:bg-blue-500/20 transition-colors"
+                    title="Open Google Calendar with this booking pre-filled"
+                  >
+                    <Calendar className="w-3.5 h-3.5" />
+                    Add to Calendar
+                  </a>
+                </div>
+              )}
             </div>
             <div>
               <p className="text-xs text-gray-500 mb-1">Status</p>
@@ -408,25 +1090,202 @@ function BookingDetailModal({
             </div>
           </div>
 
-          {/* Route */}
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Route</p>
-            <div className="flex items-center gap-2 text-white text-sm">
-              <MapPin className="w-4 h-4 text-green-400 flex-shrink-0" />
-              <span className="truncate">{booking.trip.pickupAddress}</span>
-              <ChevronRight className="w-4 h-4 text-gray-500 flex-shrink-0" />
-              <MapPin className="w-4 h-4 text-red-400 flex-shrink-0" />
-              <span className="truncate">{booking.trip.dropoffAddress}</span>
-            </div>
-            {booking.trip.flightNumber && (
-              <p className="text-xs text-gray-400 mt-1">
-                Flight: {booking.trip.flightNumber}{" "}
-                {booking.trip.terminalNo
-                  ? `| Terminal: ${booking.trip.terminalNo}`
-                  : ""}
-              </p>
+          {/* Trip descriptor badges — same set as the list view so
+              partners get immediate visual continuity between the table
+              row and the detail. Sits above the location/service info
+              so the trip nature is established before the specifics. */}
+          <div className="flex flex-wrap gap-1.5">
+            <TripTypeBadge
+              tripType={booking.trip.tripType}
+              hours={booking.trip.hours}
+              hourlyDuration={booking.trip.hourlyDuration}
+            />
+            {booking.trip.tripType === "HOURLY" && (
+              <CityBadge city={booking.trip.city} />
             )}
+            <VehicleClassBadge vehicleClass={booking.vehicle.vehicleClass} />
           </div>
+
+          {/* Location / service info — both trip types get a tinted
+              card with a static map below. ONE_WAY is teal (Trip Route);
+              HOURLY is violet (Service Window). The visual treatment is
+              parallel so the section feels deliberate either way; only
+              the content inside the card differs to match the trip's
+              actual data shape. */}
+          {booking.trip.tripType === "HOURLY"
+            ? (() => {
+                // Compute approximate end of service from start time +
+                // hours. Best-effort: failures (malformed strings, edge
+                // dates) just hide the end-time line rather than throw.
+                let approxEnd: string | null = null;
+                try {
+                  if (booking.trip.hours && booking.trip.tripTime) {
+                    const [hh, mm] = booking.trip.tripTime
+                      .split(":")
+                      .map((n) => parseInt(n, 10));
+                    if (Number.isFinite(hh) && Number.isFinite(mm)) {
+                      const start = new Date();
+                      start.setHours(hh, mm, 0, 0);
+                      const end = new Date(
+                        start.getTime() + booking.trip.hours * 3_600_000,
+                      );
+                      const pad = (n: number) => String(n).padStart(2, "0");
+                      const sameDay =
+                        end.getDate() === start.getDate() &&
+                        end.getMonth() === start.getMonth();
+                      approxEnd = `${pad(end.getHours())}:${pad(end.getMinutes())}${
+                        sameDay ? "" : " (next day)"
+                      }`;
+                    }
+                  }
+                } catch {
+                  approxEnd = null;
+                }
+                return (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-violet-400" />
+                        <p className="text-xs uppercase tracking-wide text-violet-300">
+                          Service Window
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">
+                            Duration
+                          </p>
+                          <p className="text-white font-medium">
+                            {booking.trip.hours
+                              ? `${booking.trip.hours} hours`
+                              : "By the Hour"}
+                          </p>
+                          {booking.trip.hourlyDuration &&
+                            booking.trip.hourlyDuration !==
+                              `${booking.trip.hours} hours` && (
+                              <p className="text-[11px] text-gray-500 mt-0.5">
+                                {booking.trip.hourlyDuration}
+                              </p>
+                            )}
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">Starts</p>
+                          <p className="text-white font-medium">
+                            {booking.trip.tripTime}
+                          </p>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            {formatDate(booking.trip.tripDate)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">
+                            Ends (approx.)
+                          </p>
+                          <p className="text-white font-medium">
+                            {approxEnd || "—"}
+                          </p>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            No fixed drop-off
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-start gap-2 pt-3 border-t border-violet-500/15">
+                        <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                        <div className="min-w-0">
+                          <p className="text-[11px] text-gray-500">Pickup</p>
+                          <p className="text-sm text-white truncate">
+                            {booking.trip.pickupAddress}
+                          </p>
+                        </div>
+                      </div>
+                      {booking.trip.flightNumber && (
+                        <p className="text-xs text-gray-400">
+                          Flight: {booking.trip.flightNumber}
+                          {booking.trip.terminalNo
+                            ? ` · Terminal: ${booking.trip.terminalNo}`
+                            : ""}
+                        </p>
+                      )}
+                    </div>
+                    <ServiceDayTimeline
+                      startTime={booking.trip.tripTime}
+                      hours={booking.trip.hours}
+                    />
+                    <BookingMap
+                      tripType="HOURLY"
+                      pickupLat={booking.trip.pickupLat}
+                      pickupLng={booking.trip.pickupLng}
+                      dropoffLat={null}
+                      dropoffLng={null}
+                    />
+                  </div>
+                );
+              })()
+            : (() => {
+                // ONE_WAY card mirrors the Service Window's structure
+                // (header pill + bordered card + map below) so the detail
+                // page feels parallel between trip types. The content
+                // inside is what differs: pickup + dropoff stacked with
+                // their colored map-pins, instead of duration/start/end.
+                return (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-teal-500/20 bg-teal-500/5 p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <ArrowRight className="w-4 h-4 text-teal-400" />
+                        <p className="text-xs uppercase tracking-wide text-teal-300">
+                          Trip Route
+                        </p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] text-gray-500">Pickup</p>
+                          <p className="text-sm text-white">
+                            {booking.trip.pickupAddress}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* The vertical connector dot is a small visual
+                        cue that the two addresses below belong to the
+                        same trip — borrowed from how travel apps show
+                        flight legs. */}
+                      <div className="flex items-center gap-2 pl-1.5">
+                        <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                        <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                        <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] text-gray-500">Drop-off</p>
+                          <p className="text-sm text-white">
+                            {booking.trip.dropoffAddress}
+                          </p>
+                        </div>
+                      </div>
+
+                      {booking.trip.flightNumber && (
+                        <p className="text-xs text-gray-400 pt-3 border-t border-teal-500/15">
+                          Flight: {booking.trip.flightNumber}
+                          {booking.trip.terminalNo
+                            ? ` · Terminal: ${booking.trip.terminalNo}`
+                            : ""}
+                        </p>
+                      )}
+                    </div>
+                    <BookingMap
+                      tripType="ONE_WAY"
+                      pickupLat={booking.trip.pickupLat}
+                      pickupLng={booking.trip.pickupLng}
+                      dropoffLat={booking.trip.dropoffLat}
+                      dropoffLng={booking.trip.dropoffLng}
+                    />
+                  </div>
+                );
+              })()}
 
           {/* Date/Time + Vehicle class (the BOOKED category — actual
               assigned car appears in the chauffeur card below) */}
@@ -436,11 +1295,11 @@ function BookingDetailModal({
               <p className="text-white">
                 {formatDate(booking.trip.tripDate)} at {booking.trip.tripTime}
               </p>
-              <p className="text-xs text-gray-400">
-                {booking.trip.tripType}
-                {booking.trip.hours ? ` (${booking.trip.hours}h)` : ""} •{" "}
-                {booking.trip.city}
-              </p>
+              {booking.trip.tripType === "ONE_WAY" && (
+                <p className="text-xs text-gray-400">
+                  {CITY_LABEL[booking.trip.city] || booking.trip.city}
+                </p>
+              )}
             </div>
             <div>
               <p className="text-xs text-gray-500 mb-1">Vehicle Class</p>
@@ -1026,9 +1885,25 @@ export default function BookingsPanel({
                 {b.statusLabel}
               </span>
             </div>
+
+            {/* Trip descriptor row — same badge set as the desktop
+                table's Type/Class column. Wraps when the city badge is
+                present so the row degrades gracefully on narrow phones. */}
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              <TripTypeBadge
+                tripType={b.tripType}
+                hours={b.hours}
+                hourlyDuration={b.hourlyDuration}
+              />
+              {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
+              <VehicleClassBadge vehicleClass={b.vehicleClass} />
+            </div>
+
             <div className="flex items-center gap-2 text-xs text-gray-400 mb-2">
               <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-              <span className="truncate">{b.route}</span>
+              <span className="truncate">
+                {b.tripType === "HOURLY" ? b.pickupAddress : b.route}
+              </span>
             </div>
             <div className="flex items-center justify-between text-xs text-gray-400 mb-3">
               <div className="flex items-center gap-1">
@@ -1041,10 +1916,7 @@ export default function BookingsPanel({
                 SAR {b.totalPrice.toLocaleString()}
               </span>
             </div>
-            <div className="flex items-center justify-between pt-3 border-t border-neutral-800">
-              <span className="text-xs text-gray-500">
-                {b.vehicleClass.replace(/_/g, " ")}
-              </span>
+            <div className="flex items-center justify-end pt-3 border-t border-neutral-800">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => handleViewDetail(b.id)}
@@ -1093,13 +1965,13 @@ export default function BookingsPanel({
                   Guest
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                  Type / Class
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
                   Route
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
                   Date / Time
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Vehicle
                 </th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
                   Fare
@@ -1127,17 +1999,40 @@ export default function BookingsPanel({
                       <p className="text-xs text-gray-500">{b.guestPhone}</p>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-400 max-w-[200px] truncate">
-                    {b.route}
+                  <td className="px-4 py-3">
+                    {/* Stacked badges echo the vendor portal so the
+                        same booking reads identically on both sides. */}
+                    <div className="flex flex-col gap-1 items-start">
+                      <TripTypeBadge
+                        tripType={b.tripType}
+                        hours={b.hours}
+                        hourlyDuration={b.hourlyDuration}
+                      />
+                      {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
+                      <VehicleClassBadge vehicleClass={b.vehicleClass} />
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-400 max-w-[220px]">
+                    {/* Route column branches on trip type:
+                        - ONE_WAY: shows pickup → dropoff (or routeName fallback)
+                        - HOURLY:  shows just the pickup with a map pin —
+                          the city is conveyed via the CityBadge in the
+                          Type/Class column, so duplicating it here would
+                          be noise. */}
+                    {b.tripType === "HOURLY" ? (
+                      <div className="flex items-center gap-1.5 truncate">
+                        <MapPin className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+                        <span className="truncate">{b.pickupAddress}</span>
+                      </div>
+                    ) : (
+                      <div className="truncate">{b.route}</div>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <p className="text-sm text-gray-400">
                       {formatDate(b.tripDate)}
                     </p>
                     <p className="text-xs text-gray-500">{b.tripTime}</p>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-400">
-                    {b.vehicleClass.replace(/_/g, " ")}
                   </td>
                   <td className="px-4 py-3 text-sm text-right font-medium text-white">
                     SAR {b.totalPrice.toLocaleString()}

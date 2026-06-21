@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/app/contact/page.tsx
+// ============================================
 "use client";
 
 import { useState } from "react";
@@ -8,13 +11,14 @@ import {
   Phone,
   Mail,
   Clock,
-  Instagram,
-  Twitter,
-  Linkedin,
   Send,
   CheckCircle,
+  AlertCircle,
 } from "lucide-react";
 import { PhoneInput, EmailInput } from "@/components/ui/form-fields";
+import { contactApi } from "@/lib/api";
+import { useNotification } from "@/lib/notification-context";
+import { luxdriveSocials } from "@/lib/social-icons";
 
 const subjects = [
   { value: "general", label: "General Inquiry" },
@@ -24,6 +28,8 @@ const subjects = [
 ];
 
 export default function ContactPage() {
+  const { showNotification } = useNotification();
+
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -33,16 +39,50 @@ export default function ContactPage() {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
+  // Inline error so the user sees what went wrong without losing the
+  // form data they typed. Cleared on every fresh submit attempt.
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setErrorMessage(null);
 
-    // Simulate form submission
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      const response = await contactApi.submit({
+        name: formData.name,
+        email: formData.email,
+        phone: formData.phone || undefined,
+        subject: formData.subject,
+        message: formData.message,
+      });
 
-    setIsSubmitting(false);
-    setIsSubmitted(true);
+      if (response.success) {
+        setIsSubmitted(true);
+        showNotification(
+          "success",
+          response.message || "Message sent successfully",
+        );
+      } else {
+        // Backend returned success:false (e.g. email send fell over).
+        // Surface the backend message so the user knows what to do.
+        const msg = response.message || "Failed to send your message.";
+        setErrorMessage(msg);
+        showNotification("error", msg);
+      }
+    } catch (err: any) {
+      // ApiError thrown by apiFetch for non-2xx responses (validation
+      // failures, server errors, network down, etc). The .message
+      // surface comes from the backend's BadRequestError where
+      // possible — fall back to a generic line otherwise.
+      const msg =
+        err?.message ||
+        "Couldn't reach the server. Please try again, or email info@luxdriveksa.com directly.";
+      setErrorMessage(msg);
+      showNotification("error", msg);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleChange = (
@@ -99,6 +139,7 @@ export default function ContactPage() {
                   <button
                     onClick={() => {
                       setIsSubmitted(false);
+                      setErrorMessage(null);
                       setFormData({
                         name: "",
                         email: "",
@@ -115,6 +156,17 @@ export default function ContactPage() {
               ) : (
                 <>
                   <h2 className="text-2xl font-bold mb-6">Send us a Message</h2>
+
+                  {/* Inline error banner — shown above the form so it's
+                       impossible to miss while keeping the typed data
+                       intact. Clears when the user submits again. */}
+                  {errorMessage && (
+                    <div className="mb-5 p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-start gap-3">
+                      <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-red-300">{errorMessage}</p>
+                    </div>
+                  )}
+
                   <form onSubmit={handleSubmit} className="space-y-5">
                     <div>
                       <label className="block text-sm text-gray-400 mb-2">
@@ -126,6 +178,7 @@ export default function ContactPage() {
                         value={formData.name}
                         onChange={handleChange}
                         required
+                        maxLength={100}
                         className="w-full px-4 py-3 bg-[#111] border border-gray-700 rounded-lg focus:outline-none focus:border-[#C9A961] transition-colors text-white"
                         placeholder="Your name"
                       />
@@ -184,9 +237,13 @@ export default function ContactPage() {
                         onChange={handleChange}
                         required
                         rows={5}
+                        maxLength={5000}
                         className="w-full px-4 py-3 bg-[#111] border border-gray-700 rounded-lg focus:outline-none focus:border-[#C9A961] transition-colors text-white resize-none"
                         placeholder="How can we help you?"
                       />
+                      <p className="text-xs text-gray-500 mt-1 text-right">
+                        {formData.message.length} / 5000
+                      </p>
                     </div>
                     <button
                       type="submit"
@@ -222,7 +279,8 @@ export default function ContactPage() {
                     <div>
                       <h3 className="font-semibold mb-1">Address</h3>
                       <p className="text-gray-400">
-                        King Fahd Road, Al Olaya District
+                        Level 7, Building 4.07, King Abdullah Financial
+                        District,
                         <br />
                         Riyadh, Saudi Arabia
                       </p>
@@ -234,7 +292,7 @@ export default function ContactPage() {
                     </div>
                     <div>
                       <h3 className="font-semibold mb-1">Phone</h3>
-                      <p className="text-gray-400">+966 11 XXX XXXX</p>
+                      <p className="text-gray-400">+966 54 555 9510</p>
                     </div>
                   </div>
                   <div className="flex items-start gap-4">
@@ -258,44 +316,41 @@ export default function ContactPage() {
                 </div>
               </div>
 
-              {/* Social Links */}
+              {/* Social Links — six tiles, sourced from the shared
+                  luxdriveSocials list so contact page + footer stay in
+                  lockstep. Adding/removing a network is a one-line
+                  change in apps/web/lib/social-icons.tsx. */}
               <div>
                 <h3 className="font-semibold mb-4">Follow Us</h3>
-                <div className="flex gap-4">
-                  <a
-                    href="#"
-                    className="w-12 h-12 rounded-lg bg-[#1a1a1a] border border-gray-800 flex items-center justify-center hover:border-[#C9A961] hover:text-[#C9A961] transition-colors"
-                  >
-                    <Instagram className="w-5 h-5" />
-                  </a>
-                  <a
-                    href="#"
-                    className="w-12 h-12 rounded-lg bg-[#1a1a1a] border border-gray-800 flex items-center justify-center hover:border-[#C9A961] hover:text-[#C9A961] transition-colors"
-                  >
-                    <Twitter className="w-5 h-5" />
-                  </a>
-                  <a
-                    href="#"
-                    className="w-12 h-12 rounded-lg bg-[#1a1a1a] border border-gray-800 flex items-center justify-center hover:border-[#C9A961] hover:text-[#C9A961] transition-colors"
-                  >
-                    <Linkedin className="w-5 h-5" />
-                  </a>
+                <div className="flex flex-wrap gap-3">
+                  {luxdriveSocials.map(({ name, href, Icon }) => (
+                    <a
+                      key={name}
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={name}
+                      className="w-12 h-12 rounded-lg bg-[#1a1a1a] border border-gray-800 flex items-center justify-center hover:border-[#C9A961] hover:text-[#C9A961] transition-colors"
+                    >
+                      <Icon className="w-5 h-5" />
+                    </a>
+                  ))}
                 </div>
               </div>
 
-              {/* Map Placeholder */}
+              {/* Embedded Google Map — KAFD Building 4.07 */}
               <div className="rounded-xl overflow-hidden border border-gray-800">
-                <div className="aspect-video bg-[#1a1a1a] flex items-center justify-center">
-                  <div className="text-center">
-                    <MapPin className="w-12 h-12 text-[#C9A961]/30 mx-auto mb-2" />
-                    <p className="text-gray-500 text-sm">
-                      Google Maps Integration
-                    </p>
-                    <p className="text-gray-600 text-xs">
-                      Riyadh, Saudi Arabia
-                    </p>
-                  </div>
-                </div>
+                <iframe
+                  src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d14500!2d46.6411!3d24.7615!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x3e2ee333d2c44a9d%3A0x5ffef14f702c8c9b!2sKAFD!5e0!3m2!1sen!2ssa!4v1718560000000"
+                  width="100%"
+                  height="100%"
+                  style={{ border: 0, minHeight: "280px" }}
+                  allowFullScreen
+                  loading="lazy"
+                  referrerPolicy="no-referrer-when-downgrade"
+                  className="aspect-video w-full"
+                  title="LuxDrive office location — KAFD, Riyadh"
+                />
               </div>
             </div>
           </div>

@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/partner/dashboard-panel.tsx
+// ============================================
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
@@ -35,11 +38,18 @@ import {
 
 interface DashboardSummary {
   activeBookings: number;
-  monthlyRides: {
+  // Renamed from `monthlyRides`. Completion-based: `current` is
+  // COMPLETED rides this month; `trend` now carries both series.
+  ridesCompleted: {
     current: number;
-    previous: number;
     percentChange: number;
-    trend: Array<{ month: string; count: number }>;
+    trend: Array<{ month: string; completed: number; created: number }>;
+  };
+  // Companion quality signal. `rate` is an integer percent 0-100.
+  cancellationRate: {
+    rate: number;
+    cancelled: number;
+    createdInMonth: number;
   };
   totalPayable: {
     amount: number;
@@ -103,11 +113,82 @@ interface RecentBooking {
   statusLabel: string;
   vehicleClass: string;
   totalPrice: number;
+  // Trip-type signal — without these, HOURLY bookings render as
+  // "Pickup → " with an empty dropoff (the backend stores empty
+  // strings for HOURLY dropoffs, by design).
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+  city: string;
 }
 
 // ============== HELPERS ==============
 
 const PAGINATION_OPTIONS = [5, 10, 15, 20];
+
+// ============== TRIP DESCRIPTOR BADGES ==============
+// Compact versions of the same badges used in the full Bookings panel
+// (bookings-panel.tsx). Kept local to the dashboard rather than
+// imported because:
+//   - The two screens load independently; not worth an extra shared
+//     module for two tiny components.
+//   - Sizing/spacing here is tighter (dashboard rows are denser),
+//     and decoupling lets each screen tune its own visual weight.
+//
+// Visual contract matches the bookings panel exactly: violet for
+// HOURLY, teal for ONE_WAY, sky for city. Partners moving between
+// the two views see the same trip type in the same colors.
+
+const CITY_LABEL_DASHBOARD: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+function MiniTripTypeBadge({
+  tripType,
+  hours,
+  hourlyDuration,
+}: {
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+}) {
+  const isHourly = tripType === "HOURLY";
+  // Prefer raw hours (compact) over hourlyDuration (verbose) here —
+  // dashboard rows have less horizontal room than the bookings table.
+  const label = isHourly
+    ? hours
+      ? `${hours}h`
+      : hourlyDuration || "Hourly"
+    : "One Way";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${
+        isHourly
+          ? "bg-violet-500/10 text-violet-400 border-violet-500/20"
+          : "bg-teal-500/10 text-teal-400 border-teal-500/20"
+      }`}
+    >
+      {isHourly ? (
+        <Clock className="w-2.5 h-2.5" />
+      ) : (
+        <ArrowRight className="w-2.5 h-2.5" />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function MiniCityBadge({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-sky-500/10 text-sky-300 border-sky-500/20 whitespace-nowrap">
+      <MapPin className="w-2.5 h-2.5" />
+      {CITY_LABEL_DASHBOARD[city] || city}
+    </span>
+  );
+}
 
 function AnimatedCounter({
   value,
@@ -617,7 +698,7 @@ export default function DashboardPanel({
 
   if (!summary) return null;
 
-  const { monthlyRides, totalPayable } = summary;
+  const { ridesCompleted, cancellationRate, totalPayable } = summary;
   {
     console.log(contractStats);
   }
@@ -639,40 +720,92 @@ export default function DashboardPanel({
           </p>
         </div>
 
-        {/* Monthly Rides */}
+        {/* Rides Completed
+            ─────────────────────────────────────────────────────────
+            Switched from "Monthly Rides" (creation-based, non-cancelled)
+            to "Rides Completed" (completion-based, tripDate in month).
+            This is now the headline operational metric — what the
+            partner actually delivered, not what they ordered.
+
+            Cancellation rate is embedded as a secondary stat below the
+            big number because the two metrics tell one story:
+            "We completed X rides this month, with Y% of bookings
+            cancelling along the way." Putting cancellation in its own
+            tile would fragment the narrative; keeping it adjacent makes
+            the quality signal unavoidable.
+
+            The sparkline is now dual-series. Blue bars show completed
+            rides per month (the same data driving the headline);
+            lighter neutral bars BEHIND show created bookings. When the
+            two diverge — created tall, completed short — the partner
+            sees a widening cancellation/no-show gap at a glance, which
+            is exactly the kind of signal a static one-series chart
+            hides. */}
         <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-xl">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center">
               <CalendarDays className="w-5 h-5 text-blue-400" />
             </div>
-            <span className="text-sm text-gray-400">Monthly Rides</span>
+            <span className="text-sm text-gray-400">Rides Completed</span>
           </div>
           <p className="text-3xl font-bold text-white">
-            <AnimatedCounter value={monthlyRides.current} />
+            <AnimatedCounter value={ridesCompleted.current} />
           </p>
           <div className="mt-2 flex items-center gap-2">
-            {monthlyRides.percentChange >= 0 ? (
+            {ridesCompleted.percentChange >= 0 ? (
               <span className="flex items-center gap-1 text-green-400 text-sm">
                 <ArrowUpRight className="w-4 h-4" />+
-                {monthlyRides.percentChange}%
+                {ridesCompleted.percentChange}%
               </span>
             ) : (
               <span className="flex items-center gap-1 text-red-400 text-sm">
                 <ArrowDownRight className="w-4 h-4" />
-                {monthlyRides.percentChange}%
+                {ridesCompleted.percentChange}%
               </span>
             )}
             <span className="text-xs text-gray-500">vs last month</span>
           </div>
-          {/* Mini sparkline */}
-          {monthlyRides.trend.length > 0 && (
+
+          {/* Cancellation rate inline. Threshold colouring:
+              - ≤10%   neutral muted text (acceptable noise)
+              - 10-25% amber (something worth watching)
+              - >25%   red (intervene)
+              Numbers come straight from cancellationRate.rate. */}
+          <div className="mt-2 flex items-center gap-2 text-xs">
+            <span className="text-gray-500">Cancellation:</span>
+            <span
+              className={`font-medium ${
+                cancellationRate.rate > 25
+                  ? "text-red-400"
+                  : cancellationRate.rate > 10
+                    ? "text-amber-400"
+                    : "text-gray-400"
+              }`}
+            >
+              {cancellationRate.rate}%
+            </span>
+            <span className="text-gray-500">
+              ({cancellationRate.cancelled} of {cancellationRate.createdInMonth}{" "}
+              this month)
+            </span>
+          </div>
+
+          {/* Dual-series sparkline */}
+          {ridesCompleted.trend.length > 0 && (
             <div className="mt-3 pt-3 border-t border-neutral-800">
               <div className="flex items-end gap-1.5 h-10">
-                {monthlyRides.trend.map((t, i) => {
+                {ridesCompleted.trend.map((t, i) => {
+                  // Scale to the max of either series so the bars stay
+                  // proportional and the eye can compare months fairly.
                   const maxVal = Math.max(
-                    ...monthlyRides.trend.map((x) => x.count),
+                    ...ridesCompleted.trend.flatMap((x) => [
+                      x.completed,
+                      x.created,
+                    ]),
+                    1,
                   );
-                  const pct = maxVal > 0 ? (t.count / maxVal) * 100 : 0;
+                  const completedPct = (t.completed / maxVal) * 100;
+                  const createdPct = (t.created / maxVal) * 100;
                   return (
                     <div
                       key={i}
@@ -683,21 +816,44 @@ export default function DashboardPanel({
                         <p className="text-xs font-medium text-white">
                           {t.month}
                         </p>
-                        <p className="text-xs text-luxury-gold">
-                          {t.count} rides
+                        <p className="text-xs text-blue-400">
+                          {t.completed} completed
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {t.created} created
                         </p>
                       </div>
+                      {/* Created (background bar, lighter) */}
                       <div
-                        className="absolute bottom-0 left-0 right-0 bg-blue-400/50 hover:bg-blue-400 rounded-sm transition-colors cursor-pointer"
-                        style={{ height: `${Math.max(pct, 5)}%` }}
+                        className="absolute bottom-0 left-0 right-0 bg-neutral-700/60 rounded-sm"
+                        style={{ height: `${Math.max(createdPct, 5)}%` }}
+                      />
+                      {/* Completed (foreground bar, blue) */}
+                      <div
+                        className="absolute bottom-0 left-0 right-0 bg-blue-400/70 hover:bg-blue-400 rounded-sm transition-colors cursor-pointer"
+                        style={{ height: `${Math.max(completedPct, 5)}%` }}
                       />
                     </div>
                   );
                 })}
               </div>
-              <p className="text-xs text-gray-500 mt-1.5">
-                Last {monthlyRides.trend.length} months
-              </p>
+              {/* Legend — small and muted so it doesn't compete with
+                  the bars. Sits below the chart, left-aligned. */}
+              <div className="flex items-center justify-between mt-1.5">
+                <div className="flex items-center gap-3 text-[10px] text-gray-500">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-sm bg-blue-400/70" />
+                    Completed
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-sm bg-neutral-700/60" />
+                    Created
+                  </span>
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  Last {ridesCompleted.trend.length} months
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -848,11 +1004,34 @@ export default function DashboardPanel({
                     <p className="text-sm font-medium text-white truncate">
                       {booking.guestName}
                     </p>
+                    {/* Trip-type signal row.
+                        - ONE_WAY: just the type badge + full route
+                          (pickup → dropoff) — same as before but now
+                          colour-coded so the eye picks up trip mix at
+                          a glance.
+                        - HOURLY:  type badge with hours + city badge,
+                          then pickup only (no fake arrow / empty
+                          dropoff — the previous render showed " → "
+                          for hourly bookings).
+                        Badges sit ABOVE the location line so the row
+                        stays scannable even when the address wraps. */}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5 mb-0.5">
+                      <MiniTripTypeBadge
+                        tripType={booking.tripType}
+                        hours={booking.hours}
+                        hourlyDuration={booking.hourlyDuration}
+                      />
+                      {booking.tripType === "HOURLY" && (
+                        <MiniCityBadge city={booking.city} />
+                      )}
+                    </div>
                     <p className="text-xs text-gray-400 flex items-center gap-1">
                       <MapPin className="w-3 h-3 flex-shrink-0" />
                       <span className="truncate">
-                        {booking.route ||
-                          `${booking.pickupAddress} → ${booking.dropoffAddress}`}
+                        {booking.tripType === "HOURLY"
+                          ? booking.pickupAddress
+                          : booking.route ||
+                            `${booking.pickupAddress} → ${booking.dropoffAddress}`}
                       </span>
                     </p>
                   </div>
@@ -998,7 +1177,14 @@ export default function DashboardPanel({
             </div>
           )}
 
-          {/* Most Used Vehicle */}
+          {/* Most Used Vehicle
+              ──────────────────────────────────────────────────────
+              Backend now restricts the groupBy to status=COMPLETED, so
+              the percentage here reflects actually-delivered rides, not
+              bookings + cancellations + pending. The label change
+              ("completed rides" instead of "bookings") makes the
+              measurement basis explicit so partners don't misread a
+              shifting number after the cutover. */}
           {contractStats?.vehicleUsage?.mostUsed && (
             <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl">
               <h4 className="text-sm font-medium text-white mb-3">
@@ -1010,11 +1196,14 @@ export default function DashboardPanel({
                 </div>
                 <div>
                   <p className="text-sm text-white font-medium">
-                    {contractStats.vehicleUsage.mostUsed.vehicleClass}
+                    {contractStats.vehicleUsage.mostUsed.vehicleClass.replace(
+                      /_/g,
+                      " ",
+                    )}
                   </p>
                   <p className="text-xs text-gray-400">
                     {contractStats.vehicleUsage.mostUsed.percentage}% of
-                    bookings
+                    completed rides
                   </p>
                 </div>
               </div>

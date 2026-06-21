@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/admin/overview-panel.tsx
+// ============================================
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -22,6 +25,9 @@ import {
   Crown,
   Briefcase,
   Truck,
+  MapPin,
+  ArrowRight,
+  User,
 } from "lucide-react";
 import { useNotification } from "@/lib/notification-context";
 
@@ -52,6 +58,14 @@ interface RecentBooking {
   amount: number;
   vehicleClass: string | null;
   source: string | null;
+  // Trip-type fields. Same shape as partner dashboard's RecentBooking
+  // so the visual treatment can be ported across — violet chip for
+  // HOURLY (with duration), teal chip for ONE_WAY, sky chip for the
+  // city (HOURLY only, since ONE_WAY's route already implies city).
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+  city: string;
   isUnread: boolean;
   needsAttention: boolean;
 }
@@ -110,6 +124,109 @@ interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
+}
+
+// ============================================================
+// TRIP DESCRIPTOR BADGES — admin overview's Recent Bookings
+//
+// Visual language is intentionally aligned with the partner
+// dashboard's MiniTripTypeBadge so the same booking reads
+// identically wherever an internal user sees it:
+//   - HOURLY      → violet, Clock icon, hours label
+//   - ONE_WAY     → teal, ArrowRight icon, "One Way"
+//   - City        → sky, MapPin icon (HOURLY only; one-way carries
+//                    the city implicitly via its route)
+//
+// SourceBadge is admin-specific. The admin overview is the first
+// place an operator triages a booking, so "where did this come
+// from" is a high-value signal:
+//   - Partner booking → Briefcase icon + partner name, gold-
+//     tinted to match the brand. Tells the admin to coordinate
+//     via the partner liaison rather than calling the guest.
+//   - Direct customer → User icon, "Direct customer", neutral
+//     chrome. Tells the admin the guest is the point of contact.
+// Neither badge is a tooltip-only signal — both are persistent
+// because every row needs the answer.
+// ============================================================
+
+const CITY_LABEL_ADMIN: Record<string, string> = {
+  RIYADH: "Riyadh",
+  JEDDAH: "Jeddah",
+  MAKKAH: "Makkah",
+  MADINAH: "Madinah",
+};
+
+function TripTypeBadgeAdmin({
+  tripType,
+  hours,
+  hourlyDuration,
+}: {
+  tripType: string;
+  hours: number | null;
+  hourlyDuration: string | null;
+}) {
+  const isHourly = tripType === "HOURLY";
+  // Compact label preference order: raw hours ("10h") → stored
+  // descriptive string ("10 hours (day rate + 2 extra)") → fallback.
+  // The descriptive string is too long for table rows; reserved for
+  // tooltips/detail views in other parts of the app.
+  const label = isHourly
+    ? hours
+      ? `${hours}h`
+      : hourlyDuration || "Hourly"
+    : "One Way";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${
+        isHourly
+          ? "bg-violet-500/10 text-violet-400 border-violet-500/20"
+          : "bg-teal-500/10 text-teal-400 border-teal-500/20"
+      }`}
+    >
+      {isHourly ? (
+        <Clock className="w-2.5 h-2.5" />
+      ) : (
+        <ArrowRight className="w-2.5 h-2.5" />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function CityBadgeAdmin({ city }: { city: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-sky-500/10 text-sky-300 border-sky-500/20 whitespace-nowrap">
+      <MapPin className="w-2.5 h-2.5" />
+      {CITY_LABEL_ADMIN[city] || city}
+    </span>
+  );
+}
+
+function SourceBadgeAdmin({ partner }: { partner: string | null }) {
+  if (partner) {
+    // Partner-routed booking. Gold tint signals "via business
+    // partner" — the booking has a contractual relationship behind
+    // it, not just a one-off guest.
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-luxury-gold/10 text-luxury-gold border-luxury-gold/30 whitespace-nowrap max-w-[180px]"
+        title={`Booked via ${partner}`}
+      >
+        <Briefcase className="w-2.5 h-2.5 flex-shrink-0" />
+        <span className="truncate">via {partner}</span>
+      </span>
+    );
+  }
+  // Direct customer booking. Neutral chrome — informational, not a
+  // call-to-action. Distinguished from partner bookings purely by
+  // colour and icon so the eye picks the difference even when
+  // scrolling fast.
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border bg-neutral-700/30 text-gray-400 border-neutral-600/40 whitespace-nowrap">
+      <User className="w-2.5 h-2.5" />
+      Direct customer
+    </span>
+  );
 }
 
 // ============================================================
@@ -752,7 +869,7 @@ export default function OverviewPanel({
                       className={`hover:bg-neutral-800/30 ${b.isUnread ? "bg-blue-500/5" : ""}`}
                     >
                       <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 mb-1">
                           <span className="text-sm text-luxury-gold font-mono">
                             {b.bookingRef}
                           </span>
@@ -763,15 +880,45 @@ export default function OverviewPanel({
                             <span className="w-2 h-2 bg-blue-400 rounded-full" />
                           )}
                         </div>
-                        {b.partner && (
-                          <p className="text-xs text-gray-500">{b.partner}</p>
-                        )}
+                        {/* Trip-type descriptors. Both badges sit
+                            inline so the row stays one row tall
+                            regardless of trip type; on HOURLY rows
+                            the city chip joins to give locational
+                            context that one-way rows carry in their
+                            implicit route. */}
+                        <div className="flex flex-wrap items-center gap-1 mb-1">
+                          <TripTypeBadgeAdmin
+                            tripType={b.tripType}
+                            hours={b.hours}
+                            hourlyDuration={b.hourlyDuration}
+                          />
+                          {b.tripType === "HOURLY" && (
+                            <CityBadgeAdmin city={b.city} />
+                          )}
+                        </div>
+                        {/* Source — always present, never null.
+                            Either partner chip or direct-customer
+                            chip; admin sees the answer to "where
+                            did this come from" without hunting. */}
+                        <SourceBadgeAdmin partner={b.partner} />
                       </td>
                       <td className="px-6 py-4 text-sm text-white">
                         {b.customer}
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-400">
-                        {b.vendor}
+                      <td className="px-6 py-4 text-sm">
+                        {/* Vendor cell. When unassigned we surface
+                            amber+warning treatment because the
+                            booking is sitting in the admin's queue
+                            waiting for action — distinct from rows
+                            where a vendor is already engaged. */}
+                        {b.vendor === "Unassigned" ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-amber-500/10 text-amber-400 border-amber-500/30">
+                            <AlertCircle className="w-3 h-3" />
+                            Unassigned
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">{b.vendor}</span>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-400">
                         {new Date(b.date).toLocaleDateString("en-US", {
@@ -820,8 +967,32 @@ export default function OverviewPanel({
                       {b.status.replace(/-/g, " ")}
                     </span>
                   </div>
+
+                  {/* Trip-type + city + source row. Wraps on narrow
+                      screens; identical badge set to desktop. */}
+                  <div className="flex flex-wrap items-center gap-1 mb-2">
+                    <TripTypeBadgeAdmin
+                      tripType={b.tripType}
+                      hours={b.hours}
+                      hourlyDuration={b.hourlyDuration}
+                    />
+                    {b.tripType === "HOURLY" && (
+                      <CityBadgeAdmin city={b.city} />
+                    )}
+                    <SourceBadgeAdmin partner={b.partner} />
+                  </div>
+
                   <p className="text-white text-sm">{b.customer}</p>
-                  <p className="text-xs text-gray-500">{b.vendor}</p>
+                  <div className="text-xs mt-0.5">
+                    {b.vendor === "Unassigned" ? (
+                      <span className="inline-flex items-center gap-1 text-amber-400">
+                        <AlertCircle className="w-3 h-3" />
+                        Vendor unassigned
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">Vendor: {b.vendor}</span>
+                    )}
+                  </div>
                   <div className="flex items-center justify-between mt-2 pt-2 border-t border-neutral-700">
                     <span className="text-xs text-gray-400">
                       {new Date(b.date).toLocaleDateString()}

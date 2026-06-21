@@ -43,7 +43,10 @@ const DRIVER_DOCUMENT_LABELS: Record<string, string> = {
   DRIVING_LICENSE: "Driving License",
 };
 
-// Documents that require expiry dates
+// Documents that require expiry dates. These are the "trust-bearing"
+// documents — replacing any of them on an APPROVED driver triggers an
+// auto-transition to admin review (gated on ALL such docs being valid,
+// see uploadDriverDocument below).
 const DRIVER_DOCS_WITH_EXPIRY = ["IQAMA_NATIONAL_ID", "DRIVING_LICENSE"];
 
 // All editable fields for change request system
@@ -586,7 +589,12 @@ export const updateDriverInfo = asyncWrapper(
  * Upload or replace a driver document (photo, Iqama, license).
  * For PROFILE_PHOTO: frontend handles camera-only + white shirt/black tie validation.
  * Backend stores whatever passes frontend validation.
- * Does NOT auto-resolve review requests.
+ *
+ * Strict trust model for expiry-bearing docs (IQAMA_NATIONAL_ID,
+ * DRIVING_LICENSE): any upload or replacement on an APPROVED driver
+ * triggers an auto-transition to PENDING_REVIEW — but ONLY once ALL
+ * expiry-bearing docs are valid. This avoids notifying admin mid-
+ * renewal when the vendor still has more docs to upload.
  */
 export const uploadDriverDocument = asyncWrapper(
   async (req: Request, res: Response) => {
@@ -631,11 +639,84 @@ export const uploadDriverDocument = asyncWrapper(
       );
     }
 
-    // Upsert document
+    // Look up the existing doc BEFORE the upsert. We need its current
+    // fileUrl to feed editSnapshot below (so admin sees the REPLACED
+    // badge against the OLD URL). Once the upsert runs, that value is
+    // gone from the DB.
     const existingDoc = await prisma.driverDocument.findFirst({
       where: { driverId, type },
     });
 
+    // ============== EDIT SNAPSHOT FOR ADMIN CHANGE-MARKERS ==============
+    // The admin review UI renders "REPLACED" / "CHANGED" / "ADDRESSED"
+    // badges by diffing driver.editSnapshot against the current driver
+    // state and document filePaths. For that diff to work during a
+    // vendor-initiated renewal (vendor replaces an expired
+    // IQAMA_NATIONAL_ID / DRIVING_LICENSE on an APPROVED driver without
+    // admin first requesting changes), we need to seed the snapshot
+    // ourselves with the OLD doc URL — before the upsert overwrites it.
+    //
+    // Lifecycle:
+    //   - APPROVED driver, snapshot empty, expiry-doc upload    → take
+    //     a full baseline snapshot now (all fields + all doc URLs),
+    //     overriding THIS doc type with its pre-upsert URL.
+    //   - APPROVED driver, snapshot already populated mid-cycle → keep
+    //     the original baseline untouched; the new upsert will diff
+    //     against it. (Only add THIS doc type if it wasn't tracked
+    //     before — defensive against schema drift.)
+    //   - Other statuses (DRAFT/PENDING_REVIEW/CHANGES_REQUESTED) → do
+    //     nothing. DRAFT/PENDING_REVIEW have no "previous" state;
+    //     CHANGES_REQUESTED already had its snapshot taken by the
+    //     admin's "Request Changes" flow.
+    //
+    // Profile photos aren't trust-bearing so we don't seed for them —
+    // but if a snapshot is already populated (mid-cycle), we still
+    // don't touch it on those uploads either.
+    let snapshotToWrite: Record<string, any> | null = null;
+    if (
+      DRIVER_DOCS_WITH_EXPIRY.includes(type) &&
+      driver.status === "APPROVED"
+    ) {
+      const currentSnap =
+        (driver.editSnapshot as Record<string, any> | null) || null;
+      const isEmpty =
+        !currentSnap ||
+        typeof currentSnap !== "object" ||
+        Object.keys(currentSnap).length === 0;
+
+      if (isEmpty) {
+        // First doc in the renewal cycle — capture a full baseline.
+        // Pull current docs and override THIS type with the OLD URL
+        // (existingDoc.fileUrl, captured above).
+        const allDocs = await prisma.driverDocument.findMany({
+          where: { driverId },
+          select: { type: true, fileUrl: true },
+        });
+        const docSnap: Record<string, string | null> = {};
+        for (const d of allDocs) docSnap[d.type] = d.fileUrl ?? null;
+        docSnap[type] = existingDoc?.fileUrl ?? null;
+
+        snapshotToWrite = {
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          phone: driver.phone,
+          // photoUrl is also tracked by the admin's snapshot diff
+          // (frontend special-cases it against driver.photoPath); we
+          // include it so non-photo doc replacements don't make the
+          // photo read as "changed".
+          photoUrl: driver.photoUrl ?? null,
+          ...docSnap,
+        };
+      } else if (!(type in currentSnap)) {
+        snapshotToWrite = {
+          ...currentSnap,
+          [type]: existingDoc?.fileUrl ?? null,
+        };
+      }
+      // else: preserve the existing baseline.
+    }
+
+    // Upsert document
     if (existingDoc) {
       await prisma.driverDocument.update({
         where: { id: existingDoc.id },
@@ -665,11 +746,102 @@ export const uploadDriverDocument = asyncWrapper(
       });
     }
 
-    // Auto-reactivation removed: admin must verify renewed docs before the driver comes
-    // back online. Vendor uses "Submit for Admin Review" to send the driver into the
-    // PENDING_REVIEW queue once all required docs are valid.
+    // Persist the snapshot now if we computed one. Doing this as a
+    // separate update (rather than folding it into the auto-submit
+    // update below) is intentional: even during mid-renewal — when
+    // status doesn't transition — the snapshot still needs to be saved
+    // so the second upload's logic sees a populated snapshot and
+    // preserves the original OLD URL for the first doc.
+    if (snapshotToWrite !== null) {
+      await prisma.driver.update({
+        where: { id: driverId },
+        data: { editSnapshot: snapshotToWrite as any },
+      });
+    }
 
     // NOTE: Do NOT auto-resolve review requests. Admin must verify.
+
+    // ============== AUTO-SUBMIT ON EXPIRY-DOC REPLACEMENT ==============
+    // Strict trust model: replacing IQAMA_NATIONAL_ID / DRIVING_LICENSE
+    // on an APPROVED driver pushes the driver into PENDING_REVIEW so
+    // admin can re-verify before they go back into circulation.
+    //
+    // Gating: we only trigger the auto-submit once ALL required-with-
+    // expiry docs are valid. If the vendor is mid-renewal — replaced
+    // the iqama but the driving license is still expired — we don't
+    // push to admin yet. Otherwise admin gets a noisy notification for
+    // every individual replacement during a multi-doc renewal session.
+    //
+    // Profile photos don't trigger re-review — those aren't trust-
+    // bearing documents in the same way.
+    const isExpiryDocReplacement =
+      DRIVER_DOCS_WITH_EXPIRY.includes(type) && driver.status === "APPROVED";
+
+    if (isExpiryDocReplacement) {
+      // Re-read docs to capture the just-upserted state.
+      const freshDocs = await prisma.driverDocument.findMany({
+        where: { driverId },
+        select: { type: true, expiryDate: true },
+      });
+      const now = new Date();
+      const stillMissingOrExpired = DRIVER_DOCS_WITH_EXPIRY.filter((t) => {
+        const d = freshDocs.find((x) => x.type === t);
+        return !d || !d.expiryDate || new Date(d.expiryDate) <= now;
+      });
+
+      if (stillMissingOrExpired.length > 0) {
+        // Mid-renewal: don't auto-submit yet.
+        const remainingLabels = stillMissingOrExpired
+          .map((t) => DRIVER_DOCUMENT_LABELS[t] || t)
+          .join(", ");
+        return res.json({
+          success: true,
+          message: `${DRIVER_DOCUMENT_LABELS[type] || type} uploaded successfully. Please also replace: ${remainingLabels}.`,
+        });
+      }
+
+      // All required-with-expiry docs are now valid — auto-transition
+      // to admin review.
+      //
+      // editSnapshot is intentionally NOT overwritten here. It was
+      // already populated above with the OLD doc URLs for
+      // IQAMA_NATIONAL_ID/DRIVING_LICENSE and current values for
+      // everything else. Overwriting it now would erase the OLD URLs
+      // and break the admin's REPLACED badge.
+      await prisma.driver.update({
+        where: { id: driverId },
+        data: {
+          status: "PENDING_REVIEW",
+          // Deliberately do NOT touch isActive or suspendedForDocs.
+          // - If driver was operational, they go into review with
+          //   isActive=true but status=PENDING_REVIEW (no new bookings
+          //   allowed because eligibility requires status=APPROVED).
+          // - If driver was already suspended by cron, those flags
+          //   stay set and admin approval is what clears them.
+        },
+      });
+
+      // Notify admins so the renewal lands in their review queue.
+      const adminUsers = await prisma.user.findMany({
+        where: { role: "ADMIN", isActive: true },
+        select: { id: true },
+      });
+      if (adminUsers.length > 0) {
+        await prisma.notification.createMany({
+          data: adminUsers.map((admin) => ({
+            userId: admin.id,
+            title: "Driver Submitted for Review (document renewal)",
+            message: `${vendor.companyName} renewed documents on driver ${driver.firstName} ${driver.lastName}. Please verify the new documents and expiry dates.`,
+            type: "DRIVER_PENDING_REVIEW",
+            data: {
+              driverId,
+              vendorId: vendor.id,
+              renewal: true,
+            },
+          })),
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -838,17 +1010,33 @@ export const submitDriverForReview = asyncWrapper(
         );
       }
 
-      const snapshot = {
-        firstName: driver.firstName,
-        lastName: driver.lastName,
-        phone: driver.phone,
-      };
+      // Preserve any editSnapshot already accumulated during the
+      // renewal session (the upload endpoint seeds it with OLD doc
+      // URLs so admin sees REPLACED badges). If nothing was
+      // accumulated — e.g. the vendor manually clicked Submit on a
+      // suspended driver without going through the upload endpoint
+      // first — fall back to a minimal basic-fields snapshot so admin
+      // at least gets the field-level CHANGED diff.
+      const currentSnap =
+        (driver.editSnapshot as Record<string, any> | null) || null;
+      const snapshotIsPopulated =
+        currentSnap !== null &&
+        typeof currentSnap === "object" &&
+        Object.keys(currentSnap).length > 0;
+
+      const snapshotForUpdate = snapshotIsPopulated
+        ? currentSnap
+        : ({
+            firstName: driver.firstName,
+            lastName: driver.lastName,
+            phone: driver.phone,
+          } as Record<string, any>);
 
       await prisma.driver.update({
         where: { id: driverId },
         data: {
           status: "PENDING_REVIEW",
-          editSnapshot: snapshot as any,
+          editSnapshot: snapshotForUpdate as any,
           // Stays suspended until admin approves.
         },
       });

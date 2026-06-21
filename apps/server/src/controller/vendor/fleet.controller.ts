@@ -59,6 +59,7 @@ const VEHICLE_STATUS_LABELS: Record<string, string> = {
   UNDER_MAINTENANCE: "Under Maintenance",
   CHANGES_REQUESTED: "Changes Requested",
   UNDER_REVIEW: "Under Review",
+  AWAITING_RESUBMISSION: "Awaiting Admin Re-Approval",
   EXPIRED_DOCS: "Documents Expired",
 };
 
@@ -91,7 +92,10 @@ const DOCUMENT_LABELS: Record<string, string> = {
   ISTIMARA: "Car Registration / Istimara",
 };
 
-// Documents that require expiry dates
+// Documents that require expiry dates. These are the "trust-bearing"
+// documents — replacing any of them on an APPROVED vehicle triggers an
+// auto-transition to admin review (gated on ALL such docs being valid,
+// see uploadVehicleDocument below).
 const DOCUMENTS_WITH_EXPIRY = ["INSURANCE", "ISTIMARA"];
 
 // ============== VEHICLE CATALOG ==============
@@ -213,10 +217,24 @@ export const getVehiclesList = asyncWrapper(
         const hasExpiredDocs = expiredDocs.length > 0;
         const hasUnresolvedReview = v.reviewRequests.length > 0;
 
-        // Determine effective status
+        // Determine effective status.
+        // Three cases when v.status === "APPROVED":
+        //   (1) docs currently expired → "EXPIRED_DOCS" (vendor needs to act)
+        //   (2) docs renewed but admin hasn't re-approved → "AWAITING_RESUBMISSION"
+        //       (vendor sees "in admin queue", not "active")
+        //   (3) all good, not suspended → APPROVED
+        // Without case (2), the UI would silently revert to "APPROVED"
+        // the moment the vendor uploaded a future-dated replacement,
+        // even though the vehicle is still isActive=false in the DB and
+        // therefore invisible to the eligibility filter.
         let effectiveStatus = v.status;
-        if (isApproved && hasExpiredDocs) {
-          effectiveStatus = "EXPIRED_DOCS" as any;
+        const isSuspendedForDocs = (v as any).suspendedForDocs === true;
+        if (isApproved) {
+          if (hasExpiredDocs) {
+            effectiveStatus = "EXPIRED_DOCS" as any;
+          } else if (isSuspendedForDocs) {
+            effectiveStatus = "AWAITING_RESUBMISSION" as any;
+          }
         }
 
         // Pick the soonest-to-expire doc for the banner CTA (so the banner can name it)
@@ -619,6 +637,12 @@ export const getVehicleDetail = asyncWrapper(
  *
  * Upload or replace a vehicle document/photo.
  * Does NOT auto-resolve admin review requests — admin must verify.
+ *
+ * Strict trust model for expiry-bearing docs (INSURANCE, ISTIMARA):
+ * any upload or replacement on an APPROVED vehicle triggers an
+ * auto-transition to PENDING_REVIEW — but ONLY once ALL expiry-bearing
+ * docs are valid. This avoids notifying admin mid-renewal when the
+ * vendor still has more docs to upload.
  */
 export const uploadVehicleDocument = asyncWrapper(
   async (req: Request, res: Response) => {
@@ -698,11 +722,88 @@ export const uploadVehicleDocument = asyncWrapper(
       }
     }
 
-    // Upsert document
+    // Look up the existing doc BEFORE the upsert. We need its current
+    // fileUrl to feed editSnapshot below (so admin sees the REPLACED
+    // badge against the OLD URL). Once the upsert runs, that value is
+    // gone from the DB.
     const existingDoc = await prisma.vehicleDocument.findFirst({
       where: { vehicleId, type },
     });
 
+    // ============== EDIT SNAPSHOT FOR ADMIN CHANGE-MARKERS ==============
+    // The admin review UI renders "REPLACED" / "CHANGED" / "ADDRESSED"
+    // badges by diffing vehicle.editSnapshot against the current
+    // vehicle state and document filePaths. For that diff to work
+    // during a vendor-initiated renewal (vendor replaces an expired
+    // INSURANCE/ISTIMARA on an APPROVED vehicle without admin first
+    // requesting changes), we need to seed the snapshot ourselves with
+    // the OLD doc URL — before the upsert overwrites it.
+    //
+    // Lifecycle:
+    //   - APPROVED vehicle, snapshot empty, expiry-doc upload    → take
+    //     a full baseline snapshot now (all fields + all doc URLs),
+    //     overriding THIS doc type with its pre-upsert URL.
+    //   - APPROVED vehicle, snapshot already populated mid-cycle → keep
+    //     the original baseline untouched; the new upsert will diff
+    //     against it. (Only add THIS doc type if it wasn't tracked
+    //     before — defensive against schema drift.)
+    //   - Other statuses (DRAFT/PENDING_REVIEW/CHANGES_REQUESTED) → do
+    //     nothing. DRAFT/PENDING_REVIEW have no "previous" state;
+    //     CHANGES_REQUESTED already had its snapshot taken by the
+    //     admin's "Request Changes" flow.
+    //
+    // Photos/plates/odometer aren't trust-bearing so we don't seed for
+    // them — but if a snapshot is already populated (mid-cycle), we
+    // still don't touch it on those uploads either.
+    let snapshotToWrite: Record<string, any> | null = null;
+    if (DOCUMENTS_WITH_EXPIRY.includes(type) && vehicle.status === "APPROVED") {
+      const currentSnap =
+        (vehicle.editSnapshot as Record<string, any> | null) || null;
+      const isEmpty =
+        !currentSnap ||
+        typeof currentSnap !== "object" ||
+        Object.keys(currentSnap).length === 0;
+
+      if (isEmpty) {
+        // First doc in the renewal cycle — capture a full baseline.
+        // Pull current docs and override THIS type with the OLD URL
+        // (existingDoc.fileUrl, captured above).
+        const allDocs = await prisma.vehicleDocument.findMany({
+          where: { vehicleId },
+          select: { type: true, fileUrl: true },
+        });
+        const docSnap: Record<string, string | null> = {};
+        for (const d of allDocs) docSnap[d.type] = d.fileUrl ?? null;
+        // The doc about to be replaced — store its OLD URL so the
+        // diff against the new fileUrl is non-trivial.
+        docSnap[type] = existingDoc?.fileUrl ?? null;
+
+        snapshotToWrite = {
+          make: vehicle.make,
+          model: vehicle.model,
+          year: vehicle.year,
+          plateNumber: vehicle.plateNumber,
+          color: vehicle.color,
+          mileage: vehicle.mileage,
+          category: vehicle.category,
+          ...docSnap,
+        };
+      } else if (!(type in currentSnap)) {
+        // Snapshot exists but this doc type isn't tracked yet — add
+        // it without disturbing the rest of the baseline.
+        snapshotToWrite = {
+          ...currentSnap,
+          [type]: existingDoc?.fileUrl ?? null,
+        };
+      }
+      // else: snapshot exists and this doc type already has a baseline.
+      // Preserve it — the existing baseline is the true pre-renewal
+      // value, and we don't want to "advance" it to the current URL on
+      // each subsequent upload of the same doc (which would erase the
+      // REPLACED badge).
+    }
+
+    // Upsert document
     if (existingDoc) {
       await prisma.vehicleDocument.update({
         where: { id: existingDoc.id },
@@ -724,10 +825,107 @@ export const uploadVehicleDocument = asyncWrapper(
       });
     }
 
+    // Persist the snapshot now if we computed one. Doing this as a
+    // separate update (rather than folding it into the auto-submit
+    // update below) is intentional: even during mid-renewal —
+    // when status doesn't transition — the snapshot still needs to be
+    // saved so the second upload's logic sees a populated snapshot
+    // and preserves the original OLD URL for the first doc.
+    if (snapshotToWrite !== null) {
+      await prisma.vehicle.update({
+        where: { id: vehicleId },
+        data: { editSnapshot: snapshotToWrite as any },
+      });
+    }
+
     // NOTE: Do NOT auto-resolve review requests. Admin must verify the new document.
-    // NOTE: Do NOT auto-reactivate a vehicle suspended for expired docs. Vendor must
-    //       explicitly click "Submit for Admin Review" once all renewals are uploaded.
-    //       Admin approval is what clears suspendedForDocs and brings the vehicle back online.
+
+    // ============== AUTO-SUBMIT ON EXPIRY-DOC REPLACEMENT ==============
+    // Strict trust model: replacing INSURANCE / ISTIMARA on an APPROVED
+    // vehicle pushes the vehicle into PENDING_REVIEW so admin can re-
+    // verify before it goes back into circulation.
+    //
+    // Gating: we only trigger the auto-submit once ALL required-with-
+    // expiry docs are valid. If the vendor is mid-renewal — replaced
+    // INSURANCE but ISTIMARA is still expired — we don't push to admin
+    // yet. Otherwise admin gets a noisy notification for every
+    // individual replacement during a multi-doc renewal session, and
+    // the vehicle ends up in review with stale expired docs still
+    // attached.
+    //
+    // Photos, number plates, and odometer don't trigger re-review —
+    // those aren't trust-bearing documents in the same way.
+    const isExpiryDocReplacement =
+      DOCUMENTS_WITH_EXPIRY.includes(type) && vehicle.status === "APPROVED";
+
+    if (isExpiryDocReplacement) {
+      // Re-read docs to capture the just-upserted state.
+      const freshDocs = await prisma.vehicleDocument.findMany({
+        where: { vehicleId },
+        select: { type: true, expiryDate: true },
+      });
+      const now = new Date();
+      const stillMissingOrExpired = DOCUMENTS_WITH_EXPIRY.filter((t) => {
+        const d = freshDocs.find((x) => x.type === t);
+        return !d || !d.expiryDate || new Date(d.expiryDate) <= now;
+      });
+
+      if (stillMissingOrExpired.length > 0) {
+        // Mid-renewal: don't auto-submit yet. The UI will continue
+        // showing "Documents Expired" effective status until all docs
+        // are renewed. Return a clear message so the vendor knows what
+        // remains.
+        const remainingLabels = stillMissingOrExpired
+          .map((t) => DOCUMENT_LABELS[t] || t)
+          .join(", ");
+        return res.json({
+          success: true,
+          message: `${DOCUMENT_LABELS[type] || type} uploaded successfully. Please also replace: ${remainingLabels}.`,
+        });
+      }
+
+      // All required-with-expiry docs are now valid — auto-transition
+      // to admin review.
+      //
+      // editSnapshot is intentionally NOT overwritten here. It was
+      // already populated above (in the snapshotToWrite branch) with
+      // the OLD doc URLs for INSURANCE/ISTIMARA and current values for
+      // everything else. Overwriting it now would erase the OLD URLs
+      // and break the admin's REPLACED badge.
+      await prisma.vehicle.update({
+        where: { id: vehicleId },
+        data: {
+          status: "PENDING_REVIEW",
+          // Deliberately do NOT touch isActive or suspendedForDocs.
+          // - If vehicle was operational, it goes into review with
+          //   isActive=true but status=PENDING_REVIEW (no new bookings
+          //   allowed because eligibility requires status=APPROVED).
+          // - If vehicle was already suspended by cron, those flags
+          //   stay set and admin approval is what clears them.
+        },
+      });
+
+      // Notify admins so the renewal lands in their review queue.
+      const adminUsers = await prisma.user.findMany({
+        where: { role: "ADMIN", isActive: true },
+        select: { id: true },
+      });
+      if (adminUsers.length > 0) {
+        await prisma.notification.createMany({
+          data: adminUsers.map((admin) => ({
+            userId: admin.id,
+            title: "Vehicle Submitted for Review (document renewal)",
+            message: `${vendor.companyName} renewed documents on ${vehicle.make} ${vehicle.model} (${vehicle.plateNumber}). Please verify the new documents and expiry dates.`,
+            type: "VEHICLE_PENDING_REVIEW",
+            data: {
+              vehicleId,
+              vendorId: vendor.id,
+              renewal: true,
+            },
+          })),
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -993,22 +1191,37 @@ export const submitVehicleForReview = asyncWrapper(
         );
       }
 
-      // Snapshot current state so admin sees what changed if they later request more changes
-      const snapshot = {
-        make: vehicle.make,
-        model: vehicle.model,
-        year: vehicle.year,
-        plateNumber: vehicle.plateNumber,
-        color: vehicle.color,
-        mileage: vehicle.mileage,
-        category: vehicle.category,
-      };
+      // Preserve any editSnapshot already accumulated during the
+      // renewal session (the upload endpoint seeds it with OLD doc
+      // URLs so admin sees REPLACED badges). If nothing was
+      // accumulated — e.g. the vendor manually clicked Submit on a
+      // suspended vehicle without going through the upload endpoint
+      // first — fall back to a minimal basic-fields snapshot so admin
+      // at least gets the field-level CHANGED diff.
+      const currentSnap =
+        (vehicle.editSnapshot as Record<string, any> | null) || null;
+      const snapshotIsPopulated =
+        currentSnap !== null &&
+        typeof currentSnap === "object" &&
+        Object.keys(currentSnap).length > 0;
+
+      const snapshotForUpdate = snapshotIsPopulated
+        ? currentSnap
+        : ({
+            make: vehicle.make,
+            model: vehicle.model,
+            year: vehicle.year,
+            plateNumber: vehicle.plateNumber,
+            color: vehicle.color,
+            mileage: vehicle.mileage,
+            category: vehicle.category,
+          } as Record<string, any>);
 
       await prisma.vehicle.update({
         where: { id: vehicleId },
         data: {
           status: "PENDING_REVIEW",
-          editSnapshot: snapshot as any,
+          editSnapshot: snapshotForUpdate as any,
           // Stay suspended (isActive=false, suspendedForDocs=true) until admin approves.
           // Admin approval is what clears these flags and brings the vehicle back online.
         },

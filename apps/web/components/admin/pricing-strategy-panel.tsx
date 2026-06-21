@@ -25,15 +25,23 @@ const vehicleTypes = [
   {
     id: "ECONOMY_SEDAN",
     name: "Economy Sedan",
-    model: "Ford Taurus or Similar",
+    model: "Ford Taurus / Lexus or Similar",
   },
   {
     id: "BUSINESS_SEDAN",
     name: "Business Sedan",
-    model: "Mercedes E-Class or Similar",
+    model: "Mercedes E-Class / BMW 5 series or Similar",
   },
-  { id: "BUSINESS_SUV", name: "Business SUV", model: "GMC Yukon or Similar" },
-  { id: "FIRST_CLASS", name: "First Class", model: "Rolls Royce or Similar" },
+  {
+    id: "BUSINESS_SUV",
+    name: "Business SUV",
+    model: "GMC Yukon / Chevrolet Tahoe or Similar",
+  },
+  {
+    id: "FIRST_CLASS",
+    name: "First Class",
+    model: "BMW 7 series / Mercedes Benz S Class or Similar",
+  },
   { id: "ELECTRIC", name: "Electric", model: "Lucid Air or Similar" },
 ];
 

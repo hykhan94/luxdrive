@@ -1,4 +1,7 @@
 // ============================================
+// !!! DESTINATION PATH: apps/server/src/utils/helpers/booking.helpers.ts
+// ============================================
+// ============================================
 // apps/server/src/utils/helpers/booking.helpers.ts
 // ============================================
 
@@ -49,7 +52,26 @@ export function formatDate(date: Date | null): string | null {
 export function buildVendorAssignment(
   booking: any,
   rejectionReasons: Array<any>,
+  // Optional active PENDING offer row, with vendor relation included.
+  // When passed in, this becomes the authoritative source for whether
+  // the booking is in an "awaiting vendor response" state — taking
+  // precedence over booking.status/vendorId, which can desync from
+  // the offer table in real-world flows (the vendor reject endpoint
+  // does its updates outside one transaction; alerts-settings auto-
+  // assign updates the booking but never wrote a matching offer row
+  // for a while; etc.). By keying off the offer row instead, the
+  // helper stays correct even when the booking flags drifted.
+  activeOffer?: {
+    id: string;
+    vendorId: string;
+    attemptNumber: number;
+    offeredAt: Date | null;
+    payoutAmount: any;
+    vendor: { id: string; companyName: string } | null;
+  } | null,
 ): any {
+  // 1. Confirmed/in-progress/completed. Booking has a vendor commitment
+  //    that's already been accepted — show the assigned crew.
   if (
     booking.vendor &&
     ["CONFIRMED", "IN_PROGRESS", "COMPLETED"].includes(booking.status)
@@ -83,32 +105,55 @@ export function buildVendorAssignment(
     };
   }
 
-  if (
+  // 2. Awaiting vendor response — authoritative branch.
+  //    Prefer the activeOffer row (the actual DB truth about whether
+  //    an offer is outstanding); fall back to the booking flags only
+  //    if no offer info was passed in (older callers). The offer's
+  //    own vendor relation is preferred over booking.vendor for the
+  //    same reason — if booking.vendorId desynced to null but the
+  //    offer still names a vendor, the admin needs to see who's
+  //    holding the offer, not "no one".
+  const awaitingFromOffer = activeOffer !== undefined && activeOffer !== null;
+  const awaitingFromBookingFlags =
+    !awaitingFromOffer &&
     booking.vendor &&
     (booking.status === "ASSIGNMENT_OFFERED" ||
-      booking.status === "ASSIGNMENT_RE_OFFERED")
-  ) {
+      booking.status === "ASSIGNMENT_RE_OFFERED");
+
+  if (awaitingFromOffer || awaitingFromBookingFlags) {
+    const vendor = activeOffer?.vendor || booking.vendor;
+    const isReOffer =
+      activeOffer != null
+        ? activeOffer.attemptNumber >= 2
+        : booking.status === "ASSIGNMENT_RE_OFFERED";
+    const payout =
+      activeOffer?.payoutAmount != null
+        ? Number(activeOffer.payoutAmount)
+        : booking.vendorPayoutAmount
+          ? Number(booking.vendorPayoutAmount)
+          : null;
     return {
       status: "awaiting",
-      statusDisplay:
-        booking.status === "ASSIGNMENT_RE_OFFERED"
-          ? "Awaiting Vendor Response (Re-offer)"
-          : "Awaiting Vendor Response",
-      vendor: {
-        id: booking.vendor.id,
-        companyName: booking.vendor.companyName,
-      },
-      vendorPayoutAmount: booking.vendorPayoutAmount
-        ? Number(booking.vendorPayoutAmount)
+      statusDisplay: isReOffer
+        ? "Awaiting Vendor Response (Re-offer)"
+        : "Awaiting Vendor Response",
+      vendor: vendor
+        ? { id: vendor.id, companyName: vendor.companyName }
         : null,
-      isReOffer: booking.status === "ASSIGNMENT_RE_OFFERED",
+      vendorPayoutAmount: payout,
+      isReOffer,
+      // Timestamp + attempt come straight off the offer row when
+      // available — frontend uses these for the "Sent N hours ago"
+      // line and the "attempt 2" caption on re-offers.
+      offerSentAt: activeOffer?.offeredAt ?? null,
+      offerAttemptNumber: activeOffer?.attemptNumber ?? null,
       rejectionHistory: rejectionReasons,
     };
   }
 
-  // No current vendor commitment. Could be: PENDING with no rejections
-  // (never offered yet), or PENDING/CANCELLED after one or more
-  // rejections. Either way admin needs to act (assign or cancel).
+  // 3. No current commitment + prior rejections. Genuine
+  //    "needs reassignment" state — only reachable now if there's
+  //    really no active PENDING offer for the booking.
   if (rejectionReasons.length > 0) {
     const lastRejection = rejectionReasons[rejectionReasons.length - 1];
     return {
@@ -124,6 +169,7 @@ export function buildVendorAssignment(
     };
   }
 
+  // 4. Default: fresh booking, no offers yet.
   return {
     status: "pending",
     statusDisplay: "Pending Assignment",

@@ -1,3 +1,6 @@
+// ============================================
+// !!! DESTINATION PATH: apps/web/components/landing/hero-section.tsx
+// ============================================
 "use client";
 
 import { useEffect, useState } from "react";
@@ -5,7 +8,14 @@ import dynamic from "next/dynamic";
 import Navigation from "./navigation";
 import ScrollIndicator from "./scroll-indicator";
 import GeometricPattern from "./geometric-pattern";
-import BookingForm from "./booking-form";
+// NOTE: BookingForm is the customer-facing "Book Your Ride" widget.
+// It's commented out (not removed) while the customer booking
+// pipeline isn't ready for public traffic. To restore: uncomment
+// the import below + the <BookingForm /> JSX in the right-hand
+// column, and remove (or comment out) the <IndustryPartnerCTA />
+// that currently occupies that slot.
+// import BookingForm from "./booking-form";
+import IndustryPartnerCTA from "./industry-partner-cta";
 
 // Dynamically import Three.js background to avoid SSR issues
 const TravelBackground = dynamic(() => import("./travel-background"), {
@@ -139,7 +149,9 @@ export default function HeroSection() {
               </div>
             </div>
 
-            {/* Right Side - Booking Form */}
+            {/* Right Side — B2B Partner CTA
+                (Customer "Book Your Ride" widget commented out below;
+                restore it when the customer booking pipeline goes live.) */}
             <div
               className={`transition-all duration-1000 ${
                 isLoaded
@@ -148,7 +160,8 @@ export default function HeroSection() {
               }`}
               style={{ transitionDelay: "0.3s" }}
             >
-              <BookingForm />
+              <IndustryPartnerCTA />
+              {/* <BookingForm /> */}
             </div>
           </div>
         </div>
