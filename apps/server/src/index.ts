@@ -17,6 +17,7 @@ import { isAdmin, isAuthenticated } from "./middleware/auth";
 import uploadRoutes from "./route/upload/index";
 import imagesRoutes from "./route/images.route";
 import publicRoutes from "./route/public/index";
+import contactRoutes from "./route/contact/index";
 import "./lib/cron";
 
 const app = express();
@@ -107,6 +108,12 @@ app.use("/api/v1/images", imagesRoutes);
 // trip card endpoint at /api/v1/public/trip/:token, which backs
 // the WhatsApp-shared link customers receive after booking.
 app.use("/api/v1/public", publicRoutes);
+
+// Public contact form endpoint — POST /api/v1/contact. No auth;
+// anyone browsing the marketing site can submit. Backend validates
+// the payload and sends a transactional email via Resend to the
+// LuxDrive ops inbox with reply-to set to the submitter.
+app.use("/api/v1/contact", contactRoutes);
 
 // 404 Handler
 app.use(notFoundHandler);
