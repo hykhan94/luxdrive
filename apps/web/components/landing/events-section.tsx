@@ -2,10 +2,16 @@
 
 import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
-import { Heart, Building, Crown, MessageCircle } from "lucide-react";
+import {
+  Heart,
+  Building,
+  Crown,
+  MessageCircle,
+  Presentation,
+} from "lucide-react";
 
 const eventTypes = [
-  { icon: Heart, label: "Weddings" },
+  { icon: Presentation, label: "MICE" },
   { icon: Building, label: "Corporate Events" },
   { icon: Crown, label: "VIP Occasions" },
 ];
@@ -68,7 +74,7 @@ export default function EventsSection() {
                   : "opacity-0 translate-y-8"
               }`}
             >
-              Weddings, Corporate Events & VIP Occasions
+              MICE, Corporate Events & VIP Occasions
             </p>
 
             <p
