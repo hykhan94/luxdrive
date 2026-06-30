@@ -4,23 +4,28 @@
 # Usage from repo root:
 #   gcloud builds submit --region=me-central2 --config=cloudbuild.yaml --timeout=20m .
 #
-# This builds the Next.js frontend Docker image and pushes it to
-# Artifact Registry in me-central2 (Dammam).
+# Secrets (Google Maps API key) are pulled from Google Secret Manager
+# at build time. No secret values appear in this file or on the command line.
 # ============================================
 
 steps:
   - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
     args:
-      - "build"
-      - "--build-arg"
-      - "NEXT_PUBLIC_API_URL=https://api.luxdriveksa.com"
-      - "--build-arg"
-      - "NEXT_PUBLIC_SITE_URL=https://luxdriveksa.com"
-      - "--build-arg"
-      - "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${_GOOGLE_MAPS_API_KEY}"
-      - "-t"
-      - "me-central2-docker.pkg.dev/cryptic-bolt-495416-i5/luxdrive/web:latest"
-      - "."
+      - "-c"
+      - |
+        docker build \
+          --build-arg NEXT_PUBLIC_API_URL=https://api.luxdriveksa.com \
+          --build-arg NEXT_PUBLIC_SITE_URL=https://luxdriveksa.com \
+          --build-arg NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=$$NEXT_PUBLIC_GOOGLE_MAPS_API_KEY \
+          -t me-central2-docker.pkg.dev/cryptic-bolt-495416-i5/luxdrive/web:latest \
+          .
+    secretEnv: ["NEXT_PUBLIC_GOOGLE_MAPS_API_KEY"]
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/cryptic-bolt-495416-i5/secrets/google-maps-api-key/versions/latest
+      env: "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY"
 
 images:
   - "me-central2-docker.pkg.dev/cryptic-bolt-495416-i5/luxdrive/web:latest"
