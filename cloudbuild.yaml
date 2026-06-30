@@ -17,7 +17,7 @@ steps:
       - "--build-arg"
       - "NEXT_PUBLIC_SITE_URL=https://luxdriveksa.com"
       - "--build-arg"
-      - "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=AIzaSyDaOlyuuMu1NuAjrIKpqvij1H6GNh4OKyw"
+      - "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${_GOOGLE_MAPS_API_KEY}"
       - "-t"
       - "me-central2-docker.pkg.dev/cryptic-bolt-495416-i5/luxdrive/web:latest"
       - "."
