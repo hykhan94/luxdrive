@@ -25,6 +25,8 @@ import {
   Loader2,
   AlertCircle,
   ShieldAlert,
+  MessageCircle,
+  Mail,
 } from "lucide-react";
 
 import DashboardPanel from "@/components/partner/dashboard-panel";
@@ -55,6 +57,10 @@ interface SidebarBadges {
   isApproved: boolean;
   partnerStatus: string | null;
   logoUrl: string | null;
+  /** True when the partner has at least one unresolved ADMIN_REJECTION
+   *  comment. Distinguishes real "admin wants changes" state from partner-
+   *  initiated edit windows for status-pill copy. */
+  hasActiveRejections?: boolean;
   // Required profile docs (CR / VAT / Chamber / Balady / National Address /
   // IBAN Letter) whose expiryDate has passed. Empty when nothing is expired.
   // Drives the "Document Expired" lockout UX across the portal.
@@ -195,7 +201,46 @@ function PartnerDashboardInner() {
   // there) + a "contact admin" CTA. Mounting the regular panels in
   // this state spams toasts because every API call 400s with
   // "Complete your profile..." from the backend gate.
-  const isSuspended = badges.partnerStatus === "SUSPENDED";
+  // Fallback flag: if sidebar-badges 403s with PARTNER_SUSPENDED (older
+  // backend where sidebar-badges is still gated by isActivePartner), we
+  // still want the frontend to render the suspended screen. Flipping this
+  // here means isSuspended (derived below) is true regardless of whether
+  // the badges response ever succeeded.
+  const [suspendedByError, setSuspendedByError] = useState(false);
+  const isSuspended = badges.partnerStatus === "SUSPENDED" || suspendedByError;
+
+  // Suspension info — reason, timestamp, WhatsApp contact — fetched lazily
+  // when we detect isSuspended. Kept separate from `badges` because those
+  // are polled every 30s and refetching this on every tick is wasteful; a
+  // suspension reason doesn't change during a session.
+  const [suspensionInfo, setSuspensionInfo] = useState<{
+    reason: string | null;
+    suspendedAt: string | null;
+    support: {
+      whatsapp: string;
+      whatsappUrl: string;
+      email: string;
+    };
+  } | null>(null);
+  useEffect(() => {
+    if (!isSuspended) return;
+    if (suspensionInfo) return;
+    (async () => {
+      try {
+        const res = await partnerApi.getSuspensionInfo();
+        if (res.success && res.data) {
+          setSuspensionInfo({
+            reason: res.data.reason,
+            suspendedAt: res.data.suspendedAt,
+            support: res.data.support,
+          });
+        }
+      } catch {
+        // Silently fall through; render will use generic copy if data
+        // never loads (partner still sees WhatsApp fallback below).
+      }
+    })();
+  }, [isSuspended, suspensionInfo]);
   // Doc-expiry is its own axis on top of partnerStatus. A partner can be
   // APPROVED but still locked out of write actions (book ride, generate
   // custom invoice) because one of their six required profile documents
@@ -222,6 +267,7 @@ function PartnerDashboardInner() {
   // A full page reload (which re-mounts this component) re-enables the
   // polling, so the user just needs to navigate to the right portal
   // for their role.
+
   useEffect(() => {
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -239,6 +285,18 @@ function PartnerDashboardInner() {
         // Hard stop: auth-level rejection won't change without a fresh
         // login. Polling further just adds noise.
         if (err?.status === 401 || err?.status === 403) {
+          // If the 403 carries PARTNER_SUSPENDED, the correct action is
+          // to render the account-suspended screen. We flip the fallback
+          // flag AND treat badges as loaded so the render can proceed.
+          const code =
+            err?.code ??
+            err?.data?.code ??
+            err?.response?.data?.code ??
+            err?.body?.code;
+          if (code === "PARTNER_SUSPENDED") {
+            setSuspendedByError(true);
+            setBadgesLoaded(true);
+          }
           return;
         }
         // Soft retry for transient network errors etc.
@@ -399,14 +457,30 @@ function PartnerDashboardInner() {
             <p className="text-sm font-medium text-white truncate">
               {user?.name || "Partner"}
             </p>
-            {!isApproved && badgesLoaded && (
-              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 bg-amber-500/10 text-amber-400 text-xs rounded border border-amber-500/20">
-                <ShieldAlert className="w-3 h-3" />
-                {accessLevel === "any"
-                  ? "Profile Incomplete"
-                  : "Pending Approval"}
-              </span>
-            )}
+            {!isApproved &&
+              badgesLoaded &&
+              (() => {
+                const isPartnerEditingSelfRequest =
+                  badges.partnerStatus === "CHANGES_REQUESTED" &&
+                  badges.hasActiveRejections === false;
+                const label =
+                  accessLevel === "any"
+                    ? "Profile Incomplete"
+                    : isPartnerEditingSelfRequest
+                      ? "Editing"
+                      : "Pending Approval";
+                const cls = isPartnerEditingSelfRequest
+                  ? "bg-sky-500/10 text-sky-400 border-sky-500/30"
+                  : "bg-amber-500/10 text-amber-400 border-amber-500/20";
+                return (
+                  <span
+                    className={`inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs rounded border ${cls}`}
+                  >
+                    <ShieldAlert className="w-3 h-3" />
+                    {label}
+                  </span>
+                );
+              })()}
           </div>
           <nav className="flex-1 overflow-y-auto p-3">
             <div className="space-y-1">
@@ -461,14 +535,30 @@ function PartnerDashboardInner() {
             <p className="text-sm font-medium text-white truncate">
               {user?.name || "Partner"}
             </p>
-            {!isApproved && badgesLoaded && (
-              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 bg-amber-500/10 text-amber-400 text-xs rounded border border-amber-500/20">
-                <ShieldAlert className="w-3 h-3" />
-                {accessLevel === "any"
-                  ? "Profile Incomplete"
-                  : "Pending Approval"}
-              </span>
-            )}
+            {!isApproved &&
+              badgesLoaded &&
+              (() => {
+                const isPartnerEditingSelfRequest =
+                  badges.partnerStatus === "CHANGES_REQUESTED" &&
+                  badges.hasActiveRejections === false;
+                const label =
+                  accessLevel === "any"
+                    ? "Profile Incomplete"
+                    : isPartnerEditingSelfRequest
+                      ? "Editing"
+                      : "Pending Approval";
+                const cls = isPartnerEditingSelfRequest
+                  ? "bg-sky-500/10 text-sky-400 border-sky-500/30"
+                  : "bg-amber-500/10 text-amber-400 border-amber-500/20";
+                return (
+                  <span
+                    className={`inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs rounded border ${cls}`}
+                  >
+                    <ShieldAlert className="w-3 h-3" />
+                    {label}
+                  </span>
+                );
+              })()}
           </div>
         )}
         <nav className="flex-1 overflow-y-auto p-2">
@@ -553,39 +643,58 @@ function PartnerDashboardInner() {
                 their state. Precedence (highest first):
                 1. Suspended → red "Account Suspended" — admin pulled access
                 2. Doc expired → red, specific to the doc
-                3. Not approved yet → amber "Profile Pending Approval"
+                3. Partner in CHANGES_REQUESTED with no admin rejections
+                   (all outstanding items are partner-requested edits) →
+                   sky "Editing your profile" — not a corrective state
+                4. Not approved yet → amber "Profile Pending Approval"
                 Suspended wins because it's the broadest block — the partner
                 shouldn't see "Profile Pending Approval" if admin has fully
                 pulled their access. */}
-            {badgesLoaded && (isSuspended || hasExpiredDocs || !isApproved) && (
-              <span
-                title={
-                  isSuspended
-                    ? "Your account has been suspended. Open Notifications to see the reason and contact admin."
-                    : hasExpiredDocs
-                      ? `Expired: ${badges.expiredRequiredDocs.map((d) => d.label).join(", ")}. Renew via the profile change-request flow.`
-                      : accessLevel === "any"
-                        ? "Complete your profile to begin"
-                        : "Your profile is being reviewed by our team"
-                }
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border ${
-                  isSuspended || hasExpiredDocs
-                    ? "bg-red-500/10 text-red-400 border-red-500/30"
-                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                }`}
-              >
-                <ShieldAlert className="w-4 h-4" />
-                {isSuspended
-                  ? "Account Suspended"
-                  : hasExpiredDocs
-                    ? badges.expiredRequiredDocs.length === 1
-                      ? `${badges.expiredRequiredDocs[0].label} Expired`
-                      : `${badges.expiredRequiredDocs.length} Documents Expired`
-                    : accessLevel === "any"
-                      ? "Profile Incomplete"
-                      : "Profile Pending Approval"}
-              </span>
-            )}
+            {badgesLoaded &&
+              (isSuspended || hasExpiredDocs || !isApproved) &&
+              (() => {
+                const isPartnerEditingSelfRequest =
+                  !isSuspended &&
+                  !hasExpiredDocs &&
+                  !isApproved &&
+                  badges.partnerStatus === "CHANGES_REQUESTED" &&
+                  badges.hasActiveRejections === false;
+                return (
+                  <span
+                    title={
+                      isSuspended
+                        ? "Your account has been suspended. Open Notifications to see the reason and contact admin."
+                        : hasExpiredDocs
+                          ? `Expired: ${badges.expiredRequiredDocs.map((d) => d.label).join(", ")}. Renew via the profile change-request flow.`
+                          : isPartnerEditingSelfRequest
+                            ? "You asked to edit your profile — make your changes and resubmit."
+                            : accessLevel === "any"
+                              ? "Complete your profile to begin"
+                              : "Your profile is being reviewed by our team"
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border ${
+                      isSuspended || hasExpiredDocs
+                        ? "bg-red-500/10 text-red-400 border-red-500/30"
+                        : isPartnerEditingSelfRequest
+                          ? "bg-sky-500/10 text-sky-400 border-sky-500/30"
+                          : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                    }`}
+                  >
+                    <ShieldAlert className="w-4 h-4" />
+                    {isSuspended
+                      ? "Account Suspended"
+                      : hasExpiredDocs
+                        ? badges.expiredRequiredDocs.length === 1
+                          ? `${badges.expiredRequiredDocs[0].label} Expired`
+                          : `${badges.expiredRequiredDocs.length} Documents Expired`
+                        : isPartnerEditingSelfRequest
+                          ? "Editing Your Profile"
+                          : accessLevel === "any"
+                            ? "Profile Incomplete"
+                            : "Profile Pending Approval"}
+                  </span>
+                );
+              })()}
             <div className="text-right">
               <p className="text-sm font-medium text-white">{user?.name}</p>
               <p className="text-xs text-luxury-gold">{user?.email}</p>
@@ -610,26 +719,67 @@ function PartnerDashboardInner() {
               tab routes here instead of mounting its panel, which
               prevents the toast spam that would otherwise fire on
               every panel's failed API call. */}
-          {isSuspended && activeTab !== "notifications" ? (
-            <div className="flex flex-col items-center justify-center py-20 text-center max-w-md mx-auto">
+          {isSuspended ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center max-w-lg mx-auto">
               <div className="w-20 h-20 rounded-full bg-red-500/10 flex items-center justify-center mb-6">
                 <ShieldAlert className="w-10 h-10 text-red-400" />
               </div>
-              <h3 className="text-xl font-semibold text-white mb-3">
+              <h3 className="text-2xl font-semibold text-white mb-3">
                 Account Suspended
               </h3>
-              <p className="text-gray-400 mb-6 leading-relaxed">
-                Your LuxDrive partner account has been suspended by admin. You
-                won&apos;t be able to access portal features until the
-                suspension is lifted. Open Notifications to see the reason, or
-                contact your LuxDrive admin to restore access.
+              <p className="text-gray-400 mb-5 leading-relaxed">
+                Your LuxDrive partner account has been suspended by the admin.
+                Portal access is disabled until the suspension is lifted.
               </p>
-              <button
-                onClick={() => setActiveTab("notifications")}
-                className="flex items-center gap-2 px-6 py-3 bg-luxury-gold text-black font-medium rounded-lg hover:bg-luxury-gold/90 transition-colors"
-              >
-                <Bell className="w-5 h-5" /> View Notifications
-              </button>
+              {/* Reason panel — verbatim from admin. Falls back to a generic
+                  line if the API hasn't returned yet or omitted a reason. */}
+              <div className="w-full mb-6 rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-left">
+                <p className="text-xs uppercase tracking-wider text-red-400 font-semibold mb-1.5">
+                  Reason
+                </p>
+                <p className="text-sm text-red-100 whitespace-pre-wrap break-words">
+                  {suspensionInfo?.reason ??
+                    "Contact your admin to see the reason for suspension."}
+                </p>
+                {suspensionInfo?.suspendedAt && (
+                  <p className="mt-2 text-[11px] text-red-400/70">
+                    Suspended on{" "}
+                    {new Date(suspensionInfo.suspendedAt).toLocaleDateString(
+                      undefined,
+                      { year: "numeric", month: "short", day: "numeric" },
+                    )}
+                  </p>
+                )}
+              </div>
+              {/* Support contact CTAs. WhatsApp is the primary — deep-links
+                  to a chat pre-filled with the partner's company context.
+                  Email is a secondary fallback. */}
+              <div className="w-full flex flex-col sm:flex-row gap-3">
+                <a
+                  href={
+                    suspensionInfo?.support.whatsappUrl ??
+                    "https://wa.me/966545559510"
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500 text-white font-medium rounded-lg hover:bg-emerald-400 transition-colors"
+                >
+                  <MessageCircle className="w-5 h-5" />
+                  Contact Admin on WhatsApp
+                </a>
+                <a
+                  href={`mailto:${suspensionInfo?.support.email ?? "info@luxdriveksa.com"}`}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-6 py-3 bg-neutral-800 text-white font-medium rounded-lg hover:bg-neutral-700 transition-colors border border-neutral-700"
+                >
+                  <Mail className="w-5 h-5" />
+                  Email Admin
+                </a>
+              </div>
+              {suspensionInfo?.support.whatsapp && (
+                <p className="mt-4 text-xs text-gray-500">
+                  Support line: {suspensionInfo.support.whatsapp}
+                </p>
+              )}
             </div>
           ) : badgesLoaded &&
             sidebarItems.find((i) => i.id === activeTab) &&
@@ -692,6 +842,7 @@ function PartnerDashboardInner() {
                 <ProfilePanel
                   refreshBadges={refreshBadges}
                   isApproved={isApproved}
+                  sidebarOpen={sidebarOpen}
                 />
               )}
               {activeTab === "reports" && <ReportsAnalyticsPanel />}

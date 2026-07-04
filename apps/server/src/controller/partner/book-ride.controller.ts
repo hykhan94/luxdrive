@@ -409,6 +409,7 @@ export const getVehicleOptions = asyncWrapper(
             {
               vehicleClass: "ELECTRIC",
               label: "Electric",
+              modelExample: "Lucid Air or Similar",
               price: route.price ? Number(route.price) : null,
               maxPassengers: VEHICLE_MAX_PASSENGERS.ELECTRIC,
               available: route.price !== null,
@@ -433,18 +434,54 @@ export const getVehicleOptions = asyncWrapper(
         ? Number(peakConfig.multiplier)
         : 1.0;
 
+    // `modelExample` mirrors the marketed vehicle model displayed on the
+    // landing page fleet-showcase — surfaced here so the partner picking
+    // a class in book-ride sees the same "which cars actually run" hint
+    // ("Business Sedan (Mercedes E-Class / BMW 5 Series or Similar)")
+    // that customers see. If landing copy shifts, update both sites.
     const vehicleClasses = [
-      { key: "ECONOMY_SEDAN", label: "Economy Sedan", column: "economySedan" },
+      {
+        key: "ECONOMY_SEDAN",
+        label: "Economy Sedan",
+        modelExample: "Ford Taurus / Lexus or Similar",
+        column: "economySedan",
+      },
       {
         key: "BUSINESS_SEDAN",
         label: "Business Sedan",
+        modelExample: "Mercedes E-Class / BMW 5 Series or Similar",
         column: "businessSedan",
       },
-      { key: "FIRST_CLASS", label: "First Class", column: "firstClass" },
-      { key: "BUSINESS_SUV", label: "Business SUV", column: "businessSuv" },
-      { key: "HIACE", label: "Hiace (10-Seater)", column: "hiace" },
-      { key: "COASTER", label: "Coaster (23-Seater)", column: "coaster" },
-      { key: "KING_LONG", label: "King Long (49-Seater)", column: "kingLong" },
+      {
+        key: "FIRST_CLASS",
+        label: "First Class",
+        modelExample: "BMW 7 Series / Mercedes S-Class or Similar",
+        column: "firstClass",
+      },
+      {
+        key: "BUSINESS_SUV",
+        label: "Business SUV",
+        modelExample: "GMC Yukon / Chevrolet Tahoe or Similar",
+        column: "businessSuv",
+      },
+      {
+        key: "HIACE",
+        label: "Hiace (10-Seater)",
+        modelExample: "Toyota Hiace or Similar",
+        column: "hiace",
+      },
+      {
+        key: "COASTER",
+        label: "Coaster (23-Seater)",
+        modelExample: "Toyota Coaster or Similar",
+        column: "coaster",
+      },
+      {
+        key: "KING_LONG",
+        label: "King Long (49-Seater)",
+        modelExample: "King Long XMQ / Higer or Similar",
+        column: "kingLong",
+      },
     ];
 
     // ============== HOURLY BRANCH ==============
@@ -468,6 +505,7 @@ export const getVehicleOptions = asyncWrapper(
             return {
               vehicleClass: vc.key,
               label: vc.label,
+              modelExample: vc.modelExample,
               basePrice: null as number | null,
               price: null as number | null,
               maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
@@ -488,6 +526,7 @@ export const getVehicleOptions = asyncWrapper(
             return {
               vehicleClass: vc.key,
               label: vc.label,
+              modelExample: vc.modelExample,
               basePrice: quote.subtotal,
               price: Math.round(afterPeak * 100) / 100,
               maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
@@ -505,6 +544,7 @@ export const getVehicleOptions = asyncWrapper(
             return {
               vehicleClass: vc.key,
               label: vc.label,
+              modelExample: vc.modelExample,
               basePrice: null,
               price: null,
               maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
@@ -542,6 +582,7 @@ export const getVehicleOptions = asyncWrapper(
       return {
         vehicleClass: vc.key,
         label: vc.label,
+        modelExample: vc.modelExample,
         basePrice: basePrice ? Number(basePrice) : null,
         price,
         maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],

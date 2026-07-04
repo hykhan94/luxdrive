@@ -58,10 +58,23 @@ async function apiFetch<T = any>(
   const data = await response.json();
 
   if (!response.ok) {
+    // Special-case PARTNER_SUSPENDED: the partner dashboard is already
+    // routing to the account-suspended screen based on the sidebar-badges
+    // status. Every other panel call that fires during that transition
+    // will 403 — and if each panel surfaces `err.message` as a toast we
+    // get the "Your account has been suspended by the admin." spam
+    // observed on hover of Company Profile / Notifications tabs.
+    // Instead of removing the error, we mark it with a well-known flag
+    // so per-panel handlers can filter it out, AND we set a synthetic
+    // silent property so the shared notification-context can skip it.
+    const isSuspendedError =
+      response.status === 403 &&
+      (data?.code === "PARTNER_SUSPENDED" ||
+        data?.message?.toLowerCase?.().includes("suspended"));
     throw new ApiError(
       response.status,
       data.message || data.error || "Request failed",
-      data,
+      { ...data, __silent: isSuspendedError },
     );
   }
 
@@ -590,7 +603,23 @@ export const adminApi = {
     api.get(`${ADMIN_BASE}/partners/${id}/review`),
   addPartnerReviewComment: (
     id: string,
-    body: { fieldName: string; comment: string },
+    body: {
+      fieldName: string;
+      comment: string;
+      /**
+       * Explicit comment type. Preferred over embedding "❌ Rejected:" in the
+       * comment text. Backend accepts both for a release cycle; when both are
+       * present, the explicit type wins.
+       */
+      type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+      /**
+       * When true, the backend creates the comment already resolved and skips
+       * the partner-facing notification. Used for admin per-field Accept on
+       * CHANGED fields with no existing comments — creates an audit-trail
+       * entry without spamming the partner with per-field acknowledgements.
+       */
+      resolveOnCreate?: boolean;
+    },
   ) => api.post(`${ADMIN_BASE}/partners/${id}/review/comment`, body),
   resolvePartnerReviewComment: (id: string, commentId: string) =>
     api.patch(
@@ -618,6 +647,12 @@ const PARTNER_BASE = "/api/v1/partner";
 export const partnerApi = {
   // Sidebar badges
   getSidebarBadges: () => api.get(`${PARTNER_BASE}/sidebar-badges`),
+
+  // Suspension info — reachable even when partner status is SUSPENDED.
+  // Returns { isSuspended, reason, suspendedAt, companyName, support }.
+  // Everything else under /partner/* is gated by isActivePartner and
+  // returns 403 PARTNER_SUSPENDED for suspended sessions.
+  getSuspensionInfo: () => api.get(`${PARTNER_BASE}/suspension-info`),
 
   // Dashboard
   getProfileStatus: () => api.get(`${PARTNER_BASE}/dashboard/profile-status`),

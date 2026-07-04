@@ -1102,7 +1102,17 @@ export const manualUnsuspendPartner = asyncWrapper(
 
     const updated = await prisma.partner.update({
       where: { id },
-      data: { status: "APPROVED" },
+      data: {
+        status: "APPROVED",
+        // Clear admin-suspend fields too — the payment-driven unsuspend
+        // clears ALL suspension state, otherwise a partner who was first
+        // admin-suspended and later also invoice-suspended would carry a
+        // stale reason after unsuspend.
+        statusBeforeSuspension: null,
+        suspendedAt: null,
+        suspendedBy: null,
+        suspensionReason: null,
+      },
     });
 
     // Audit log — captures the unpaid invoice context for traceability.

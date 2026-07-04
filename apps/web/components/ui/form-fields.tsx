@@ -22,6 +22,12 @@ import {
   isValidPhoneNumber,
   type CountryCode,
 } from "libphonenumber-js/min";
+// Namespaced flag imports — the 3x2 SVG variant renders cleanly at small
+// sizes. Namespace import + dynamic key lookup keeps the code compact while
+// Next.js tree-shakes to only the flags referenced at build time (which in
+// practice, with dynamic ISO2 lookup, means the whole set — but each SVG is
+// a few hundred bytes and gzip does the rest).
+import * as CountryFlags from "country-flag-icons/react/3x2";
 
 // ============================================
 // components/ui/form-fields.tsx
@@ -98,6 +104,44 @@ export const POPULAR_COUNTRIES = [
 // string otherwise. The library deals in ISO-2 codes but doesn't
 // provide flags, and importing a flag library would be wasteful
 // when 6 lines of code do it.
+/**
+ * Renders a country flag as an SVG (via country-flag-icons) with a Regional
+ * Indicator emoji fallback for codes not in the icon set. SVG output is what
+ * lets flags render consistently on Windows (Segoe UI Emoji ships no flag
+ * glyphs), while the emoji fallback keeps things degrading gracefully.
+ *
+ * Sized via className — pass w-* / h-* to control the box. The SVG stretches
+ * to fill so the rendered aspect stays 3:2.
+ */
+function CountryFlag({
+  iso2,
+  className = "w-5 h-auto",
+}: {
+  iso2: string;
+  className?: string;
+}) {
+  const key = iso2?.toUpperCase();
+  const Comp = key
+    ? (CountryFlags as Record<string, React.FC<React.SVGProps<SVGSVGElement>>>)[
+        key
+      ]
+    : undefined;
+  if (Comp) {
+    return (
+      <Comp
+        className={className}
+        // The SVG has no inherent border so a subtle ring pulls it out of the
+        // dark backgrounds we render against.
+        style={{ display: "block" }}
+      />
+    );
+  }
+  // Fallback: Regional Indicator emoji. Windows will still render "PK" text
+  // here, but this branch only fires for codes the SVG set doesn't cover
+  // (a small set — mostly disputed territories).
+  return <span className={className}>{flagFromIso2(iso2)}</span>;
+}
+
 function flagFromIso2(iso2: string): string {
   if (!iso2 || iso2.length !== 2) return "";
   const A = 0x1f1e6; // Regional Indicator Symbol Letter A
@@ -404,7 +448,6 @@ export function PhoneInput({
     onChange(parsedCandidate?.number ?? candidate);
   };
 
-  const selectedFlag = flagFromIso2(country);
   const selectedDialCode = `+${getCountryCallingCode(country)}`;
   const placeholder = "Phone number";
 
@@ -431,7 +474,10 @@ export function PhoneInput({
                 : "cursor-pointer hover:bg-neutral-700"
             } transition-colors`}
           >
-            <span className="text-base leading-none">{selectedFlag}</span>
+            <CountryFlag
+              iso2={country}
+              className="w-5 h-3.5 rounded-sm shadow-sm"
+            />
             <span className="text-gray-400 text-xs font-mono">
               {selectedDialCode}
             </span>
@@ -485,9 +531,10 @@ export function PhoneInput({
                               : "text-gray-300"
                           }`}
                         >
-                          <span className="text-base">
-                            {flagFromIso2(c.iso2)}
-                          </span>
+                          <CountryFlag
+                            iso2={c.iso2}
+                            className="w-5 h-3.5 rounded-sm shadow-sm shrink-0"
+                          />
                           <span className="flex-1 truncate">{c.name}</span>
                           <span className="text-xs text-gray-500 font-mono">
                             +{getCountryCallingCode(c.iso2)}

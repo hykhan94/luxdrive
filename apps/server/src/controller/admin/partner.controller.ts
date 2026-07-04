@@ -265,6 +265,11 @@ export const getPartners = asyncWrapper(async (req: Request, res: Response) => {
         partner.documents,
         (partner as any).mouExpiryDate ?? null,
       ),
+      // Suspension audit — only meaningful for SUSPENDED rows but ships on
+      // every row so the admin panel can render the "Reactivate" surface
+      // and reason without a separate detail fetch.
+      suspendedAt: (partner as any).suspendedAt ?? null,
+      suspensionReason: (partner as any).suspensionReason ?? null,
     })),
   );
 
@@ -272,6 +277,7 @@ export const getPartners = asyncWrapper(async (req: Request, res: Response) => {
   const statusCountsObj: Record<string, number> = {
     all: total,
     INVITED: 0,
+    ONBOARDING: 0,
     PENDING_REVIEW: 0,
     CHANGES_REQUESTED: 0,
     APPROVED: 0,
@@ -711,16 +717,28 @@ export const getPartnerProfileForReview = asyncWrapper(
       throw new NotFoundError("Partner");
     }
 
-    // Group comments by field
+    // Group comments by field. We include both live (unresolved) and comments
+    // resolved during THIS review round — the partner-side submit handler
+    // resolves everything to clear their editing UI, but admin still needs
+    // those comments visible to know what fields were in-scope this round.
+    // Round boundary: resolved AFTER the last admin review, or ever-resolved
+    // when there hasn't been a review yet (first submission cycle).
+    const lastReviewAt = partner.profileReviewedAt?.getTime() ?? 0;
     const commentsByField: Record<string, any[]> = {};
     partner.reviewComments.forEach((comment) => {
+      const inCurrentRound =
+        !comment.isResolved ||
+        (comment.resolvedAt && comment.resolvedAt.getTime() > lastReviewAt);
+      if (!inCurrentRound) return;
       if (!commentsByField[comment.fieldName]) {
         commentsByField[comment.fieldName] = [];
       }
       commentsByField[comment.fieldName].push({
         id: comment.id,
         comment: comment.comment,
+        type: comment.type,
         isResolved: comment.isResolved,
+        resolvedAt: comment.resolvedAt,
         createdAt: comment.createdAt,
       });
     });
@@ -733,17 +751,22 @@ export const getPartnerProfileForReview = asyncWrapper(
     const uploadedDocsMap = new Map(partner.documents.map((d) => [d.type, d]));
 
     // "Replaced since last review" detection — mirrors vendor. For each
-    // doc, find the most recent UNRESOLVED rejection comment for that
-    // doc and compare doc.updatedAt against it. Only fires when the
-    // partner has actually re-uploaded after a rejection (NOT immediately
-    // when admin clicks Reject).
+    // doc, find the most recent rejection comment for that doc in the
+    // current review round (unresolved, OR resolved during this round)
+    // and compare doc.updatedAt against it. Only fires when the partner
+    // has actually re-uploaded after a rejection (NOT immediately when
+    // admin clicks Reject). Uses the enum type; falls back to the legacy
+    // "❌ Rejected:" prefix for pre-refactor rows.
     function computeReplaced(
       docType: string,
       docUpdatedAt: Date | null | undefined,
     ): boolean {
       if (!docUpdatedAt) return false;
       const rejectionComments = (commentsByField[docType] || []).filter(
-        (c: any) => !c.isResolved && c.comment?.startsWith?.("❌ Rejected:"),
+        (c: any) =>
+          c.type
+            ? c.type === "ADMIN_REJECTION"
+            : c.comment?.startsWith?.("❌ Rejected:"),
       );
       if (rejectionComments.length === 0) return false;
       const mostRecent: Date = rejectionComments.reduce((acc: Date, c: any) => {
@@ -843,7 +866,25 @@ export const getPartnerProfileForReview = asyncWrapper(
 export const addReviewComment = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { fieldName, comment } = req.body;
+    const {
+      fieldName,
+      comment,
+      type: explicitType,
+      resolveOnCreate,
+    } = req.body as {
+      fieldName?: string;
+      comment?: string;
+      type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+      /**
+       * When true, create the comment already resolved and skip the
+       * partner-facing notification. Used by the admin panel's per-field
+       * "Accept" for CHANGED fields with no existing comments — we want a
+       * durable "admin accepted this value" audit record without pinging
+       * the partner (they don't need to hear about individual accepts;
+       * the whole-profile approval is what matters to them).
+       */
+      resolveOnCreate?: boolean;
+    };
 
     if (!fieldName || !comment) {
       throw new BadRequestError("fieldName and comment are required");
@@ -917,7 +958,11 @@ export const addReviewComment = asyncWrapper(
     // (admin's reject flow writes a "❌ Rejected:" prefix) or a plain
     // comment. The transaction ensures the comment + notification land
     // together — never a comment the partner was never told about.
-    const isRejection = comment.startsWith("❌ Rejected:");
+    // Explicit type from the client (Step 6+) wins over prefix detection.
+    // Legacy callers that still embed "❌ Rejected:" continue to work.
+    const isRejection = explicitType
+      ? explicitType === "ADMIN_REJECTION"
+      : comment.startsWith("❌ Rejected:");
     const reasonText = isRejection
       ? comment.replace(/^❌ Rejected:\s*/, "").trim()
       : comment;
@@ -981,31 +1026,71 @@ export const addReviewComment = asyncWrapper(
       }
     }
 
-    const [reviewComment] = await prisma.$transaction([
-      prisma.partnerReviewComment.create({
+    // Policy B: if the admin is rejecting a field that the partner had a
+    // pending PARTNER_REQUEST for, mark that request resolved before creating
+    // the rejection. Each field has at most one unresolved comment; this
+    // transitions the field from "editable at partner's request" to
+    // "admin found problem with your edit — please fix."
+    if (isRejection) {
+      await prisma.partnerReviewComment.updateMany({
+        where: {
+          partnerId: id,
+          fieldName,
+          isResolved: false,
+          type: "PARTNER_REQUEST",
+        },
+        data: { isResolved: true, resolvedAt: new Date() },
+      });
+    }
+
+    // Two write paths:
+    //   1. Normal path (default): comment + notification, in a transaction so
+    //      the partner never sees a live comment they weren't told about.
+    //   2. resolveOnCreate path: create the comment already resolved and
+    //      SKIP the notification. Used by admin per-field Accept for CHANGED
+    //      fields — we want an audit trail without spamming the partner.
+    let reviewComment;
+    if (resolveOnCreate) {
+      reviewComment = await prisma.partnerReviewComment.create({
         data: {
           partnerId: id,
           fieldName,
           comment,
+          type: isRejection ? "ADMIN_REJECTION" : "ADMIN_COMMENT",
+          isResolved: true,
+          resolvedAt: new Date(),
           createdBy: req.user!.id,
         },
-      }),
-      prisma.notification.create({
-        data: {
-          userId: partner.userId,
-          title: isRejection
-            ? `${fieldLabel} rejected`
-            : `New comment on ${fieldLabel}`,
-          message: isRejection
-            ? `Admin rejected ${fieldLabel}: ${reasonText}. Please update and resubmit.`
-            : `Admin added a comment on ${fieldLabel}: ${reasonText}`,
-          type: isRejection
-            ? "PARTNER_PROFILE_FIELD_REJECTED"
-            : "PARTNER_PROFILE_REVIEW_COMMENT",
-          data: { partnerId: id, fieldName },
-        },
-      }),
-    ]);
+      });
+    } else {
+      const [created] = await prisma.$transaction([
+        prisma.partnerReviewComment.create({
+          data: {
+            partnerId: id,
+            fieldName,
+            comment,
+            type: isRejection ? "ADMIN_REJECTION" : "ADMIN_COMMENT",
+            createdBy: req.user!.id,
+          },
+        }),
+        prisma.notification.create({
+          data: {
+            userId: partner.userId,
+            title: isRejection
+              ? `${fieldLabel} rejected`
+              : `New comment on ${fieldLabel}`,
+            message: isRejection
+              ? `Admin rejected ${fieldLabel}: ${reasonText}. Please update and resubmit.`
+              : `Admin added a comment on ${fieldLabel}: ${reasonText}`,
+            type: isRejection
+              ? "PARTNER_PROFILE_FIELD_REJECTED"
+              : "PARTNER_PROFILE_REVIEW_COMMENT",
+            data: { partnerId: id, fieldName },
+          },
+        }),
+      ]);
+      reviewComment = created;
+    }
 
     res.json({
       success: true,
@@ -1025,7 +1110,13 @@ export const approvePartner = asyncWrapper(
     const partner = await prisma.partner.findUnique({
       where: { id },
       include: {
-        reviewComments: { where: { isResolved: false } },
+        // Only ADMIN_REJECTION comments block approval — PARTNER_REQUEST are
+        // granted-edit permissions that self-retire when the partner
+        // re-submits. Mirrors the frontend approval gate in
+        // partner-management-panel.tsx (getApprovalBlockReasons).
+        reviewComments: {
+          where: { isResolved: false, type: "ADMIN_REJECTION" },
+        },
         documents: true,
       },
     });
@@ -1139,11 +1230,26 @@ export const requestChanges = asyncWrapper(
 
     // Add comments if provided
     if (comments && Array.isArray(comments) && comments.length > 0) {
+      // Whole-profile Request Changes only fires from PENDING_REVIEW, before
+      // any PARTNER_REQUEST could exist on these fields — but resolve any that
+      // do exist (defensive, keeps Policy B symmetric with addReviewComment).
+      const fields = comments.map((c: { fieldName: string }) => c.fieldName);
+      await prisma.partnerReviewComment.updateMany({
+        where: {
+          partnerId: id,
+          fieldName: { in: fields },
+          isResolved: false,
+          type: "PARTNER_REQUEST",
+        },
+        data: { isResolved: true, resolvedAt: new Date() },
+      });
+
       await prisma.partnerReviewComment.createMany({
         data: comments.map((c: { fieldName: string; comment: string }) => ({
           partnerId: id,
           fieldName: c.fieldName,
           comment: c.comment,
+          type: "ADMIN_REJECTION" as const,
           createdBy: req.user!.id,
         })),
       });
@@ -1232,7 +1338,17 @@ export const requestChanges = asyncWrapper(
 export const suspendPartner = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body as { reason?: string };
+
+    // Reason is required — product decision: admin cannot suspend silently.
+    // The partner sees this verbatim on their locked dashboard so it must be
+    // meaningful. Trim + minimum-length check keeps "..." out.
+    const trimmedReason = (reason ?? "").trim();
+    if (trimmedReason.length < 5) {
+      throw new BadRequestError(
+        "A suspension reason (at least 5 characters) is required",
+      );
+    }
 
     const partner = await prisma.partner.findUnique({
       where: { id },
@@ -1241,46 +1357,45 @@ export const suspendPartner = asyncWrapper(
     if (!partner) {
       throw new NotFoundError("Partner");
     }
-
     if (partner.status === "SUSPENDED") {
       throw new BadRequestError("Partner is already suspended");
     }
 
-    // Store previous status for potential reactivation
     const previousStatus = partner.status;
 
+    // Single transactional update: status flips, audit fields populated, so
+    // an aborted request can't leave a half-suspended row.
     const updated = await prisma.partner.update({
       where: { id },
       data: {
         status: "SUSPENDED",
+        statusBeforeSuspension: previousStatus,
+        suspendedAt: new Date(),
+        suspendedBy: req.user!.id,
+        suspensionReason: trimmedReason,
       },
     });
 
-    // Log the suspension
     await prisma.auditLog.create({
       data: {
         userId: req.user!.id,
         action: "PARTNER_SUSPENDED",
         entity: "Partner",
         entityId: id,
-        changes: { previousStatus, reason },
+        changes: { previousStatus, reason: trimmedReason },
       },
     });
 
-    // Notify the partner. Type matches the PROFILE_SUSPENDED slot
-    // already registered in partner/notification.controller.ts (icon =
-    // x-circle, severity = danger, category = PROFILE). Includes the
-    // admin-supplied reason when present so the partner knows the
-    // "why" without contacting support.
+    // Notify the partner. Type matches the PROFILE_SUSPENDED slot already
+    // registered in partner/notification.controller.ts (icon = x-circle,
+    // severity = danger, category = PROFILE).
     await prisma.notification.create({
       data: {
         userId: partner.userId,
         title: "Account Suspended",
-        message: reason
-          ? `Your LuxDrive partner account has been suspended. Reason: ${reason}`
-          : "Your LuxDrive partner account has been suspended. Contact admin for details.",
+        message: `Your LuxDrive partner account has been suspended. Reason: ${trimmedReason}`,
         type: "PROFILE_SUSPENDED",
-        data: { partnerId: id, reason: reason || null },
+        data: { partnerId: id, reason: trimmedReason },
       },
     });
 
@@ -1303,31 +1418,39 @@ export const reactivatePartner = asyncWrapper(
     if (!partner) {
       throw new NotFoundError("Partner");
     }
-
     if (partner.status !== "SUSPENDED") {
       throw new BadRequestError("Partner is not suspended");
     }
 
+    // Restore the status the partner held before suspension. Legacy rows
+    // suspended before this migration have statusBeforeSuspension = null;
+    // for those we default to APPROVED (the most common case — most
+    // suspensions happen from an already-approved partner).
+    const restoreTo = partner.statusBeforeSuspension ?? "APPROVED";
+
     const updated = await prisma.partner.update({
       where: { id },
       data: {
-        status: "APPROVED",
+        status: restoreTo,
+        // Clear the suspension audit fields; the auditLog row keeps the
+        // history for compliance.
+        statusBeforeSuspension: null,
+        suspendedAt: null,
+        suspendedBy: null,
+        suspensionReason: null,
       },
     });
 
-    // Log the reactivation
     await prisma.auditLog.create({
       data: {
         userId: req.user!.id,
         action: "PARTNER_REACTIVATED",
         entity: "Partner",
         entityId: id,
+        changes: { restoredTo: restoreTo },
       },
     });
 
-    // Notify the partner. Type matches PROFILE_REACTIVATED slot
-    // already registered in partner/notification.controller.ts. Tone
-    // is welcoming — they can resume operations.
     await prisma.notification.create({
       data: {
         userId: partner.userId,

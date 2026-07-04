@@ -77,7 +77,7 @@ router.patch("/team/:memberId/reactivate", reactivateTeamMember);
 // DELETE /api/v1/partner/profile/team/:memberId
 router.delete("/team/:memberId", removeTeamMember);
 
-router.post("/profile/change-request", requestProfileChanges);
-router.get("/profile/change-requests", getChangeRequests);
+router.post("/change-request", requestProfileChanges);
+router.get("/change-requests", getChangeRequests);
 
 export default router;

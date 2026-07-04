@@ -105,6 +105,53 @@ export const isStaff = [
 // Combined middleware for partners
 export const isPartner = [isAuthenticated, hasRole("PARTNER")];
 
+/**
+ * Blocks partner API access when the partner is SUSPENDED. Used to gate
+ * every partner-scoped route EXCEPT the suspension-info endpoint the
+ * dashboard reads to render the "your account is suspended" screen.
+ *
+ * Returns 403 with a specific code the frontend intercepts and redirects
+ * to /dashboard rather than showing a generic error. Because status lives
+ * on the Partner (not User), we look it up per-request — cheap since the
+ * userId → partner index exists, and status changes need to take effect
+ * immediately (an admin suspend should log the partner out of their
+ * dashboard actions within the next click).
+ */
+export const isActivePartner = [
+  isAuthenticated,
+  hasRole("PARTNER"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { prisma } = await import("../lib/prisma");
+      const partner = await prisma.partner.findUnique({
+        where: { userId: req.user!.id },
+        select: { status: true },
+      });
+      if (!partner) {
+        return next(
+          new AppError(
+            "Partner profile not found",
+            HttpStatus.NOT_FOUND,
+            "PARTNER_NOT_FOUND",
+          ),
+        );
+      }
+      if (partner.status === "SUSPENDED") {
+        return next(
+          new AppError(
+            "Your account has been suspended by the admin.",
+            HttpStatus.FORBIDDEN,
+            "PARTNER_SUSPENDED",
+          ),
+        );
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  },
+];
+
 // Combined middleware for vendors
 export const isVendor = [isAuthenticated, hasRole("VENDOR")];
 

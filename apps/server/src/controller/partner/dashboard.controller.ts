@@ -43,7 +43,12 @@ export const getProfileStatus = asyncWrapper(
         profileReviewedAt: true,
         reviewComments: {
           where: { isResolved: false },
-          select: { fieldName: true, comment: true, createdAt: true },
+          select: {
+            fieldName: true,
+            comment: true,
+            type: true,
+            createdAt: true,
+          },
           orderBy: { createdAt: "desc" },
         },
       },

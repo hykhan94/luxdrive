@@ -161,9 +161,25 @@ enum PartnerStatus {
   INVITED // Invitation sent, waiting for partner to click the link
   ONBOARDING // Clicked link + set password; completing profile fields. Transitional state, ends on profile submit
   PENDING_REVIEW // Partner submitted profile, waiting for admin review
-  CHANGES_REQUESTED // Admin requested changes to profile
+  CHANGES_REQUESTED // Admin requested changes to profile OR partner has been granted an edit permission
   APPROVED // Profile approved, partner can use platform
   SUSPENDED // Partner suspended by admin
+}
+
+// Distinguishes the three flows that all use PartnerReviewComment:
+//   ADMIN_REJECTION — admin flagged a field/doc during profile review; partner
+//     must fix it before re-submission. UI shows amber "Admin requested changes",
+//     locks other fields, gates Submit on all being addressed.
+//   PARTNER_REQUEST — approved partner asked to edit a specific field; admin
+//     approved the request. UI shows sky-blue "Editable at your request",
+//     doesn't lock or gate anything.
+//   ADMIN_COMMENT — admin added a neutral note about a field without rejecting
+//     it. Informational only; doesn't lock or gate anything, but is still
+//     visible so the partner sees the note.
+enum PartnerReviewCommentType {
+  ADMIN_REJECTION
+  PARTNER_REQUEST
+  ADMIN_COMMENT
 }
 
 enum InvoiceStatus {
@@ -366,6 +382,22 @@ model Partner {
   // Admin review
   isProfileComplete Boolean @default(false)
 
+  // ============== SUSPENSION / DEACTIVATION ==============
+  // When admin flips `status` to SUSPENDED via the Suspend action, we
+  // capture WHO did it, WHEN, WHY, and (critically) the status the partner
+  // held before so Reactivate can restore it. Reason is required at the API
+  // layer (admin can't suspend without one) and shown verbatim to the
+  // partner on their locked dashboard.
+  //
+  // Note: this is separate from the existing `suspendedForDocs` boolean on
+  // Vendor (auto-suspension for expired documents). Partner doesn't have
+  // that mechanism today; this new set covers admin-initiated suspension
+  // and future auto-suspension flows both.
+  suspendedAt            DateTime?
+  suspendedBy            String? // admin User.id
+  suspensionReason       String? // shown to partner verbatim
+  statusBeforeSuspension PartnerStatus? // restored on reactivate
+
   // Add relation for review comments
   reviewComments PartnerReviewComment[]
   documents      PartnerDocument[]      @relation("PartnerDocs")
@@ -395,12 +427,18 @@ model PartnerReviewComment {
   comment    String // Admin's comment
   isResolved Boolean @default(false)
 
+  // Discriminates admin-rejection vs partner-request. Default ADMIN_REJECTION
+  // means existing rows retain the pre-refactor behaviour without any data
+  // migration; all new writes explicitly set the value.
+  type PartnerReviewCommentType @default(ADMIN_REJECTION)
+
   createdBy  String // Admin user ID
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
 
   @@index([partnerId])
   @@index([isResolved])
+  @@index([type])
   @@map("partner_review_comments")
 }
 

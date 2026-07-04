@@ -63,6 +63,7 @@ export const getSidebarBadges = asyncWrapper(
           isApproved: false,
           partnerStatus: null,
           logoUrl: null,
+          hasActiveRejections: false,
           expiredRequiredDocs: [],
         },
       });
@@ -160,6 +161,19 @@ export const getSidebarBadges = asyncWrapper(
     const expiredRequiredDocs = await getExpiredRequiredDocs(partner.id);
     profileBadge += expiredRequiredDocs.length;
 
+    // Any unresolved ADMIN_REJECTION comment means the partner has a real
+    // pending correction. Used by the frontend to distinguish
+    // "Changes Requested" (has rejections) from "Editing your profile"
+    // (partner_request-only) in the top-right status pill.
+    const hasActiveRejections =
+      (await prisma.partnerReviewComment.count({
+        where: {
+          partnerId: partner.id,
+          isResolved: false,
+          type: "ADMIN_REJECTION",
+        },
+      })) > 0;
+
     const logoReadUrl = await getReadUrl(partner.logoUrl);
 
     res.json({
@@ -172,6 +186,7 @@ export const getSidebarBadges = asyncWrapper(
         isApproved,
         logoUrl: logoReadUrl || null,
         partnerStatus: partner.status,
+        hasActiveRejections,
         // Required profile documents whose expiryDate has passed. Empty array
         // when everything is in good standing. Used by frontend to drive the
         // doc-lock banner UX (red pill in header, locked book-ride form,

@@ -122,7 +122,10 @@ export const approveChangeRequest = asyncWrapper(
         data: fields.map((field) => ({
           partnerId: request.partnerId,
           fieldName: field,
-          comment: `Change requested by partner: ${fieldLabels[field] || field}. Reason: ${request.reason}`,
+          // The `type` column now carries the "this is a partner request"
+          // meaning; the comment text is the partner's reason alone.
+          comment: `${fieldLabels[field] || field}: ${request.reason}`,
+          type: "PARTNER_REQUEST" as const,
           createdBy: req.user!.id,
         })),
       });

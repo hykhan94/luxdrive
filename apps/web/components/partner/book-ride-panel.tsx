@@ -18,6 +18,8 @@ import { partnerApi } from "@/lib/api";
 import { useNotification } from "@/lib/notification-context";
 import { useLoadScript, Autocomplete } from "@react-google-maps/api";
 import { PhoneInput, EmailInput } from "@/components/ui/form-fields";
+import { DatePicker } from "@/components/ui/date-picker";
+import { TimePicker } from "@/components/ui/time-picker";
 import {
   Plus,
   Loader2,
@@ -49,6 +51,11 @@ interface RouteOption {
 interface VehicleOption {
   vehicleClass: string;
   label: string;
+  /** Marketed model example ("Ford Taurus / Lexus or Similar"), sourced
+   *  from the landing fleet-showcase so partners see the same class-to-car
+   *  mapping customers see. Optional — legacy or ELECTRIC routes may not
+   *  carry it yet, in which case we render just the class label. */
+  modelExample?: string;
   category: string;
   maxPassengers: number;
   price: number | null;
@@ -92,10 +99,10 @@ interface PriceBreakdownData {
 // ============== CONSTANTS ==============
 
 const CITIES = [
-  { id: "RIYADH", name: "Riyadh", province: "Riyadh" },
-  { id: "JEDDAH", name: "Jeddah", province: "Makkah" },
-  { id: "MAKKAH", name: "Makkah", province: "Makkah" },
-  { id: "MADINAH", name: "Madinah", province: "Madinah" },
+  { id: "RIYADH", name: "Riyadh", province: "Central Province" },
+  { id: "JEDDAH", name: "Jeddah", province: "Western Province" },
+  { id: "MAKKAH", name: "Makkah", province: "Western Province" },
+  { id: "MADINAH", name: "Madinah", province: "Western Province" },
 ];
 
 // Bias autocomplete to Saudi Arabia city centers
@@ -612,7 +619,7 @@ export default function BookRidePanel({
                 key={c.id}
                 type="button"
                 onClick={() => setCity(c.id)}
-                className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${city === c.id ? "bg-luxury-gold text-black" : "bg-neutral-800 text-gray-400 hover:text-white border border-neutral-700"}`}
+                className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${city === c.id ? "bg-luxury-gold text-black" : "bg-neutral-800 text-gray-400 hover:text-white"}`}
               >
                 <span>{c.name}</span>
                 <span className="text-xs ml-1 opacity-70">({c.province})</span>
@@ -980,27 +987,21 @@ export default function BookRidePanel({
           <div className="grid gap-4 grid-cols-3">
             <div>
               <label className="block text-sm text-gray-400 mb-2">Date *</label>
-              <input
-                type="date"
-                required
+              <DatePicker
                 value={formData.tripDate}
+                onChange={(v) => setFormData({ ...formData, tripDate: v })}
                 min={new Date().toISOString().split("T")[0]}
-                onChange={(e) =>
-                  setFormData({ ...formData, tripDate: e.target.value })
-                }
-                className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
+                required
+                placeholder="Select trip date"
               />
             </div>
             <div>
               <label className="block text-sm text-gray-400 mb-2">Time *</label>
-              <input
-                type="time"
-                required
+              <TimePicker
                 value={formData.tripTime}
-                onChange={(e) =>
-                  setFormData({ ...formData, tripTime: e.target.value })
-                }
-                className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
+                onChange={(v) => setFormData({ ...formData, tripTime: v })}
+                required
+                placeholder="Select trip time"
               />
             </div>
             <div>
@@ -1095,9 +1096,15 @@ export default function BookRidePanel({
                           value={v.vehicleClass}
                           disabled={!v.available}
                         >
-                          {v.label}{" "}
+                          {/* Class name followed by the marketed model
+                              example so "Business Sedan" reads as
+                              "Business Sedan — Mercedes E-Class / BMW 5
+                              Series or Similar", matching what customers
+                              see on the landing page fleet showcase. */}
+                          {v.label}
+                          {v.modelExample ? ` — ${v.modelExample}` : ""}{" "}
                           {v.price !== null
-                            ? `- SAR ${v.price.toLocaleString()}`
+                            ? `· SAR ${v.price.toLocaleString()}`
                             : ""}
                           {reason}
                         </option>

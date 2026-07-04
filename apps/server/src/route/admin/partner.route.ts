@@ -69,6 +69,5 @@ router.get("/:id/bookings", getPartnerBookings);
 
 // ============== PARTNER REVIEW COMMENTS ==============
 router.patch("/:id/review/comment/:commentId/resolve", resolveReviewComment);
-router.post("/:id/review/comment", addReviewComment);
 
 export default router;

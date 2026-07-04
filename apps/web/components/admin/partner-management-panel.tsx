@@ -29,9 +29,11 @@ import {
   ExternalLink,
   Edit2,
   RefreshCw,
+  Ban,
 } from "lucide-react";
 import { useNotification } from "@/lib/notification-context";
 import DocumentViewer from "@/components/ui/document-viewer";
+import { proxiedImageUrl } from "@/lib/image-url";
 
 interface Partner {
   id: string;
@@ -47,6 +49,11 @@ interface Partner {
   createdAt: string;
   invitationSentAt: string | null;
   profileSubmittedAt: string | null;
+  /** Signed read URL from backend (or null when the partner hasn't uploaded one). */
+  logoUrl?: string | null;
+  /** Populated only when status === "SUSPENDED"; drives the reason column in the Suspended tab. */
+  suspendedAt?: string | null;
+  suspensionReason?: string | null;
 }
 
 interface PartnerDocument {
@@ -86,6 +93,7 @@ interface PartnerDetail {
   };
   documents?: PartnerDocument[];
   missingDocCount?: number;
+  logoUrl?: string | null;
 }
 
 interface ReviewProfile {
@@ -108,13 +116,19 @@ interface ReviewProfile {
     Array<{
       id: string;
       comment: string;
+      type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
       isResolved: boolean;
+      /** Set when the backend marks the comment resolved. Populated in the
+       *  admin panel because backend now ships both live and current-round
+       *  resolved comments so admin sees the field scope for this cycle. */
+      resolvedAt?: string | null;
       createdAt: string;
     }>
   >;
   unresolvedCommentCount: number;
   submittedAt: string | null;
   previousProfile?: Record<string, string | null>;
+  logoUrl?: string | null;
 }
 
 interface Pagination {
@@ -153,6 +167,91 @@ function isPdf(url: string | null): boolean {
 interface PartnerManagementPanelProps {
   initialOpenPartnerId?: string | null;
   onInitialOpenConsumed?: () => void;
+}
+
+/**
+ * Is this comment an admin rejection? Prefer the backend enum (Step 3+);
+ * fall back to the legacy "❌ Rejected:" prefix for pre-refactor rows.
+ */
+function isRejectionComment(c: {
+  comment: string;
+  type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+}): boolean {
+  if (c.type) return c.type === "ADMIN_REJECTION";
+  return c.comment.startsWith("❌ Rejected:");
+}
+
+/**
+ * Strip the legacy prefix from a comment for display — new comments (Step 6+)
+ * don't have it, but old rows still do.
+ */
+function stripRejectionPrefix(comment: string): string {
+  return comment.replace(/^❌\s*Rejected:\s*/, "");
+}
+
+/**
+ * Small square tile that shows the partner's logo when uploaded and falls
+ * back to the existing Briefcase-in-a-blue-square placeholder otherwise. The
+ * fallback path matches the pre-logo styling that used to be everywhere so
+ * partners without a logo look identical to before.
+ *
+ * `size` is the outer square in px (Tailwind class needs to resolve — 40 / 48
+ * are the two used sites; 40 => w-10 h-10, 48 => w-12 h-12).
+ */
+function PartnerLogoTile({
+  logoUrl,
+  size = 40,
+}: {
+  logoUrl?: string | null;
+  size?: 40 | 48;
+}) {
+  const boxCls = size === 48 ? "w-12 h-12" : "w-10 h-10";
+  const iconCls = size === 48 ? "w-6 h-6" : "w-5 h-5";
+  if (logoUrl) {
+    // Signed URL comes straight from the backend GET; the proxy resizes to
+    // 2× the display size for sharp rendering on retina displays.
+    return (
+      <div
+        className={`${boxCls} rounded-lg overflow-hidden border border-neutral-700 bg-neutral-800 shrink-0`}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={proxiedImageUrl(logoUrl, size * 2) ?? logoUrl}
+          alt="Company logo"
+          className="w-full h-full object-cover"
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      className={`${boxCls} bg-blue-500/20 rounded-lg flex items-center justify-center shrink-0`}
+    >
+      <Briefcase className={`${iconCls} text-blue-400`} />
+    </div>
+  );
+}
+
+/**
+ * "Did the admin Accept this field this round?" Answered by looking for any
+ * resolved ADMIN_COMMENT-typed comment in the current review round. That
+ * comment is what admin per-field Accept creates on the backend (via
+ * addPartnerReviewComment with resolveOnCreate=true). Also matches on the
+ * generic pattern "resolved comment during this round" so acceptance of a
+ * previously-rejected field (via resolving the rejection comment) is treated
+ * as accepted too.
+ */
+function isAcceptedInRound(
+  comments: Array<{
+    type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+    isResolved: boolean;
+  }>,
+): boolean {
+  return comments.some(
+    (c) =>
+      c.isResolved &&
+      (c.type === "ADMIN_COMMENT" || c.type === "ADMIN_REJECTION"),
+  );
 }
 
 export default function PartnerManagementPanel({
@@ -235,6 +334,12 @@ export default function PartnerManagementPanel({
     null,
   );
   const [unsuspendReason, setUnsuspendReason] = useState("");
+
+  // Suspend modal state. Reason is REQUIRED (backend enforces >= 5 chars).
+  // The partner sees this verbatim on their locked dashboard, so admin
+  // must write something meaningful.
+  const [showSuspendModal, setShowSuspendModal] = useState<string | null>(null);
+  const [suspendReason, setSuspendReason] = useState("");
 
   const fetchSummary = useCallback(async () => {
     try {
@@ -340,10 +445,13 @@ export default function PartnerManagementPanel({
       for (const c of existingComments) {
         await adminApi.resolvePartnerReviewComment(partnerId, c.id);
       }
-      // Then add the rejection comment
+      // Then add the rejection comment. The `type` field discriminates
+      // this from a plain admin comment on the backend — no need for the
+      // legacy "❌ Rejected:" prefix in the stored text anymore.
       await adminApi.addPartnerReviewComment(partnerId, {
         fieldName,
-        comment: `❌ Rejected: ${rejectFieldComment.trim()}`,
+        comment: rejectFieldComment.trim(),
+        type: "ADMIN_REJECTION",
       });
       showNotification("info", "Field rejected — will be sent back to partner");
       setRejectingField(null);
@@ -351,6 +459,43 @@ export default function PartnerManagementPanel({
       handleOpenReviewProfile(partnerId);
     } catch (err: any) {
       showNotification("error", err.message || "Failed");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /**
+   * Persistent per-field / per-doc / per-MOU Accept. Two backend flavors:
+   *   - If there are unresolved comments on the field, resolve each one.
+   *     That already fires a notification if the comment was a rejection.
+   *   - Otherwise (CHANGED-but-uncommented field), create a resolved
+   *     ADMIN_COMMENT ("Accepted") with resolveOnCreate=true so the audit
+   *     trail records the acceptance without pinging the partner.
+   * Both paths refresh the review afterwards so `isAcceptedInRound` picks
+   * up the new state and the emerald ACCEPTED pill sticks across refreshes.
+   */
+  const handleAcceptField = async (
+    fieldName: string,
+    partnerId: string,
+    unresolvedComments: Array<{ id: string }>,
+  ) => {
+    setActionLoading("accept-" + fieldName);
+    try {
+      if (unresolvedComments.length > 0) {
+        for (const c of unresolvedComments) {
+          await adminApi.resolvePartnerReviewComment(partnerId, c.id);
+        }
+      } else {
+        await adminApi.addPartnerReviewComment(partnerId, {
+          fieldName,
+          comment: "Accepted",
+          type: "ADMIN_COMMENT",
+          resolveOnCreate: true,
+        });
+      }
+      handleOpenReviewProfile(partnerId);
+    } catch (err: any) {
+      showNotification("error", err.message || "Failed to accept");
     } finally {
       setActionLoading(null);
     }
@@ -483,12 +628,40 @@ export default function PartnerManagementPanel({
     }
   };
 
-  const handleSuspend = async (id: string) => {
+  const handleSuspend = async (id: string, reason: string) => {
+    const trimmed = reason.trim();
+    if (trimmed.length < 5) {
+      showNotification("error", "Please provide a reason (5+ characters)");
+      return;
+    }
     setActionLoading(id);
     try {
-      const res = await adminApi.suspendPartner(id, { reason: "Admin action" });
+      const res = await adminApi.suspendPartner(id, { reason: trimmed });
       if (res.success) {
         showNotification("info", "Partner suspended");
+        setShowSuspendModal(null);
+        setSuspendReason("");
+        setSelectedPartner(null);
+        fetchPartners(pagination.page, searchQuery, statusFilter);
+        fetchSummary();
+      }
+    } catch (err: any) {
+      showNotification("error", err.message || "Failed");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Plain admin-driven reactivate — used from the Suspended tab / drawer
+  // for partners suspended via `suspendPartner`. Distinct from the
+  // payment-driven `handleUnsuspend` below (which uses manualUnsuspend
+  // and captures unpaid-invoice audit context).
+  const handleReactivate = async (id: string) => {
+    setActionLoading(id);
+    try {
+      const res = await adminApi.reactivatePartner(id);
+      if (res.success) {
+        showNotification("success", res.message || "Partner reactivated");
         setSelectedPartner(null);
         fetchPartners(pagination.page, searchQuery, statusFilter);
         fetchSummary();
@@ -572,14 +745,19 @@ export default function PartnerManagementPanel({
     }
   };
 
-  // resolve all comments
+  // Bulk-accept only partner_request / admin_comment items. Admin rejections
+  // must NOT be bulk-resolved — the admin's next step for a rejection is to
+  // send the profile back to the partner via Request Changes, not silently
+  // resolve it. If any rejection is present, the calling UI should hide the
+  // Accept-All entry point entirely (defense-in-depth: this handler also
+  // filters them out).
   const handleResolveAllComments = async (partnerId: string) => {
     setActionLoading("resolve-all");
     try {
       const allComments: { id: string }[] = [];
       Object.values(reviewProfile!.comments).forEach((fieldComments) => {
         fieldComments
-          .filter((c) => !c.isResolved)
+          .filter((c) => !c.isResolved && !isRejectionComment(c))
           .forEach((c) => allComments.push(c));
       });
       for (const c of allComments) {
@@ -668,8 +846,22 @@ export default function PartnerManagementPanel({
 
   const getApprovalBlockReasons = (profile: ReviewProfile): string[] => {
     const reasons: string[] = [];
-    if (profile.unresolvedCommentCount > 0)
-      reasons.push(`${profile.unresolvedCommentCount} unresolved comment(s)`);
+    // Only ADMIN_REJECTION comments block approval — PARTNER_REQUEST comments
+    // are granted edit permissions, not corrections the admin owes. Once the
+    // partner re-submits after using their granted permission, the request has
+    // served its purpose; nothing for admin to "resolve." Filter them out of
+    // the block count. Legacy prefix fallback for pre-refactor rows.
+    const unresolvedRejections = Object.values(profile.comments)
+      .flat()
+      .filter(
+        (c) =>
+          !c.isResolved &&
+          (c.type
+            ? c.type === "ADMIN_REJECTION"
+            : c.comment.startsWith("❌ Rejected:")),
+      );
+    if (unresolvedRejections.length > 0)
+      reasons.push(`${unresolvedRejections.length} unresolved rejection(s)`);
     if (
       !profile.allDocumentsUploaded &&
       profile.missingDocuments &&
@@ -963,6 +1155,7 @@ export default function PartnerManagementPanel({
           {[
             { key: "all", label: "All" },
             { key: "APPROVED", label: "Active" },
+            { key: "ONBOARDING", label: "Onboarding" },
             { key: "PENDING_REVIEW", label: "Pending" },
             { key: "INVITED", label: "Invited" },
             { key: "SUSPENDED", label: "Suspended" },
@@ -1026,9 +1219,7 @@ export default function PartnerManagementPanel({
                     <tr key={p.id} className="hover:bg-neutral-800/30">
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center">
-                            <Briefcase className="w-5 h-5 text-blue-400" />
-                          </div>
+                          <PartnerLogoTile logoUrl={p.logoUrl} />
                           <div>
                             <p className="text-white font-medium">
                               {p.companyName}
@@ -1094,6 +1285,33 @@ export default function PartnerManagementPanel({
                               Review
                             </button>
                           )}
+                          {/* Row-level Suspend — surfaces on any non-INVITED,
+                              non-SUSPENDED row so admin can act from the list
+                              without opening the drawer. Opens the reason
+                              modal; actual API call happens there. */}
+                          {p.status !== "INVITED" &&
+                            p.status !== "SUSPENDED" && (
+                              <button
+                                onClick={() => {
+                                  setShowSuspendModal(p.id);
+                                  setSuspendReason("");
+                                }}
+                                className="px-2 py-1 bg-red-500/15 text-red-400 text-xs rounded hover:bg-red-500/25 border border-red-500/20"
+                                title="Suspend partner"
+                              >
+                                Suspend
+                              </button>
+                            )}
+                          {p.status === "SUSPENDED" && (
+                            <button
+                              onClick={() => handleReactivate(p.id)}
+                              disabled={actionLoading === p.id}
+                              className="px-2 py-1 bg-green-500/15 text-green-400 text-xs rounded hover:bg-green-500/25 border border-green-500/20 disabled:opacity-50"
+                              title="Reactivate partner"
+                            >
+                              {actionLoading === p.id ? "..." : "Reactivate"}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1110,9 +1328,7 @@ export default function PartnerManagementPanel({
                 >
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center">
-                        <Briefcase className="w-5 h-5 text-blue-400" />
-                      </div>
+                      <PartnerLogoTile logoUrl={p.logoUrl} />
                       <div>
                         <p className="text-white font-medium text-sm">
                           {p.companyName}
@@ -1199,9 +1415,10 @@ export default function PartnerManagementPanel({
                 <div className="p-4 sm:p-6">
                   <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-4 min-w-0">
-                      <div className="w-12 h-12 bg-blue-500/20 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <Briefcase className="w-6 h-6 text-blue-400" />
-                      </div>
+                      <PartnerLogoTile
+                        logoUrl={selectedPartner.logoUrl}
+                        size={48}
+                      />
                       <div className="min-w-0">
                         <h2 className="text-xl font-bold text-white truncate">
                           {selectedPartner.companyName}
@@ -1366,25 +1583,28 @@ export default function PartnerManagementPanel({
                   </div>
 
                   <div className="space-y-3">
-                    {selectedPartner.status === "APPROVED" && (
-                      <button
-                        onClick={() => handleSuspend(selectedPartner.id)}
-                        disabled={actionLoading === selectedPartner.id}
-                        className="w-full py-3 bg-red-500/20 text-red-400 font-medium rounded-lg hover:bg-red-500/30 border border-red-500/30 transition-colors disabled:opacity-50"
-                      >
-                        Suspend Partner
-                      </button>
-                    )}
+                    {selectedPartner.status !== "SUSPENDED" &&
+                      selectedPartner.status !== "INVITED" && (
+                        <button
+                          onClick={() => {
+                            setShowSuspendModal(selectedPartner.id);
+                            setSuspendReason("");
+                          }}
+                          disabled={actionLoading === selectedPartner.id}
+                          className="w-full py-3 bg-red-500/20 text-red-400 font-medium rounded-lg hover:bg-red-500/30 border border-red-500/30 transition-colors disabled:opacity-50"
+                        >
+                          Suspend Partner
+                        </button>
+                      )}
                     {selectedPartner.status === "SUSPENDED" && (
                       <button
-                        onClick={() => {
-                          setShowUnsuspendModal(selectedPartner.id);
-                          setUnsuspendReason("");
-                        }}
+                        onClick={() => handleReactivate(selectedPartner.id)}
                         disabled={actionLoading === selectedPartner.id}
                         className="w-full py-3 bg-green-500 text-white font-medium rounded-lg hover:bg-green-400 transition-colors disabled:opacity-50"
                       >
-                        Unsuspend Partner
+                        {actionLoading === selectedPartner.id
+                          ? "Reactivating..."
+                          : "Reactivate Partner"}
                       </button>
                     )}
                   </div>
@@ -1497,17 +1717,22 @@ export default function PartnerManagementPanel({
           />
           <div className="relative w-full max-w-2xl mx-4 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl max-h-[85vh] overflow-y-auto">
             <div className="p-5 border-b border-neutral-800 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
-              <div>
-                <h3 className="text-lg font-semibold text-white">
-                  {reviewProfile
-                    ? reviewProfile.companyName
-                    : "Profile Reviews"}
-                </h3>
-                <p className="text-sm text-gray-400">
-                  {reviewProfile
-                    ? "Review partner profile & documents"
-                    : `${pendingReviews.length} pending`}
-                </p>
+              <div className="flex items-center gap-3 min-w-0">
+                {reviewProfile && (
+                  <PartnerLogoTile logoUrl={reviewProfile.logoUrl} size={48} />
+                )}
+                <div className="min-w-0">
+                  <h3 className="text-lg font-semibold text-white truncate">
+                    {reviewProfile
+                      ? reviewProfile.companyName
+                      : "Profile Reviews"}
+                  </h3>
+                  <p className="text-sm text-gray-400">
+                    {reviewProfile
+                      ? "Review partner profile & documents"
+                      : `${pendingReviews.length} pending`}
+                  </p>
+                </div>
               </div>
               <button
                 onClick={() => {
@@ -1577,52 +1802,70 @@ export default function PartnerManagementPanel({
                     <div className="grid grid-cols-2 gap-2">
                       {Object.entries(reviewProfile.profile).map(
                         ([key, value]) => {
-                          const unresolvedComments =
-                            reviewProfile.comments[key]?.filter(
-                              (c) => !c.isResolved,
-                            ) || [];
-                          const hasComments = unresolvedComments.length > 0;
+                          // Backend ships comments for the current review
+                          // round only (live unresolved + any resolved during
+                          // this round). We want the full set here so CHANGED,
+                          // Accept/Reject, and REJECTED indicators still work
+                          // after the partner submits and the partner-side
+                          // resolves them for their editing UI.
+                          const roundComments =
+                            reviewProfile.comments[key] || [];
+                          // The "Resolve all" and per-comment Reject controls
+                          // still care about live comments — resolved ones
+                          // have nothing left to resolve.
+                          const unresolvedComments = roundComments.filter(
+                            (c) => !c.isResolved,
+                          );
+                          const hasComments = roundComments.length > 0;
                           const prev = reviewProfile.previousProfile?.[key];
+                          // Treat null/undefined/empty/whitespace as equivalent
+                          // so "Empty -> value" only fires for a real transition
+                          // the admin cares about. Also gate on the field having
+                          // at least one comment under review — a stale snapshot
+                          // from an earlier change-request cycle may differ from
+                          // fields the admin never asked to change.
+                          const norm = (v: string | null | undefined) =>
+                            (v ?? "").toString().trim();
                           const hasChanged =
                             reviewProfile.previousProfile !== undefined &&
-                            prev !== value;
-                          const isRejected = unresolvedComments.some((c) =>
-                            c.comment.startsWith("❌ Rejected:"),
-                          );
+                            hasComments &&
+                            norm(prev) !== norm(value);
+                          const isRejected =
+                            roundComments.some(isRejectionComment);
                           // "Addressed" requires the partner to have
                           // re-submitted the profile AFTER the most recent
                           // rejection on this field — without this check,
                           // the flag would fire immediately when admin
                           // clicks Reject (because hasChanged stays true
                           // from a pre-rejection edit in the same cycle).
-                          const mostRecentRejectionAt: number =
-                            unresolvedComments
-                              .filter((c) =>
-                                c.comment.startsWith("❌ Rejected:"),
-                              )
-                              .reduce((acc: number, c) => {
-                                const t = new Date(c.createdAt).getTime();
-                                return t > acc ? t : acc;
-                              }, 0);
+                          const mostRecentRejectionAt: number = roundComments
+                            .filter(isRejectionComment)
+                            .reduce((acc: number, c) => {
+                              const t = new Date(c.createdAt).getTime();
+                              return t > acc ? t : acc;
+                            }, 0);
                           const submittedAfterRejection =
                             !!reviewProfile.submittedAt &&
                             new Date(reviewProfile.submittedAt).getTime() >
                               mostRecentRejectionAt;
                           const isAddressed =
                             isRejected && hasChanged && submittedAfterRejection;
+                          const isAccepted = isAcceptedInRound(roundComments);
                           return (
                             <div
                               key={key}
                               className={`p-3 rounded-xl border transition-colors ${
                                 isAddressed
                                   ? "bg-emerald-500/5 border-emerald-500/20"
-                                  : hasChanged
-                                    ? "bg-blue-500/5 border-blue-500/20"
-                                    : hasComments
-                                      ? isRejected
-                                        ? "bg-red-500/5 border-red-500/20"
-                                        : "bg-amber-500/5 border-amber-500/20"
-                                      : "bg-neutral-800/50 border-neutral-800"
+                                  : isAccepted
+                                    ? "bg-emerald-500/5 border-emerald-500/20"
+                                    : hasChanged
+                                      ? "bg-blue-500/5 border-blue-500/20"
+                                      : hasComments
+                                        ? isRejected
+                                          ? "bg-red-500/5 border-red-500/20"
+                                          : "bg-amber-500/5 border-amber-500/20"
+                                        : "bg-neutral-800/50 border-neutral-800"
                               } ${key === "address" ? "col-span-2" : ""}`}
                             >
                               <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">
@@ -1632,7 +1875,12 @@ export default function PartnerManagementPanel({
                                     ADDRESSED
                                   </span>
                                 )}
-                                {hasChanged && !isAddressed && (
+                                {isAccepted && !isAddressed && (
+                                  <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
+                                    ACCEPTED
+                                  </span>
+                                )}
+                                {hasChanged && !isAddressed && !isAccepted && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
                                     CHANGED
                                   </span>
@@ -1667,21 +1915,24 @@ export default function PartnerManagementPanel({
                                   {(() => {
                                     return (
                                       <>
-                                        {unresolvedComments.map((c) => (
-                                          <p
-                                            key={c.id}
-                                            className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                          >
-                                            {c.comment.startsWith(
-                                              "❌ Rejected:",
-                                            ) ? (
-                                              <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                            ) : (
-                                              <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                            )}
-                                            {c.comment}
-                                          </p>
-                                        ))}
+                                        {roundComments.map((c) => {
+                                          const isRejected =
+                                            isRejectionComment(c);
+                                          const dim = c.isResolved;
+                                          return (
+                                            <p
+                                              key={c.id}
+                                              className={`text-[10px] flex items-start gap-1 mb-1 ${isRejected ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                            >
+                                              {isRejected ? (
+                                                <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                              ) : (
+                                                <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                              )}
+                                              {stripRejectionPrefix(c.comment)}
+                                            </p>
+                                          );
+                                        })}
                                         {isAddressed ? (
                                           <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                             <CheckCircle2 className="w-3 h-3" />
@@ -1698,8 +1949,11 @@ export default function PartnerManagementPanel({
                                             the field is rejected but not yet
                                             addressed; shown when isAddressed
                                             so admin can confirm or re-reject
-                                            the partner's new value. */}
+                                            the partner's new value. Also
+                                            hidden once the admin has clicked
+                                            per-field Accept in this session. */}
                                         {(!isRejected || isAddressed) &&
+                                          !isAccepted &&
                                           (rejectingField === key ? (
                                             <div className="mt-2 flex gap-1.5">
                                               <input
@@ -1762,15 +2016,13 @@ export default function PartnerManagementPanel({
                                           ) : (
                                             <div className="flex items-center gap-2 mt-2">
                                               <button
-                                                onClick={() => {
-                                                  unresolvedComments.forEach(
-                                                    (c) =>
-                                                      handleResolveComment(
-                                                        c.id,
-                                                        reviewProfile!.id,
-                                                      ),
-                                                  );
-                                                }}
+                                                onClick={() =>
+                                                  handleAcceptField(
+                                                    key,
+                                                    reviewProfile!.id,
+                                                    unresolvedComments,
+                                                  )
+                                                }
                                                 disabled={
                                                   actionLoading !== null
                                                 }
@@ -1801,6 +2053,7 @@ export default function PartnerManagementPanel({
                                   so the admin can flag this field directly
                                   without going through a generic dropdown. */}
                               {!hasComments &&
+                                !isAccepted &&
                                 (rejectingField === key ? (
                                   <div className="mt-2 flex gap-1.5">
                                     <input
@@ -1857,15 +2110,42 @@ export default function PartnerManagementPanel({
                                     </button>
                                   </div>
                                 ) : (
-                                  <button
-                                    onClick={() => {
-                                      setRejectingField(key);
-                                      setRejectFieldComment("");
-                                    }}
-                                    className="mt-2 px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
-                                  >
-                                    <XCircle className="w-2.5 h-2.5" /> Reject
-                                  </button>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    {/* Accept surfaces only when there IS
+                                        something to accept: the field visibly
+                                        CHANGED against the review snapshot.
+                                        Unchanged, uncommented fields don't
+                                        need an accept — admin can hit the
+                                        whole-profile Approve at the bottom.
+                                        Backend creates a resolved
+                                        ADMIN_COMMENT so the Accepted state
+                                        survives a page refresh. */}
+                                    {hasChanged && (
+                                      <button
+                                        onClick={() =>
+                                          handleAcceptField(
+                                            key,
+                                            reviewProfile!.id,
+                                            [],
+                                          )
+                                        }
+                                        disabled={actionLoading !== null}
+                                        className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
+                                      >
+                                        <CheckCircle2 className="w-3 h-3" />{" "}
+                                        Accept
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => {
+                                        setRejectingField(key);
+                                        setRejectFieldComment("");
+                                      }}
+                                      className="px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
+                                    >
+                                      <XCircle className="w-2.5 h-2.5" /> Reject
+                                    </button>
+                                  </div>
                                 ))}
                             </div>
                           );
@@ -1926,13 +2206,16 @@ export default function PartnerManagementPanel({
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         {reviewProfile.documents.map((doc) => {
+                          // Full current-round comments (both live and resolved
+                          // during this round). Includes post-submit view where
+                          // partner-side submit resolves everything.
                           const docComments =
-                            reviewProfile.comments[doc.type]?.filter(
-                              (c) => !c.isResolved,
-                            ) || [];
-                          const isRejected = docComments.some((c) =>
-                            c.comment.startsWith("❌ Rejected:"),
+                            reviewProfile.comments[doc.type] || [];
+                          const docUnresolved = docComments.filter(
+                            (c) => !c.isResolved,
                           );
+                          const isRejected =
+                            docComments.some(isRejectionComment);
                           // Mirrors vendor: when admin rejected the doc and
                           // the partner has since re-uploaded a new file
                           // (detected via the backend's
@@ -1943,13 +2226,14 @@ export default function PartnerManagementPanel({
                           // Reject.
                           const isAddressed =
                             isRejected && !!doc.replacedSinceLastReview;
+                          const isAccepted = isAcceptedInRound(docComments);
                           return (
                             <div
                               key={doc.type}
                               className={`p-3 rounded-xl border transition-all ${
                                 !doc.uploaded
                                   ? "bg-red-500/5 border-red-500/15"
-                                  : isAddressed
+                                  : isAddressed || isAccepted
                                     ? "bg-emerald-500/5 border-emerald-500/20"
                                     : docComments.length > 0
                                       ? "bg-amber-500/5 border-amber-500/20"
@@ -1987,6 +2271,12 @@ export default function PartnerManagementPanel({
                                           Replaced
                                         </span>
                                       )}
+                                      {isAccepted && (
+                                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                          <CheckCircle2 className="w-2 h-2" />
+                                          Accepted
+                                        </span>
+                                      )}
                                     </p>
                                     <p className="text-[10px] text-gray-500 truncate">
                                       {doc.uploaded
@@ -2009,21 +2299,23 @@ export default function PartnerManagementPanel({
                                   {(() => {
                                     return (
                                       <>
-                                        {docComments.map((c) => (
-                                          <p
-                                            key={c.id}
-                                            className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                          >
-                                            {c.comment.startsWith(
-                                              "❌ Rejected:",
-                                            ) ? (
-                                              <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                            ) : (
-                                              <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                            )}
-                                            {c.comment}
-                                          </p>
-                                        ))}
+                                        {docComments.map((c) => {
+                                          const isRej = isRejectionComment(c);
+                                          const dim = c.isResolved;
+                                          return (
+                                            <p
+                                              key={c.id}
+                                              className={`text-[10px] flex items-start gap-1 mb-1 ${isRej ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                            >
+                                              {isRej ? (
+                                                <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                              ) : (
+                                                <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                              )}
+                                              {stripRejectionPrefix(c.comment)}
+                                            </p>
+                                          );
+                                        })}
                                         {isAddressed ? (
                                           <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                             <CheckCircle2 className="w-3 h-3" />
@@ -2039,8 +2331,11 @@ export default function PartnerManagementPanel({
                                         {/* Accept/Reject controls hidden
                                             during rejected-without-replacement
                                             state; shown when isAddressed so
-                                            admin can resolve or re-reject. */}
+                                            admin can resolve or re-reject.
+                                            Also hidden once the admin has
+                                            per-item Accepted this doc. */}
                                         {(!isRejected || isAddressed) &&
+                                          !isAccepted &&
                                           (rejectingField === doc.type ? (
                                             <div className="mt-2 flex gap-1.5">
                                               <input
@@ -2103,14 +2398,13 @@ export default function PartnerManagementPanel({
                                           ) : (
                                             <div className="flex items-center gap-2 mt-2">
                                               <button
-                                                onClick={() => {
-                                                  docComments.forEach((c) =>
-                                                    handleResolveComment(
-                                                      c.id,
-                                                      reviewProfile!.id,
-                                                    ),
-                                                  );
-                                                }}
+                                                onClick={() =>
+                                                  handleAcceptField(
+                                                    doc.type,
+                                                    reviewProfile!.id,
+                                                    docUnresolved,
+                                                  )
+                                                }
                                                 disabled={
                                                   actionLoading !== null
                                                 }
@@ -2221,24 +2515,23 @@ export default function PartnerManagementPanel({
                         MOU Document
                       </h4>
                       {(() => {
-                        const mouComments =
-                          reviewProfile.comments["mou"]?.filter(
-                            (c) => !c.isResolved,
-                          ) || [];
-                        const isRejected = mouComments.some((c) =>
-                          c.comment.startsWith("❌ Rejected:"),
+                        const mouComments = reviewProfile.comments["mou"] || [];
+                        const mouUnresolved = mouComments.filter(
+                          (c) => !c.isResolved,
                         );
+                        const isRejected = mouComments.some(isRejectionComment);
                         // Backend flag set when partner re-uploaded MOU
                         // after admin's most recent unresolved rejection
                         // on "mou".
                         const isAddressed =
                           isRejected &&
                           !!reviewProfile.mou?.replacedSinceLastReview;
+                        const isAccepted = isAcceptedInRound(mouComments);
                         return (
                           <>
                             <div
                               className={`p-3 rounded-xl border flex items-center justify-between ${
-                                isAddressed
+                                isAddressed || isAccepted
                                   ? "bg-emerald-500/5 border-emerald-500/20"
                                   : mouComments.length > 0
                                     ? "bg-amber-500/5 border-amber-500/20"
@@ -2271,6 +2564,12 @@ export default function PartnerManagementPanel({
                                         Replaced
                                       </span>
                                     )}
+                                    {isAccepted && (
+                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                        <CheckCircle2 className="w-2 h-2" />
+                                        Accepted
+                                      </span>
+                                    )}
                                   </p>
                                   {reviewProfile.mou!.expiryDate && (
                                     <p className="text-xs text-gray-500">
@@ -2297,19 +2596,23 @@ export default function PartnerManagementPanel({
                             </div>
                             {mouComments.length > 0 && (
                               <div className="mt-2 pl-1">
-                                {mouComments.map((c) => (
-                                  <p
-                                    key={c.id}
-                                    className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                  >
-                                    {c.comment.startsWith("❌ Rejected:") ? (
-                                      <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                    ) : (
-                                      <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                    )}
-                                    {c.comment}
-                                  </p>
-                                ))}
+                                {mouComments.map((c) => {
+                                  const isRej = isRejectionComment(c);
+                                  const dim = c.isResolved;
+                                  return (
+                                    <p
+                                      key={c.id}
+                                      className={`text-[10px] flex items-start gap-1 mb-1 ${isRej ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                    >
+                                      {isRej ? (
+                                        <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                      ) : (
+                                        <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                      )}
+                                      {stripRejectionPrefix(c.comment)}
+                                    </p>
+                                  );
+                                })}
                                 {isAddressed ? (
                                   <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                     <CheckCircle2 className="w-3 h-3" />
@@ -2326,6 +2629,7 @@ export default function PartnerManagementPanel({
                                     without-replacement; shown when
                                     addressed so admin can decide. */}
                                 {(!isRejected || isAddressed) &&
+                                  !isAccepted &&
                                   (rejectingField === "mou" ? (
                                     <div className="mt-2 flex gap-1.5">
                                       <input
@@ -2384,14 +2688,13 @@ export default function PartnerManagementPanel({
                                   ) : (
                                     <div className="flex items-center gap-2 mt-2">
                                       <button
-                                        onClick={() => {
-                                          mouComments.forEach((c) =>
-                                            handleResolveComment(
-                                              c.id,
-                                              reviewProfile!.id,
-                                            ),
-                                          );
-                                        }}
+                                        onClick={() =>
+                                          handleAcceptField(
+                                            "mou",
+                                            reviewProfile!.id,
+                                            mouUnresolved,
+                                          )
+                                        }
                                         disabled={actionLoading !== null}
                                         className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
                                       >
@@ -2491,20 +2794,25 @@ export default function PartnerManagementPanel({
                   {(() => {
                     const blockReasons = getApprovalBlockReasons(reviewProfile);
                     const canApprove = blockReasons.length === 0;
-                    const hasUnresolved =
-                      reviewProfile.unresolvedCommentCount > 0;
+                    // Only surface the Accept-All panel when there's something
+                    // safe to bulk-accept: unresolved comments that are NOT
+                    // admin rejections. Rejections must go back to the partner
+                    // via Request Changes; bulk-accepting them would silently
+                    // "un-reject" the field without notifying the partner.
+                    const bulkAcceptable = Object.values(reviewProfile.comments)
+                      .flat()
+                      .filter((c) => !c.isResolved && !isRejectionComment(c));
+                    const bulkAcceptableCount = bulkAcceptable.length;
+                    const hasBulkAcceptable = bulkAcceptableCount > 0;
                     return (
                       <div className="space-y-3 pt-2">
-                        {hasUnresolved && (
+                        {hasBulkAcceptable && (
                           <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl">
                             <div className="flex items-center justify-between gap-3">
                               <div className="flex-1">
                                 <p className="text-sm text-white font-medium">
-                                  {reviewProfile.unresolvedCommentCount}{" "}
-                                  unresolved comment
-                                  {reviewProfile.unresolvedCommentCount > 1
-                                    ? "s"
-                                    : ""}
+                                  {bulkAcceptableCount} unresolved comment
+                                  {bulkAcceptableCount > 1 ? "s" : ""}
                                 </p>
                                 <p className="text-xs text-gray-400 mt-0.5">
                                   Accept individual changes above, or resolve
@@ -2528,7 +2836,7 @@ export default function PartnerManagementPanel({
                             </div>
                           </div>
                         )}
-                        {!canApprove && !hasUnresolved && (
+                        {!canApprove && !hasBulkAcceptable && (
                           <div className="p-3 bg-red-500/5 border border-red-500/15 rounded-xl">
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">
                               Approval blocked
@@ -2766,6 +3074,107 @@ export default function PartnerManagementPanel({
                   <CheckCircle2 className="w-4 h-4" />
                 )}
                 Unsuspend
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============== SUSPEND MODAL ==============
+          Reason is REQUIRED — backend enforces >= 5 chars. The partner
+          reads this verbatim on their locked dashboard, so admin can't
+          shrug in a stub value. Includes a warning about downstream
+          effects (login remains active but every API call is gated;
+          accepted bookings continue to completion). */}
+      {showSuspendModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => {
+              if (actionLoading !== showSuspendModal) {
+                setShowSuspendModal(null);
+                setSuspendReason("");
+              }
+            }}
+          />
+          <div className="relative w-full max-w-md mx-4 bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl">
+            <div className="p-5 border-b border-neutral-800 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-white">
+                  Suspend Partner
+                </h3>
+                <p className="text-sm text-gray-400 mt-0.5">
+                  {selectedPartner?.companyName ||
+                    partners.find((p) => p.id === showSuspendModal)
+                      ?.companyName}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowSuspendModal(null);
+                  setSuspendReason("");
+                }}
+                disabled={actionLoading === showSuspendModal}
+                className="p-1 text-gray-400 hover:text-white disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                <div className="text-xs text-red-300 space-y-1">
+                  <p>
+                    The partner will lose access to the portal (except the
+                    account-suspended screen). They will see the reason below
+                    verbatim.
+                  </p>
+                  <p>Bookings already accepted will continue to completion.</p>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  Reason <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={suspendReason}
+                  onChange={(e) => setSuspendReason(e.target.value)}
+                  rows={4}
+                  placeholder="e.g. Repeated failure to fulfill accepted bookings. Please contact admin to discuss."
+                  disabled={actionLoading === showSuspendModal}
+                  className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white text-sm focus:outline-none focus:border-red-500/50 resize-none disabled:opacity-50"
+                />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Minimum 5 characters. Shown to the partner on their locked
+                  dashboard.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 p-5 border-t border-neutral-800">
+              <button
+                onClick={() => {
+                  setShowSuspendModal(null);
+                  setSuspendReason("");
+                }}
+                disabled={actionLoading === showSuspendModal}
+                className="flex-1 px-4 py-2.5 bg-neutral-800 text-white rounded-lg hover:bg-neutral-700 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleSuspend(showSuspendModal, suspendReason)}
+                disabled={
+                  actionLoading === showSuspendModal ||
+                  suspendReason.trim().length < 5
+                }
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-500 text-white font-medium rounded-lg hover:bg-red-400 disabled:opacity-50 transition-colors"
+              >
+                {actionLoading === showSuspendModal ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Ban className="w-4 h-4" />
+                )}
+                Suspend
               </button>
             </div>
           </div>

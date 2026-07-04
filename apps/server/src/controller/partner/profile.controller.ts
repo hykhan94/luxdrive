@@ -109,7 +109,7 @@ export const getCompanyProfile = asyncWrapper(
         fileUrl: uploaded?.fileUrl || null,
         fileName: uploaded?.fileName || null,
         expiryDate: uploaded?.expiryDate || null,
-        uploadedAt: uploaded?.createdAt || null,
+        uploadedAt: uploaded?.updatedAt || null,
         // Tells the frontend whether to render an expiry-date input for this
         // doc when uploading. The 3 docs in DOCS_WITH_EXPIRY require it; the
         // others store it if provided but don't force it.
@@ -131,6 +131,10 @@ export const getCompanyProfile = asyncWrapper(
       commentsByField[c.fieldName].push({
         id: c.id,
         comment: c.comment,
+        // Type discriminates admin rejection vs partner-request vs plain
+        // admin note. Frontend uses this instead of prefix-parsing the
+        // comment text.
+        type: c.type,
         isResolved: c.isResolved,
         createdAt: c.createdAt,
       });
@@ -285,21 +289,6 @@ export const updateCompanyInfo = asyncWrapper(
       data: updateData,
     });
 
-    // If admin had comments on updated fields, resolve them
-    // const updatedFields = Object.keys(updateData);
-    // if (partner.reviewComments.length > 0) {
-    //   const fieldsToResolve = partner.reviewComments
-    //     .filter((c) => updatedFields.includes(c.fieldName) && !c.isResolved)
-    //     .map((c) => c.id);
-
-    //   if (fieldsToResolve.length > 0) {
-    //     await prisma.partnerReviewComment.updateMany({
-    //       where: { id: { in: fieldsToResolve } },
-    //       data: { isResolved: true, resolvedAt: new Date() },
-    //     });
-    //   }
-    // }
-
     res.json({
       success: true,
       message: "Company info updated",
@@ -326,36 +315,38 @@ export const updateBankDetails = asyncWrapper(
 
     const { bankName, bankAccountNumber, bankIban } = req.body;
 
-    if (!bankName?.trim() || !bankIban?.trim()) {
-      throw new BadRequestError("Bank name and IBAN are required");
+    // Partial update - mirror updateCompanyInfo. Field-level autosave
+    // sends only the field that changed, so we must NOT require the full
+    // set, and must NOT overwrite fields that weren't included.
+    const updateData: any = {};
+
+    if (bankName !== undefined) updateData.bankName = bankName?.trim() || null;
+    if (bankAccountNumber !== undefined)
+      updateData.bankAccountNumber = bankAccountNumber?.trim() || null;
+    // IBAN is normalized to uppercase regardless of how it's typed.
+    if (bankIban !== undefined)
+      updateData.bankIban = bankIban?.trim().toUpperCase() || null;
+
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestError("No fields to update");
     }
 
     const updated = await prisma.partner.update({
       where: { id: partner.id },
-      data: {
-        bankName: bankName.trim(),
-        bankAccountNumber: bankAccountNumber?.trim() || null,
-        bankIban: bankIban.trim().toUpperCase(),
-      } as any,
+      data: updateData,
     });
-
-    // Resolve bank-related admin comments if any
-    // const bankComments = partner.reviewComments.filter(
-    //   (c) =>
-    //     ["bankName", "bankAccountNumber", "bankIban", "ibanLetter"].includes(
-    //       c.fieldName,
-    //     ) && !c.isResolved,
-    // );
-    // if (bankComments.length > 0) {
-    //   await prisma.partnerReviewComment.updateMany({
-    //     where: { id: { in: bankComments.map((c) => c.id) } },
-    //     data: { isResolved: true, resolvedAt: new Date() },
-    //   });
-    // }
 
     res.json({
       success: true,
       message: "Bank details updated",
+      // Return the persisted values so the client can reconcile local
+      // state with what was actually stored (notably the uppercased
+      // IBAN) without a full profile refetch.
+      data: {
+        bankName: (updated as any).bankName ?? null,
+        bankAccountNumber: (updated as any).bankAccountNumber ?? null,
+        bankIban: (updated as any).bankIban ?? null,
+      },
     });
   },
 );
@@ -414,25 +405,29 @@ export const uploadDocument = asyncWrapper(
       },
     });
 
-    // Resolve admin comment for this document type if any
-    // const docComment = partner.reviewComments.find(
-    //   (c) => c.fieldName === type && !c.isResolved,
-    // );
-    // if (docComment) {
-    //   await prisma.partnerReviewComment.update({
-    //     where: { id: docComment.id },
-    //     data: { isResolved: true, resolvedAt: new Date() },
-    //   });
-    // }
+    const signedUrl = await getReadUrl(document.fileUrl);
+    const label =
+      REQUIRED_DOCUMENTS.find((d) => d.type === document.type)?.label ||
+      document.type;
 
     res.json({
       success: true,
-      message: `${REQUIRED_DOCUMENTS.find((d) => d.type === type)?.label || type} uploaded successfully`,
+      message: `${label} uploaded successfully`,
+      // Return the full document item, shaped exactly like
+      // getCompanyProfile's documents.items entries, so the client can
+      // splice it into local state without a refetch.
       data: {
-        id: document.id,
-        type: document.type,
-        fileUrl: document.fileUrl,
-        fileName: document.fileName,
+        document: {
+          type: document.type,
+          label,
+          isUploaded: true,
+          fileUrl: signedUrl,
+          filePath: document.fileUrl,
+          fileName: document.fileName,
+          expiryDate: document.expiryDate,
+          uploadedAt: document.updatedAt,
+          requiresExpiry: DOCS_WITH_EXPIRY.includes(document.type),
+        },
       },
     });
   },
@@ -453,7 +448,7 @@ export const uploadMou = asyncWrapper(async (req: Request, res: Response) => {
   if (!fileUrl) throw new BadRequestError("fileUrl is required");
   if (!expiryDate) throw new BadRequestError("MOU expiry date is required");
 
-  await prisma.partner.update({
+  const updated = await prisma.partner.update({
     where: { id: partner.id },
     data: {
       mouFileUrl: fileUrl,
@@ -462,20 +457,21 @@ export const uploadMou = asyncWrapper(async (req: Request, res: Response) => {
     },
   });
 
-  // Resolve MOU-related admin comment
-  // const mouComment = partner.reviewComments.find(
-  //   (c) => c.fieldName === "mou" && !c.isResolved,
-  // );
-  // if (mouComment) {
-  //   await prisma.partnerReviewComment.update({
-  //     where: { id: mouComment.id },
-  //     data: { isResolved: true, resolvedAt: new Date() },
-  //   });
-  // }
+  const signedUrl = await getReadUrl(updated.mouFileUrl);
 
   res.json({
     success: true,
     message: "MOU uploaded successfully",
+    // Return the persisted MOU state (with a signed read URL) so the
+    // client can update the MOU card without a refetch.
+    data: {
+      mou: {
+        fileUrl: signedUrl,
+        filePath: updated.mouFileUrl,
+        expiryDate: updated.mouExpiryDate,
+        uploadedAt: updated.mouUploadedAt,
+      },
+    },
   });
 });
 
@@ -506,14 +502,21 @@ export const uploadLogo = asyncWrapper(async (req: Request, res: Response) => {
   const { logoUrl } = req.body;
   if (!logoUrl) throw new BadRequestError("logoUrl is required");
 
-  await prisma.partner.update({
+  const updated = await prisma.partner.update({
     where: { id: partner.id },
     data: { logoUrl },
   });
 
+  const signedUrl = await getReadUrl(updated.logoUrl);
+
   res.json({
     success: true,
     message: "Logo updated",
+    // Signed URL so the client can render the new logo immediately,
+    // without a refetch.
+    data: {
+      logoUrl: signedUrl,
+    },
   });
 });
 
@@ -577,6 +580,22 @@ export const submitProfileForReview = asyncWrapper(
         isProfileComplete: true,
         profileSubmittedAt: new Date(),
       },
+    });
+
+    // Resolve only PARTNER_REQUEST comments — those are granted-edit
+    // permissions that expire when the partner submits. ADMIN_REJECTION
+    // rows are the admin's outstanding complaints and MUST stay live so
+    // admin can accept/reject them on the re-review. The partner-side UI
+    // hides them via a status gate (only renders during CHANGES_REQUESTED),
+    // so the "clean slate for partner after submit" behavior is preserved
+    // without destroying the admin's audit trail.
+    await prisma.partnerReviewComment.updateMany({
+      where: {
+        partnerId: partner.id,
+        isResolved: false,
+        type: "PARTNER_REQUEST",
+      },
+      data: { isResolved: true, resolvedAt: new Date() },
     });
 
     // Notify admin
