@@ -44,11 +44,6 @@
 //   LUXDRIVE_SUPPORT_PHONE   — Support/contact phone shown/linked in footers.
 //                              Defaults to "+966545559510" (WhatsApp support line).
 
-console.log(
-  "[email-debug] EMAIL_ASSETS_BASE_URL:",
-  JSON.stringify(process.env.EMAIL_ASSETS_BASE_URL),
-);
-
 import { Resend } from "resend";
 
 const apiKey = process.env.RESEND_API_KEY;
@@ -475,7 +470,7 @@ export async function sendInvitationEmail(opts: {
 
   return sendEmail({
     to,
-    subject: `You&rsquo;re invited to join LuxDrive as a ${role}`,
+    subject: `You're invited to join LuxDrive as a ${role}`,
     html: renderExternalShell({
       preheader: `Join LuxDrive as a ${role} — invitation expires in ${expiresInDays} days`,
       eyebrow: "Invitation",
