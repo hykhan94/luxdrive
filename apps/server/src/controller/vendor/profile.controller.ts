@@ -64,13 +64,16 @@ const VENDOR_EDITABLE_FIELDS: Record<string, string> = {
   companyName: "Company Name",
   crNumber: "CR Number",
   vatNumber: "VAT Number",
+  chamberOfCommerceNumber: "Chamber of Commerce Number",
+  baladyNumber: "Balady Number",
+  nationalAddress: "National Address",
   contactPerson: "Contact Person",
   contactPhone: "Contact Phone",
   contactEmail: "Contact Email",
   address: "Address",
   logo: "Company Logo",
   bankName: "Bank Name",
-  bankAccountName: "Account Name",
+  bankAccountNumber: "Account Number",
   bankIban: "IBAN",
   CR: "Commercial Registration",
   VAT: "VAT Certificate",
@@ -335,6 +338,10 @@ export const getVendorProfile = asyncWrapper(
           logoUrl,
           crNumber: vendor.crNumber || null,
           vatNumber: vendor.vatNumber || null,
+          chamberOfCommerceNumber:
+            (vendor as any).chamberOfCommerceNumber || null,
+          baladyNumber: (vendor as any).baladyNumber || null,
+          nationalAddress: (vendor as any).nationalAddress || null,
           contactPerson: vendor.contactPerson || null,
           contactPhone: vendor.contactPhone || null,
           // Prefer the dedicated company contact email; fall back to
@@ -359,7 +366,7 @@ export const getVendorProfile = asyncWrapper(
         // Bank Details
         bankDetails: {
           bankName: vendor.bankName || null,
-          bankAccountName: vendor.bankAccountName || null,
+          bankAccountNumber: (vendor as any).bankAccountNumber || null,
           bankIban: vendor.bankIban || null,
         },
 
@@ -403,6 +410,9 @@ export const updateCompanyInfo = asyncWrapper(
       companyName,
       crNumber,
       vatNumber,
+      chamberOfCommerceNumber,
+      baladyNumber,
+      nationalAddress,
       contactPerson,
       contactPhone,
       contactEmail,
@@ -426,6 +436,15 @@ export const updateCompanyInfo = asyncWrapper(
       updateData.crNumber = crNumber.trim();
     if (vatNumber !== undefined && isFieldAllowed("vatNumber"))
       updateData.vatNumber = vatNumber.trim();
+    if (
+      chamberOfCommerceNumber !== undefined &&
+      isFieldAllowed("chamberOfCommerceNumber")
+    )
+      updateData.chamberOfCommerceNumber = chamberOfCommerceNumber.trim();
+    if (baladyNumber !== undefined && isFieldAllowed("baladyNumber"))
+      updateData.baladyNumber = baladyNumber.trim();
+    if (nationalAddress !== undefined && isFieldAllowed("nationalAddress"))
+      updateData.nationalAddress = nationalAddress.trim();
     if (contactPerson !== undefined && isFieldAllowed("contactPerson"))
       updateData.contactPerson = contactPerson.trim();
     if (contactPhone !== undefined && isFieldAllowed("contactPhone"))
@@ -444,7 +463,7 @@ export const updateCompanyInfo = asyncWrapper(
       );
     }
 
-    await prisma.vendor.update({
+    const updated = await prisma.vendor.update({
       where: { id: vendor.id },
       data: updateData,
     });
@@ -452,6 +471,11 @@ export const updateCompanyInfo = asyncWrapper(
     res.json({
       success: true,
       message: "Company info updated",
+      data: {
+        id: updated.id,
+        companyName: updated.companyName,
+        status: updated.status,
+      },
     });
   },
 );
@@ -464,13 +488,10 @@ export const updateBankDetails = asyncWrapper(
 
     assertEditable(vendor.status, "Bank details");
 
-    const { bankName, bankAccountName, bankIban } = req.body;
+    const { bankName, bankAccountNumber, bankIban } = req.body;
 
-    if (!bankName?.trim() || !bankIban?.trim()) {
-      throw new BadRequestError("Bank name and IBAN are required");
-    }
-
-    // Field-level gating
+    // Field-level gating (like updateCompanyInfo). Bank is gated per-field
+    // since each field is autosaved individually from the client.
     const allowedFields = await getAllowedFieldsForVendor(
       vendor.id,
       vendor.status,
@@ -478,32 +499,44 @@ export const updateBankDetails = asyncWrapper(
     const isFieldAllowed = (key: string) =>
       allowedFields === null || allowedFields.includes(key);
 
-    // Bank fields are gated as a group — if ANY bank field was approved, allow
-    // the whole update (changing only one bank field while leaving others stale
-    // would be confusing).
-    const bankAllowed =
-      isFieldAllowed("bankName") ||
-      isFieldAllowed("bankAccountName") ||
-      isFieldAllowed("bankIban");
-    if (!bankAllowed) {
+    // Partial update — mirror updateCompanyInfo. Field-level autosave
+    // sends only the field that changed, so we must NOT require the full
+    // set, and must NOT overwrite fields that weren't included.
+    const updateData: any = {};
+
+    if (bankName !== undefined && isFieldAllowed("bankName"))
+      updateData.bankName = bankName?.trim() || null;
+    if (bankAccountNumber !== undefined && isFieldAllowed("bankAccountNumber"))
+      updateData.bankAccountNumber = bankAccountNumber?.trim() || null;
+    // IBAN is normalized to uppercase regardless of how it's typed.
+    if (bankIban !== undefined && isFieldAllowed("bankIban"))
+      updateData.bankIban = bankIban?.trim().toUpperCase() || null;
+
+    if (Object.keys(updateData).length === 0) {
       throw new BadRequestError(
-        "Bank details are not in your current allowed edit list. " +
-          (allowedFields ? `Editable: ${allowedFields.join(", ")}` : ""),
+        "No editable bank fields in this request. " +
+          (allowedFields
+            ? `You can only edit: ${allowedFields.join(", ")}`
+            : ""),
       );
     }
 
-    await prisma.vendor.update({
+    const updated = await prisma.vendor.update({
       where: { id: vendor.id },
-      data: {
-        bankName: bankName.trim(),
-        bankAccountName: bankAccountName?.trim() || null,
-        bankIban: bankIban.trim().toUpperCase(),
-      },
+      data: updateData,
     });
 
     res.json({
       success: true,
       message: "Bank details updated",
+      // Return the persisted values so the client can reconcile local
+      // state with what was actually stored (notably the uppercased
+      // IBAN) without a full profile refetch.
+      data: {
+        bankName: (updated as any).bankName ?? null,
+        bankAccountNumber: (updated as any).bankAccountNumber ?? null,
+        bankIban: (updated as any).bankIban ?? null,
+      },
     });
   },
 );
@@ -571,14 +604,29 @@ export const uploadDocument = asyncWrapper(
       },
     });
 
+    const signedUrl = await getReadUrl(document.fileUrl);
+    const label =
+      REQUIRED_DOCUMENTS.find((d) => d.type === document.type)?.label ||
+      document.type;
+
     res.json({
       success: true,
-      message: `${REQUIRED_DOCUMENTS.find((d) => d.type === type)?.label || type} uploaded successfully`,
+      message: `${label} uploaded successfully`,
+      // Return the full document item, shaped exactly like
+      // getVendorProfile's documents.items entries, so the client can
+      // splice it into local state without a refetch.
       data: {
-        id: document.id,
-        type: document.type,
-        fileUrl: document.fileUrl,
-        fileName: document.fileName,
+        document: {
+          type: document.type,
+          label,
+          isUploaded: true,
+          fileUrl: signedUrl,
+          filePath: document.fileUrl,
+          fileName: document.fileName,
+          expiryDate: document.expiryDate,
+          uploadedAt: document.updatedAt,
+          requiresExpiry: DOCS_WITH_EXPIRY.includes(document.type),
+        },
       },
     });
   },
@@ -612,7 +660,7 @@ export const uploadMou = asyncWrapper(async (req: Request, res: Response) => {
     );
   }
 
-  await prisma.vendor.update({
+  const updated = await prisma.vendor.update({
     where: { id: vendor.id },
     data: {
       mouFileUrl: fileUrl,
@@ -621,9 +669,23 @@ export const uploadMou = asyncWrapper(async (req: Request, res: Response) => {
     },
   });
 
+  const signedUrl = updated.mouFileUrl
+    ? await getReadUrl(updated.mouFileUrl)
+    : null;
+
   res.json({
     success: true,
     message: "MOU uploaded successfully",
+    // Return the persisted MOU state (with a signed read URL) so the
+    // client can update the MOU card without a refetch.
+    data: {
+      mou: {
+        fileUrl: signedUrl,
+        filePath: updated.mouFileUrl,
+        expiryDate: updated.mouExpiryDate,
+        uploadedAt: updated.mouUploadedAt,
+      },
+    },
   });
 });
 
@@ -684,6 +746,11 @@ export const submitProfileForReview = asyncWrapper(
     if (!vendor.companyName) missingFields.push("Company Name");
     if (!vendor.crNumber) missingFields.push("CR Number");
     if (!vendor.vatNumber) missingFields.push("VAT Number");
+    if (!(vendor as any).chamberOfCommerceNumber)
+      missingFields.push("Chamber of Commerce Number");
+    if (!(vendor as any).baladyNumber) missingFields.push("Balady Number");
+    if (!(vendor as any).nationalAddress)
+      missingFields.push("National Address");
     if (!vendor.contactPerson) missingFields.push("Contact Person");
     if (!vendor.contactPhone) missingFields.push("Contact Phone");
     if (!vendor.bankName || !vendor.bankIban)
@@ -734,6 +801,20 @@ export const submitProfileForReview = asyncWrapper(
         resolvedAt: new Date(),
       },
     });
+
+    // IMPORTANT: We do NOT resolve the "Change requested by vendor:"
+    // VendorReviewComment rows here. Those live on the admin side as
+    // review flags — admin needs to see them and decide per-field whether
+    // the vendor's new value is Accepted or Rejected. If we resolved
+    // them here, the admin panel would treat them as already-accepted
+    // (see isAccepted heuristic in vendor-management-panel.tsx: any
+    // resolved non-rejection comment counts as accepted).
+    //
+    // Vendor's own UI already hides these comments when status !==
+    // CHANGES_REQUESTED (see profile.tsx `providerAdminComments` gate),
+    // so leaving them unresolved has no impact on the vendor view.
+    // They stay live until admin acts on them; admin's per-field Accept
+    // is what resolves them.
 
     // Notify admin
     const adminUsers = await prisma.user.findMany({

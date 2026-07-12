@@ -16,12 +16,15 @@ const VENDOR_FIELD_LABELS: Record<string, string> = {
   companyName: "Company Name",
   crNumber: "CR Number",
   vatNumber: "VAT Number",
+  chamberOfCommerceNumber: "Chamber of Commerce Number",
+  baladyNumber: "Balady Number",
+  nationalAddress: "National Address",
   contactPerson: "Contact Person",
   contactPhone: "Contact Phone",
   address: "Address",
   logo: "Company Logo",
   bankName: "Bank Name",
-  bankAccountName: "Account Name",
+  bankAccountNumber: "Account Number",
   bankIban: "IBAN",
   CR: "Commercial Registration",
   VAT: "VAT Certificate",
@@ -113,15 +116,43 @@ export const approveVendorProfileChangeRequest = asyncWrapper(
       companyName: request.vendor.companyName,
       crNumber: request.vendor.crNumber,
       vatNumber: request.vendor.vatNumber,
+      chamberOfCommerceNumber: (request.vendor as any).chamberOfCommerceNumber,
+      baladyNumber: (request.vendor as any).baladyNumber,
+      nationalAddress: (request.vendor as any).nationalAddress,
       contactPerson: request.vendor.contactPerson,
       contactPhone: request.vendor.contactPhone,
       address: request.vendor.address,
       bankName: request.vendor.bankName,
-      bankAccountName: request.vendor.bankAccountName,
+      bankAccountNumber: (request.vendor as any).bankAccountNumber,
       bankIban: request.vendor.bankIban,
       mouFileUrl: request.vendor.mouFileUrl,
       mouExpiryDate: request.vendor.mouExpiryDate,
       logoUrl: (request.vendor as any).logoUrl,
+    };
+
+    const fieldLabels: Record<string, string> = {
+      companyName: "Company Name",
+      crNumber: "CR Number",
+      vatNumber: "VAT Number",
+      chamberOfCommerceNumber: "Chamber of Commerce Number",
+      baladyNumber: "Balady Number",
+      nationalAddress: "National Address",
+      contactPerson: "Contact Person",
+      contactPhone: "Contact Phone",
+      contactEmail: "Contact Email",
+      address: "Address",
+      logo: "Company Logo",
+      bankName: "Bank Name",
+      bankAccountNumber: "Account Number",
+      bankIban: "IBAN",
+      CR: "Commercial Registration",
+      VAT: "VAT Certificate",
+      CHAMBER_OF_COMMERCE: "Chamber of Commerce Doc",
+      BALADY: "Balady License",
+      NATIONAL_ADDRESS: "National Address Doc",
+      IBAN_LETTER: "IBAN Letter",
+      mou: "MOU Document",
+      mouExpiry: "MOU Expiry Date",
     };
 
     await prisma.$transaction([
@@ -146,6 +177,22 @@ export const approveVendorProfileChangeRequest = asyncWrapper(
           status: "CHANGES_REQUESTED",
           profileSnapshot: snapshot as any,
         },
+      }),
+      // Create a per-field VendorReviewComment for each granted field so the
+      // admin review UI flags them ("changes requested" state) — mirrors
+      // partner-change-request-controller.ts. VendorReviewComment lacks a
+      // `type` column (unlike PartnerReviewComment), so we use the
+      // "Change requested by vendor:" prefix as the discriminator. The
+      // vendor's submit flow resolves these on prefix match.
+      prisma.vendorReviewComment.createMany({
+        data: fields.map((field) => ({
+          vendorId: request.vendorId,
+          fieldName: field,
+          comment: `Change requested by vendor: ${fieldLabels[field] || field}${
+            request.message ? ` — ${request.message}` : ""
+          }`,
+          createdBy: req.user!.id,
+        })),
       }),
     ]);
 

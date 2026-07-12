@@ -648,7 +648,7 @@ export const downloadReceiptPdf = asyncWrapper(
         contactPhone: true,
         address: true,
         bankName: true,
-        bankAccountName: true,
+        bankAccountNumber: true,
         bankIban: true,
       },
     });

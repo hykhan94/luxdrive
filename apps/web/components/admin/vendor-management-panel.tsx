@@ -184,12 +184,18 @@ const VENDOR_PROFILE_FIELD_LABELS: Record<
   companyName: { label: "Company Name", group: "Profile" },
   crNumber: { label: "CR Number", group: "Profile" },
   vatNumber: { label: "VAT Number", group: "Profile" },
+  chamberOfCommerceNumber: {
+    label: "Chamber of Commerce Number",
+    group: "Profile",
+  },
+  baladyNumber: { label: "Balady Number", group: "Profile" },
+  nationalAddress: { label: "National Address", group: "Profile" },
   contactPerson: { label: "Contact Person", group: "Profile" },
   contactPhone: { label: "Contact Phone", group: "Profile" },
   address: { label: "Address", group: "Profile" },
   logo: { label: "Company Logo", group: "Profile" },
   bankName: { label: "Bank Name", group: "Bank" },
-  bankAccountName: { label: "Account Name", group: "Bank" },
+  bankAccountNumber: { label: "Account Number", group: "Bank" },
   bankIban: { label: "IBAN", group: "Bank" },
   CR: { label: "Commercial Registration", group: "Documents" },
   VAT: { label: "VAT Certificate", group: "Documents" },
@@ -1315,28 +1321,6 @@ export default function VendorManagementPanel({
     }
   };
 
-  const handleResolveAllVendorComments = async (vendorId: string) => {
-    if (!reviewProfile) return;
-    setActionLoading("resolve-all");
-    try {
-      const allComments: { id: string }[] = [];
-      Object.values(reviewProfile.comments).forEach((fieldComments: any) => {
-        (fieldComments as any[])
-          .filter((c) => !c.isResolved)
-          .forEach((c) => allComments.push(c));
-      });
-      for (const c of allComments) {
-        await adminApi.resolveVendorReviewComment(vendorId, c.id);
-      }
-      showNotification("success", `${allComments.length} comment(s) resolved`);
-      handleOpenReviewProfile(vendorId);
-    } catch (err: any) {
-      showNotification("error", err.message || "Failed to resolve comments");
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
   const handleRejectVendorField = async (
     fieldName: string,
     vendorId: string,
@@ -1363,6 +1347,40 @@ export default function VendorManagementPanel({
       handleOpenReviewProfile(vendorId);
     } catch (err: any) {
       showNotification("error", err.message || "Failed");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Per-field Accept. Two things happen atomically from the admin's POV:
+  //   1. Any outstanding unresolved comments on the field get resolved
+  //      (clears the amber "Change requested by vendor" markers).
+  //   2. A resolved-on-create "Accepted" audit-trail comment gets written
+  //      so the ACCEPTED chip survives a page refresh. Detection of this
+  //      state on render intentionally EXCLUDES vendor-request markers,
+  //      so we can't rely on those to signal accept — need the explicit
+  //      "Accepted" row.
+  // Both paths run in sequence: resolve first, then write audit trail.
+  const handleAcceptVendorField = async (
+    fieldName: string,
+    vendorId: string,
+    unresolvedComments: Array<{ id: string }>,
+  ) => {
+    setActionLoading("accept-" + fieldName);
+    try {
+      if (unresolvedComments.length > 0) {
+        for (const c of unresolvedComments) {
+          await adminApi.resolveVendorReviewComment(vendorId, c.id);
+        }
+      }
+      await adminApi.addVendorReviewComment(vendorId, {
+        fieldName,
+        comment: "Accepted",
+        resolveOnCreate: true,
+      });
+      handleOpenReviewProfile(vendorId);
+    } catch (err: any) {
+      showNotification("error", err.message || "Failed to accept");
     } finally {
       setActionLoading(null);
     }
@@ -5579,19 +5597,50 @@ export default function VendorManagementPanel({
                               mostRecentRejectionAt;
                           const isAddressed =
                             isRejected && hasChanged && submittedAfterRejection;
+                          // "Accepted" — admin has previously clicked Accept
+                          // on this field, which writes a resolved
+                          // audit-trail comment (see handleAcceptVendorField).
+                          // Detection rules (order matters):
+                          //   1. Skip if there's any unresolved comment — a
+                          //      fresh rejection or new note takes priority
+                          //      over an older accept.
+                          //   2. Look for a resolved comment that is neither
+                          //      a rejection nor a "Change requested by
+                          //      vendor:" marker. Those markers are the
+                          //      admin's approval-of-request writes, NOT
+                          //      accept actions on the vendor's edit — they
+                          //      linger in the DB and would otherwise be
+                          //      misclassified as accepts.
+                          const allComments =
+                            reviewProfile.comments?.[key] || [];
+                          const isAccepted =
+                            !hasComments &&
+                            allComments.some(
+                              (c: any) =>
+                                c.isResolved &&
+                                !c.comment?.startsWith?.("❌ Rejected:") &&
+                                !c.comment?.startsWith?.(
+                                  "Change requested by vendor:",
+                                ) &&
+                                !c.comment?.startsWith?.(
+                                  "Change requested by partner:",
+                                ),
+                            );
                           return (
                             <div
                               key={key}
                               className={`p-3 rounded-xl border transition-colors ${
                                 isAddressed
                                   ? "bg-emerald-500/5 border-emerald-500/20"
-                                  : hasChanged
-                                    ? "bg-blue-500/5 border-blue-500/20"
-                                    : hasComments
-                                      ? isRejected
-                                        ? "bg-red-500/5 border-red-500/20"
-                                        : "bg-amber-500/5 border-amber-500/20"
-                                      : "bg-neutral-800/50 border-neutral-800"
+                                  : isAccepted
+                                    ? "bg-emerald-500/5 border-emerald-500/20"
+                                    : hasChanged
+                                      ? "bg-blue-500/5 border-blue-500/20"
+                                      : hasComments
+                                        ? isRejected
+                                          ? "bg-red-500/5 border-red-500/20"
+                                          : "bg-amber-500/5 border-amber-500/20"
+                                        : "bg-neutral-800/50 border-neutral-800"
                               } ${key === "address" ? "col-span-2" : ""}`}
                             >
                               <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">
@@ -5601,7 +5650,12 @@ export default function VendorManagementPanel({
                                     ADDRESSED
                                   </span>
                                 )}
-                                {hasChanged && !isAddressed && (
+                                {isAccepted && !isAddressed && (
+                                  <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
+                                    ACCEPTED
+                                  </span>
+                                )}
+                                {hasChanged && !isAddressed && !isAccepted && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
                                     CHANGED
                                   </span>
@@ -5618,7 +5672,7 @@ export default function VendorManagementPanel({
                                     {prev || "Empty"}
                                   </p>
                                   <p
-                                    className={`text-sm font-medium ${isAddressed ? "text-emerald-400" : "text-green-400"}`}
+                                    className={`text-sm font-medium ${isAddressed || isAccepted ? "text-emerald-400" : "text-green-400"}`}
                                   >
                                     {value || "Empty"}
                                   </p>
@@ -5724,15 +5778,13 @@ export default function VendorManagementPanel({
                                     ) : (
                                       <div className="flex items-center gap-2 mt-2">
                                         <button
-                                          onClick={() => {
-                                            unresolvedComments.forEach(
-                                              (c: any) =>
-                                                handleResolveVendorComment(
-                                                  c.id,
-                                                  reviewProfile.id,
-                                                ),
-                                            );
-                                          }}
+                                          onClick={() =>
+                                            handleAcceptVendorField(
+                                              key,
+                                              reviewProfile.id,
+                                              unresolvedComments,
+                                            )
+                                          }
                                           disabled={actionLoading !== null}
                                           className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
                                         >
@@ -5815,15 +5867,40 @@ export default function VendorManagementPanel({
                                     </button>
                                   </div>
                                 ) : (
-                                  <button
-                                    onClick={() => {
-                                      setRejectingField(key);
-                                      setRejectFieldComment("");
-                                    }}
-                                    className="mt-2 px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
-                                  >
-                                    <XCircle className="w-2.5 h-2.5" /> Reject
-                                  </button>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    {/* Accept surfaces only when there IS
+                                        something to accept: the field visibly
+                                        CHANGED against the review snapshot,
+                                        AND hasn't already been accepted this
+                                        round. Backend creates a resolved
+                                        comment so the Accepted state survives
+                                        a page refresh. */}
+                                    {hasChanged && !isAccepted && (
+                                      <button
+                                        onClick={() =>
+                                          handleAcceptVendorField(
+                                            key,
+                                            reviewProfile.id,
+                                            [],
+                                          )
+                                        }
+                                        disabled={actionLoading !== null}
+                                        className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
+                                      >
+                                        <CheckCircle2 className="w-3 h-3" />{" "}
+                                        Accept
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => {
+                                        setRejectingField(key);
+                                        setRejectFieldComment("");
+                                      }}
+                                      className="px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
+                                    >
+                                      <XCircle className="w-2.5 h-2.5" /> Reject
+                                    </button>
+                                  </div>
                                 ))}
                             </div>
                           );
@@ -5888,6 +5965,8 @@ export default function VendorManagementPanel({
                               reviewProfile.comments?.[doc.type]?.filter(
                                 (c: any) => !c.isResolved,
                               ) || [];
+                            const allDocComments =
+                              reviewProfile.comments?.[doc.type] || [];
                             const isRejected = docComments.some((c: any) =>
                               c.comment?.startsWith?.("❌ Rejected:"),
                             );
@@ -5904,13 +5983,35 @@ export default function VendorManagementPanel({
                             // this file: isAddressed = isRejected + change.
                             const isAddressed =
                               isRejected && !!doc.replacedSinceLastReview;
+                            // "Accepted" — admin has previously clicked Accept
+                            // on this doc, which resolves the vendor-request
+                            // marker or writes a resolved audit-trail comment.
+                            // Detection rules mirror the input-field pattern:
+                            //   1. Skip if there's any unresolved comment — a
+                            //      fresh rejection or new note takes priority.
+                            //   2. Look for a resolved comment that's neither
+                            //      a rejection nor a lingering vendor-request
+                            //      marker from an earlier cycle.
+                            const isAccepted =
+                              docComments.length === 0 &&
+                              allDocComments.some(
+                                (c: any) =>
+                                  c.isResolved &&
+                                  !c.comment?.startsWith?.("❌ Rejected:") &&
+                                  !c.comment?.startsWith?.(
+                                    "Change requested by vendor:",
+                                  ) &&
+                                  !c.comment?.startsWith?.(
+                                    "Change requested by partner:",
+                                  ),
+                              );
                             return (
                               <div
                                 key={doc.type}
                                 className={`p-3 rounded-xl border transition-all ${
                                   !doc.uploaded
                                     ? "bg-red-500/5 border-red-500/15"
-                                    : isAddressed
+                                    : isAddressed || isAccepted
                                       ? "bg-emerald-500/5 border-emerald-500/20"
                                       : docComments.length > 0
                                         ? "bg-amber-500/5 border-amber-500/20"
@@ -5948,6 +6049,12 @@ export default function VendorManagementPanel({
                                           <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                             <RefreshCw className="w-2 h-2" />
                                             Replaced
+                                          </span>
+                                        )}
+                                        {isAccepted && !isAddressed && (
+                                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                            <CheckCircle2 className="w-2 h-2" />
+                                            Accepted
                                           </span>
                                         )}
                                         {/* Expiry chip — shows urgency when
@@ -6079,14 +6186,13 @@ export default function VendorManagementPanel({
                                       ) : (
                                         <div className="flex items-center gap-2 mt-2">
                                           <button
-                                            onClick={() => {
-                                              docComments.forEach((c: any) =>
-                                                handleResolveVendorComment(
-                                                  c.id,
-                                                  reviewProfile.id,
-                                                ),
-                                              );
-                                            }}
+                                            onClick={() =>
+                                              handleAcceptVendorField(
+                                                doc.type,
+                                                reviewProfile.id,
+                                                docComments,
+                                              )
+                                            }
                                             disabled={actionLoading !== null}
                                             className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
                                           >
@@ -6347,14 +6453,13 @@ export default function VendorManagementPanel({
                                   ) : (
                                     <div className="flex items-center gap-2 mt-2">
                                       <button
-                                        onClick={() => {
-                                          mouComments.forEach((c: any) =>
-                                            handleResolveVendorComment(
-                                              c.id,
-                                              reviewProfile.id,
-                                            ),
-                                          );
-                                        }}
+                                        onClick={() =>
+                                          handleAcceptVendorField(
+                                            "mou",
+                                            reviewProfile.id,
+                                            mouComments,
+                                          )
+                                        }
                                         disabled={actionLoading !== null}
                                         className="px-2.5 py-1 bg-green-500/20 text-green-400 text-[10px] font-medium rounded-md hover:bg-green-500/30 border border-green-500/20 transition-colors disabled:opacity-50 flex items-center gap-1"
                                       >
@@ -6460,41 +6565,6 @@ export default function VendorManagementPanel({
                       (reviewProfile.unresolvedCommentCount || 0) > 0;
                     return (
                       <div className="space-y-3 pt-2">
-                        {hasUnresolved && (
-                          <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="flex-1">
-                                <p className="text-sm text-white font-medium">
-                                  {reviewProfile.unresolvedCommentCount}{" "}
-                                  unresolved comment
-                                  {reviewProfile.unresolvedCommentCount > 1
-                                    ? "s"
-                                    : ""}
-                                </p>
-                                <p className="text-xs text-gray-400 mt-0.5">
-                                  Accept individual changes above, or resolve
-                                  all at once
-                                </p>
-                              </div>
-                              <button
-                                onClick={() =>
-                                  handleResolveAllVendorComments(
-                                    reviewProfile.id,
-                                  )
-                                }
-                                disabled={actionLoading === "resolve-all"}
-                                className="px-4 py-2.5 bg-blue-500 text-white text-sm font-semibold rounded-lg hover:bg-blue-400 disabled:opacity-50 flex items-center gap-2 transition-colors whitespace-nowrap"
-                              >
-                                {actionLoading === "resolve-all" ? (
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <CheckCircle2 className="w-4 h-4" />
-                                )}
-                                Accept All
-                              </button>
-                            </div>
-                          </div>
-                        )}
                         {!canApprove && !hasUnresolved && (
                           <div className="p-3 bg-red-500/5 border border-red-500/15 rounded-xl">
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">

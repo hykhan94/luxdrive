@@ -442,7 +442,10 @@ export async function sendInvitationEmail(opts: {
     expiresInHours = 168, // 7 days
   } = opts;
 
-  const inviteUrl = `${FRONTEND_URL}/onboarding/${role}?token=${encodeURIComponent(inviteToken)}`;
+  // The Next.js invite acceptance page lives at /invite/[type]/[token]
+  // (dynamic path segments, NOT a query string). See
+  // web/app/invite/[type]/[token]/page.tsx.
+  const inviteUrl = `${FRONTEND_URL}/invite/${role}/${encodeURIComponent(inviteToken)}`;
   const safeCompany = escapeHtml(companyName);
   const expiresInDays = Math.round(expiresInHours / 24);
 

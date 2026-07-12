@@ -328,7 +328,17 @@ export const adminApi = {
     api.get(`${ADMIN_BASE}/vendors/${id}/review`),
   addVendorReviewComment: (
     id: string,
-    body: { fieldName: string; comment: string },
+    body: {
+      fieldName: string;
+      comment: string;
+      /**
+       * When true, the backend creates the comment already resolved and skips
+       * the vendor-facing notification. Used for admin per-field Accept on
+       * CHANGED fields with no existing comments — creates an audit-trail
+       * entry without spamming the vendor with per-field acknowledgements.
+       */
+      resolveOnCreate?: boolean;
+    },
   ) => api.post(`${ADMIN_BASE}/vendors/${id}/review/comment`, body),
   resolveVendorReviewComment: (id: string, commentId: string) =>
     api.patch(
@@ -922,9 +932,9 @@ export const vendorApi = {
   updateCompanyInfo: (body: any) =>
     api.patch(`${VENDOR_BASE}/profile/company-info`, body),
   updateBankDetails: (body: {
-    bankName: string;
-    bankAccountName?: string;
-    bankIban: string;
+    bankName?: string;
+    bankAccountNumber?: string;
+    bankIban?: string;
   }) => api.patch(`${VENDOR_BASE}/profile/bank-details`, body),
   uploadDocument: (body: {
     type: string;

@@ -504,18 +504,18 @@ model PartnerTeamMember {
 }
 
 model Vendor {
-  id              String       @id @default(cuid())
-  userId          String       @unique
-  companyName     String
-  crNumber        String?
-  vatNumber       String?
-  bankName        String?
-  bankAccountName String? // NEW: Account holder name
-  bankIban        String?
-  status          VendorStatus @default(PENDING_REVIEW)
-  rating          Decimal?     @db.Decimal(2, 1)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  id                String       @id @default(cuid())
+  userId            String       @unique
+  companyName       String
+  crNumber          String?
+  vatNumber         String?
+  bankName          String?
+  bankAccountNumber String? // Account number
+  bankIban          String?
+  status            VendorStatus @default(PENDING_REVIEW)
+  rating            Decimal?     @db.Decimal(2, 1)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   // NEW: Invitation system (mirrors Partner)
   invitationToken     String?   @unique
@@ -540,6 +540,14 @@ model Vendor {
   mouExpiryDate     DateTime?
   mouUploadedAt     DateTime?
   mouExpiryNotified Boolean   @default(false)
+
+  // Document reference numbers (mirroring Partner). Distinct from the
+  // documents relation — this is the number printed on / associated
+  // with each doc, kept as separate fields so admin can validate them
+  // against the actual uploaded PDFs.
+  chamberOfCommerceNumber String?
+  baladyNumber            String?
+  nationalAddress         String?
 
   profileSnapshot Json? // Stores pre-edit snapshot for admin comparison
   logoUrl         String? // Company logo
@@ -676,14 +684,14 @@ model VendorBankUpdateRequest {
   vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
   // Requested new values
-  requestedBankName        String?
-  requestedBankAccountName String?
-  requestedBankIban        String?
+  requestedBankName          String?
+  requestedBankAccountNumber String?
+  requestedBankIban          String?
 
   // Current values at time of request (for audit)
-  previousBankName        String?
-  previousBankAccountName String?
-  previousBankIban        String?
+  previousBankName          String?
+  previousBankAccountNumber String?
+  previousBankIban          String?
 
   status    BankUpdateRequestStatus @default(PENDING)
   reason    String? // Vendor's reason for change

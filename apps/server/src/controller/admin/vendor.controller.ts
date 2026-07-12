@@ -535,7 +535,7 @@ export const getVendorDetails = asyncWrapper(
       select: {
         id: true,
         requestedBankName: true,
-        requestedBankAccountName: true,
+        requestedBankAccountNumber: true,
         requestedBankIban: true,
         reason: true,
         createdAt: true,
@@ -697,7 +697,7 @@ export const getVendorDetails = asyncWrapper(
         },
         bankDetails: {
           bankName: vendor.bankName,
-          bankAccountName: vendor.bankAccountName,
+          bankAccountNumber: vendor.bankAccountNumber,
           bankIban: vendor.bankIban,
         },
         fleet: {
@@ -756,7 +756,7 @@ function isMouExpiringSoon(expiryDate: Date): {
 
 /**
  * Onboard a new vendor
- * Admin provides: companyName, email, bankName, bankAccountName, bankIban
+ * Admin provides: companyName, email, bankName, bankAccountNumber, bankIban
  * Creates placeholder user + vendor, sends invitation link
  */
 export const onboardVendor = asyncWrapper(
@@ -1148,9 +1148,13 @@ export const getVendorProfileForReview = asyncWrapper(
           companyName: vendor.companyName,
           crNumber: vendor.crNumber,
           vatNumber: vendor.vatNumber,
+          chamberOfCommerceNumber:
+            (vendor as any).chamberOfCommerceNumber ?? null,
+          baladyNumber: (vendor as any).baladyNumber ?? null,
+          nationalAddress: (vendor as any).nationalAddress ?? null,
           address: vendor.address,
           bankName: vendor.bankName,
-          bankAccountName: vendor.bankAccountName,
+          bankAccountNumber: vendor.bankAccountNumber,
           bankIban: vendor.bankIban,
         },
         mou: {
@@ -1192,7 +1196,7 @@ export const getVendorProfileForReview = asyncWrapper(
 export const addVendorReviewComment = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { fieldName, comment } = req.body;
+    const { fieldName, comment, resolveOnCreate } = req.body;
 
     if (!fieldName || !comment) {
       throw new BadRequestError("fieldName and comment are required");
@@ -1206,10 +1210,13 @@ export const addVendorReviewComment = asyncWrapper(
       "companyName",
       "crNumber",
       "vatNumber",
+      "chamberOfCommerceNumber",
+      "baladyNumber",
+      "nationalAddress",
       "address",
       // Bank fields
       "bankName",
-      "bankAccountName",
+      "bankAccountNumber",
       "bankIban",
       // MOU
       "mou",
@@ -1248,9 +1255,12 @@ export const addVendorReviewComment = asyncWrapper(
       companyName: "Company Name",
       crNumber: "CR Number",
       vatNumber: "VAT Number",
+      chamberOfCommerceNumber: "Chamber of Commerce Number",
+      baladyNumber: "Balady Number",
+      nationalAddress: "National Address",
       address: "Address",
       bankName: "Bank Name",
-      bankAccountName: "Bank Account Name",
+      bankAccountNumber: "Bank Account Number",
       bankIban: "IBAN",
       mou: "MOU",
       CR: "Commercial Registration",
@@ -1307,11 +1317,15 @@ export const addVendorReviewComment = asyncWrapper(
         companyName: vendor.companyName ?? null,
         crNumber: vendor.crNumber ?? null,
         vatNumber: vendor.vatNumber ?? null,
+        chamberOfCommerceNumber:
+          (vendor as any).chamberOfCommerceNumber ?? null,
+        baladyNumber: (vendor as any).baladyNumber ?? null,
+        nationalAddress: (vendor as any).nationalAddress ?? null,
         contactPerson: vendor.contactPerson ?? null,
         contactPhone: vendor.contactPhone ?? null,
         address: vendor.address ?? null,
         bankName: vendor.bankName ?? null,
-        bankAccountName: vendor.bankAccountName ?? null,
+        bankAccountNumber: vendor.bankAccountNumber ?? null,
         bankIban: vendor.bankIban ?? null,
         mou: vendor.mouFileUrl ?? null,
       };
@@ -1340,6 +1354,28 @@ export const addVendorReviewComment = asyncWrapper(
           data: { profileSnapshot: nextSnap as any },
         });
       }
+    }
+
+    // When resolveOnCreate is true (used by admin's per-field Accept for
+    // CHANGED-but-uncommented fields), create the comment already resolved
+    // AND skip the vendor-facing notification. This is an audit-trail
+    // marker for admin, not a signal to the vendor.
+    if (resolveOnCreate) {
+      const reviewComment = await prisma.vendorReviewComment.create({
+        data: {
+          vendorId: id,
+          fieldName,
+          comment,
+          createdBy: req.user!.id,
+          isResolved: true,
+          resolvedAt: new Date(),
+        },
+      });
+      return res.json({
+        success: true,
+        message: "Field accepted",
+        data: reviewComment,
+      });
     }
 
     // Write the comment + notification in a single transaction so we
@@ -1853,7 +1889,7 @@ export const requestVendorChanges = asyncWrapper(
         contactPhone: true,
         address: true,
         bankName: true,
-        bankAccountName: true,
+        bankAccountNumber: true,
         bankIban: true,
         mouFileUrl: true,
         vendorDocuments: {
@@ -1873,7 +1909,7 @@ export const requestVendorChanges = asyncWrapper(
       contactPhone: currentVendor?.contactPhone ?? null,
       address: currentVendor?.address ?? null,
       bankName: currentVendor?.bankName ?? null,
-      bankAccountName: currentVendor?.bankAccountName ?? null,
+      bankAccountNumber: currentVendor?.bankAccountNumber ?? null,
       bankIban: currentVendor?.bankIban ?? null,
       mou: currentVendor?.mouFileUrl ?? null,
     };
@@ -2056,7 +2092,7 @@ export const getBankUpdateRequests = asyncWrapper(
               id: true,
               companyName: true,
               bankName: true,
-              bankAccountName: true,
+              bankAccountNumber: true,
               bankIban: true,
               user: { select: { email: true, name: true } },
             },
@@ -2096,7 +2132,7 @@ export const getBankUpdateRequestDetail = asyncWrapper(
             id: true,
             companyName: true,
             bankName: true,
-            bankAccountName: true,
+            bankAccountNumber: true,
             bankIban: true,
             user: { select: { email: true, name: true } },
           },
@@ -2151,8 +2187,9 @@ export const approveBankUpdateRequest = asyncWrapper(
         where: { id: request.vendorId },
         data: {
           bankName: request.requestedBankName ?? request.vendor.bankName,
-          bankAccountName:
-            request.requestedBankAccountName ?? request.vendor.bankAccountName,
+          bankAccountNumber:
+            request.requestedBankAccountNumber ??
+            request.vendor.bankAccountNumber,
           bankIban: request.requestedBankIban ?? request.vendor.bankIban,
         },
       }),
@@ -2168,12 +2205,12 @@ export const approveBankUpdateRequest = asyncWrapper(
             initiatedBy: "VENDOR_REQUEST",
             previousValues: {
               bankName: request.previousBankName,
-              bankAccountName: request.previousBankAccountName,
+              bankAccountNumber: request.previousBankAccountNumber,
               bankIban: request.previousBankIban,
             },
             newValues: {
               bankName: request.requestedBankName,
-              bankAccountName: request.requestedBankAccountName,
+              bankAccountNumber: request.requestedBankAccountNumber,
               bankIban: request.requestedBankIban,
             },
           },
