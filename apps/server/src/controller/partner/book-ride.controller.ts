@@ -12,6 +12,7 @@ import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError, BadRequestError } from "../../utils/AppError";
 import crypto from "crypto";
 import { requireOperational, requireApprovedAndDocsValid } from "./_shared";
+import { sendBookingCreatedAdminEmail } from "../../lib/email";
 
 // ============== CONSTANTS ==============
 
@@ -1052,6 +1053,26 @@ export const createBooking = asyncWrapper(
           totalPrice,
         },
       },
+    });
+
+    // Fire-and-forget admin notification. A failed email must NEVER
+    // block the booking from being created — we log and swallow so the
+    // partner still gets their 201 even if Resend / DNS / whatever
+    // hiccups. See src/lib/email.ts renderAdminShell for the layout.
+    sendBookingCreatedAdminEmail({
+      bookingRef: booking.bookingRef,
+      guestName: booking.guestName,
+      guestPhone: booking.guestPhone,
+      partnerCompanyName: partner.companyName,
+      vehicleClass,
+      passengers: booking.passengers,
+      pickupAddress: booking.pickupAddress,
+      dropoffAddress: booking.dropoffAddress,
+      tripDate: booking.tripDate,
+      tripTime: booking.tripTime,
+      totalPrice: Number(booking.totalPrice),
+    }).catch((err) => {
+      console.error("[email] sendBookingCreatedAdminEmail failed:", err);
     });
 
     res.status(201).json({

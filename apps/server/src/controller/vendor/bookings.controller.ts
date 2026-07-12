@@ -13,6 +13,10 @@ import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError, BadRequestError } from "../../utils/AppError";
 import { requireOperational, requireApprovedAndDocsValid } from "./_shared";
 import { buildPOHtml } from "../../utils/helpers/po.helpers";
+import {
+  sendBookingAcceptedAdminEmail,
+  sendBookingRejectedAdminEmail,
+} from "../../lib/email";
 
 // ============== GCS (for signed photo URLs) ==============
 // Driver photoUrl in the DB is the raw GCS path (e.g. "drivers/abc/photo.jpg").
@@ -994,6 +998,36 @@ export const acceptBooking = asyncWrapper(
       },
     });
 
+    // Fire-and-forget admin notification. Fetching partner company name
+    // is done here (not upstream) so the accept path pays this cost only
+    // if the email actually needs to be sent, and any failure of the
+    // fetch or the send is swallowed — the vendor still gets their 200.
+    (async () => {
+      try {
+        const partner = booking.partnerId
+          ? await prisma.partner.findUnique({
+              where: { id: booking.partnerId },
+              select: { companyName: true },
+            })
+          : null;
+        await sendBookingAcceptedAdminEmail({
+          bookingRef: booking.bookingRef,
+          vendorCompanyName: vendor.companyName,
+          driverName: `${driver.firstName} ${driver.lastName}`,
+          driverPhone: driver.phone,
+          vehicleLabel: `${vehicle.make} ${vehicle.model} · ${vehicle.plateNumber}`,
+          vehicleClass: booking.vehicleClass,
+          partnerCompanyName: partner?.companyName ?? null,
+          pickupAddress: booking.pickupAddress,
+          dropoffAddress: booking.dropoffAddress,
+          tripDate: booking.tripDate,
+          tripTime: booking.tripTime,
+        });
+      } catch (err) {
+        console.error("[email] sendBookingAcceptedAdminEmail failed:", err);
+      }
+    })();
+
     res.json({
       success: true,
       message: "Booking accepted successfully",
@@ -1232,6 +1266,34 @@ export const rejectBooking = asyncWrapper(
         },
       },
     });
+
+    // Fire-and-forget admin notification. Same as accept: partner name
+    // lookup + send wrapped so any failure is logged and swallowed. The
+    // rejection is high-priority for ops (booking needs reassignment),
+    // and the subject line signals that plus the reason enum verbatim.
+    (async () => {
+      try {
+        const partner = booking.partnerId
+          ? await prisma.partner.findUnique({
+              where: { id: booking.partnerId },
+              select: { companyName: true },
+            })
+          : null;
+        await sendBookingRejectedAdminEmail({
+          bookingRef: booking.bookingRef,
+          vendorCompanyName: vendor.companyName,
+          partnerCompanyName: partner?.companyName ?? null,
+          vehicleClass: booking.vehicleClass,
+          pickupAddress: booking.pickupAddress,
+          dropoffAddress: booking.dropoffAddress,
+          tripDate: booking.tripDate,
+          tripTime: booking.tripTime,
+          rejectionReason: mappedReason,
+        });
+      } catch (err) {
+        console.error("[email] sendBookingRejectedAdminEmail failed:", err);
+      }
+    })();
 
     res.json({
       success: true,
