@@ -182,6 +182,21 @@ enum PartnerReviewCommentType {
   ADMIN_COMMENT
 }
 
+// Discriminates the origin of a VendorReviewComment. Mirrors the partner
+// side exactly — vendor was originally implemented with prefix-string
+// discrimination, which turned out fragile. Semantics:
+//   ADMIN_REJECTION — admin flagged the field/doc as needing changes
+//   VENDOR_REQUEST  — created on approval of a vendor-initiated change
+//                     request; marks the field as "vendor is editing this
+//                     at their own request"
+//   ADMIN_COMMENT   — used for admin accept audit trail (resolveOnCreate)
+//                     and any other admin note that isn't a rejection
+enum VendorReviewCommentType {
+  ADMIN_REJECTION
+  VENDOR_REQUEST
+  ADMIN_COMMENT
+}
+
 enum InvoiceStatus {
   PENDING
   PAID
@@ -650,12 +665,19 @@ model VendorReviewComment {
   comment    String
   isResolved Boolean @default(false)
 
+  // Discriminates admin-rejection vs vendor-request vs plain admin comment.
+  // Default ADMIN_REJECTION so existing rows retain pre-refactor semantics
+  // without any data migration; all new writes explicitly set the value.
+  // Mirrors PartnerReviewComment.type.
+  type VendorReviewCommentType @default(ADMIN_REJECTION)
+
   createdBy  String // Admin user ID
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
 
   @@index([vendorId])
   @@index([isResolved])
+  @@index([type])
   @@map("vendor_review_comments")
 }
 

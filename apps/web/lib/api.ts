@@ -332,6 +332,12 @@ export const adminApi = {
       fieldName: string;
       comment: string;
       /**
+       * Explicit comment type. Mirrors partner. Backend accepts this and
+       * writes it verbatim; when omitted, the backend falls back to prefix
+       * detection ('❌ Rejected:' → ADMIN_REJECTION) for legacy callers.
+       */
+      type?: "ADMIN_REJECTION" | "VENDOR_REQUEST" | "ADMIN_COMMENT";
+      /**
        * When true, the backend creates the comment already resolved and skips
        * the vendor-facing notification. Used for admin per-field Accept on
        * CHANGED fields with no existing comments — creates an audit-trail

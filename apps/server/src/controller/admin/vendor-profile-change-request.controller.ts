@@ -180,17 +180,18 @@ export const approveVendorProfileChangeRequest = asyncWrapper(
       }),
       // Create a per-field VendorReviewComment for each granted field so the
       // admin review UI flags them ("changes requested" state) — mirrors
-      // partner-change-request-controller.ts. VendorReviewComment lacks a
-      // `type` column (unlike PartnerReviewComment), so we use the
-      // "Change requested by vendor:" prefix as the discriminator. The
-      // vendor's submit flow resolves these on prefix match.
+      // partner-change-request-controller.ts. Now that VendorReviewComment
+      // has a `type` column, we use the explicit VENDOR_REQUEST enum. The
+      // prefix used to be the discriminator; frontend transitioned to the
+      // type field, so the comment text is now just the label + reason.
       prisma.vendorReviewComment.createMany({
         data: fields.map((field) => ({
           vendorId: request.vendorId,
           fieldName: field,
-          comment: `Change requested by vendor: ${fieldLabels[field] || field}${
-            request.message ? ` — ${request.message}` : ""
+          comment: `${fieldLabels[field] || field}${
+            request.message ? `: ${request.message}` : ""
           }`,
+          type: "VENDOR_REQUEST" as const,
           createdBy: req.user!.id,
         })),
       }),

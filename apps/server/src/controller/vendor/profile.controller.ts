@@ -166,6 +166,10 @@ export const getVendorProfile = asyncWrapper(
       Array<{
         id: string;
         comment: string;
+        // Type discriminates admin rejection vs vendor-request vs plain
+        // admin note. Frontend uses this instead of prefix-parsing the
+        // comment text.
+        type: string;
         isResolved: boolean;
         createdAt: Date;
       }>
@@ -175,6 +179,7 @@ export const getVendorProfile = asyncWrapper(
       commentsByField[c.fieldName].push({
         id: c.id,
         comment: c.comment,
+        type: (c as any).type,
         isResolved: c.isResolved,
         createdAt: c.createdAt,
       });
@@ -802,19 +807,19 @@ export const submitProfileForReview = asyncWrapper(
       },
     });
 
-    // IMPORTANT: We do NOT resolve the "Change requested by vendor:"
-    // VendorReviewComment rows here. Those live on the admin side as
-    // review flags — admin needs to see them and decide per-field whether
-    // the vendor's new value is Accepted or Rejected. If we resolved
-    // them here, the admin panel would treat them as already-accepted
-    // (see isAccepted heuristic in vendor-management-panel.tsx: any
-    // resolved non-rejection comment counts as accepted).
-    //
-    // Vendor's own UI already hides these comments when status !==
-    // CHANGES_REQUESTED (see profile.tsx `providerAdminComments` gate),
-    // so leaving them unresolved has no impact on the vendor view.
-    // They stay live until admin acts on them; admin's per-field Accept
-    // is what resolves them.
+    // Resolve only VENDOR_REQUEST comments — those are granted-edit
+    // permissions that expire when the vendor submits. ADMIN_REJECTION
+    // rows are the admin's outstanding complaints and MUST stay live so
+    // admin can accept/reject them on the re-review. Mirrors partner's
+    // submitProfileForReview exactly.
+    await prisma.vendorReviewComment.updateMany({
+      where: {
+        vendorId: vendor.id,
+        isResolved: false,
+        type: "VENDOR_REQUEST",
+      },
+      data: { isResolved: true, resolvedAt: new Date() },
+    });
 
     // Notify admin
     const adminUsers = await prisma.user.findMany({

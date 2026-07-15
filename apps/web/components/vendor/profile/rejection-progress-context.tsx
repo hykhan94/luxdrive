@@ -31,11 +31,17 @@ export interface AdminComment {
   id: string;
   comment: string;
   /**
-   * Comment type from the backend enum PartnerReviewCommentType. Optional
-   * because legacy responses (before Step 3 of the schema refactor) may not
-   * include it — in that case we fall back to prefix parsing.
+   * Comment type from the backend enum column. Optional because legacy
+   * responses (before the type column was added) may not include it — in
+   * that case we fall back to prefix parsing. Vendor rows carry
+   * VENDOR_REQUEST; partner rows carry PARTNER_REQUEST. Both are treated
+   * as vendor/partner-request markers by the context.
    */
-  type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+  type?:
+    | "ADMIN_REJECTION"
+    | "PARTNER_REQUEST"
+    | "VENDOR_REQUEST"
+    | "ADMIN_COMMENT";
   createdAt: string;
   isResolved?: boolean;
 }
@@ -187,10 +193,14 @@ export function RejectionProgressProvider({
       const latest = adminComments[key]?.[0]; // GET returns newest-first
       const comment = latest?.comment ?? "";
       const flaggedAt = latest?.createdAt ?? "";
-      // Detect the flow. Prefer the backend enum (Step 3+); fall back to the
-      // legacy comment prefix for any pre-refactor rows still in flight.
+      // Detect the flow. Prefer the backend enum column; fall back to the
+      // legacy comment prefix for any pre-refactor rows still in flight
+      // (rows created before the type column was added).
       let source: FlagSource;
-      if (latest?.type === "PARTNER_REQUEST") {
+      if (
+        latest?.type === "PARTNER_REQUEST" ||
+        latest?.type === "VENDOR_REQUEST"
+      ) {
         source = "partner_request";
       } else if (latest?.type === "ADMIN_COMMENT") {
         source = "admin_comment";

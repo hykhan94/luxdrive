@@ -690,6 +690,10 @@ export const getVendorDetails = asyncWrapper(
           companyName: vendor.companyName,
           crNumber: vendor.crNumber,
           vatNumber: vendor.vatNumber,
+          chamberOfCommerceNumber:
+            (vendor as any).chamberOfCommerceNumber ?? null,
+          baladyNumber: (vendor as any).baladyNumber ?? null,
+          nationalAddress: (vendor as any).nationalAddress ?? null,
           contactPerson: vendor.contactPerson,
           contactPhone: vendor.contactPhone,
           email: vendor.user?.email,
@@ -1033,16 +1037,31 @@ export const getVendorProfileForReview = asyncWrapper(
       throw new NotFoundError("Vendor");
     }
 
-    // Group comments by field
+    // Group comments by field. We include both live (unresolved) and comments
+    // resolved during THIS review round only — old resolved comments from
+    // earlier rounds (previous accepts, previous rejections that were
+    // resolved) would otherwise still light up the ACCEPTED chip forever.
+    // Round boundary: resolved AFTER the last admin review, or ever-resolved
+    // when there hasn't been a review yet (first submission cycle). Mirrors
+    // partner's getPartnerProfileForReview.
+    const lastReviewAt = (vendor as any).profileReviewedAt?.getTime() ?? 0;
     const commentsByField: Record<string, any[]> = {};
     vendor.reviewComments.forEach((comment) => {
+      const inCurrentRound =
+        !comment.isResolved ||
+        (comment.resolvedAt && comment.resolvedAt.getTime() > lastReviewAt);
+      if (!inCurrentRound) return;
       if (!commentsByField[comment.fieldName]) {
         commentsByField[comment.fieldName] = [];
       }
       commentsByField[comment.fieldName].push({
         id: comment.id,
         comment: comment.comment,
+        // Enum discriminator so the frontend can render CHANGED/REJECTED/
+        // ACCEPTED chips based on type without prefix-parsing.
+        type: (comment as any).type,
         isResolved: comment.isResolved,
+        resolvedAt: comment.resolvedAt,
         createdAt: comment.createdAt,
       });
     });
@@ -1196,7 +1215,29 @@ export const getVendorProfileForReview = asyncWrapper(
 export const addVendorReviewComment = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { fieldName, comment, resolveOnCreate } = req.body;
+    const {
+      fieldName,
+      comment,
+      type: explicitType,
+      resolveOnCreate,
+    } = req.body as {
+      fieldName?: string;
+      comment?: string;
+      /**
+       * Explicit comment type. Mirrors partner. When omitted, we fall
+       * back to prefix detection for callers that haven't been updated
+       * yet (`❌ Rejected:` → ADMIN_REJECTION). New code should always
+       * pass an explicit type.
+       */
+      type?: "ADMIN_REJECTION" | "VENDOR_REQUEST" | "ADMIN_COMMENT";
+      /**
+       * When true, the backend creates the comment already resolved and
+       * skips the vendor-facing notification. Used for admin per-field
+       * Accept on CHANGED fields — writes a durable "admin accepted this
+       * value" audit-trail entry without pinging the vendor.
+       */
+      resolveOnCreate?: boolean;
+    };
 
     if (!fieldName || !comment) {
       throw new BadRequestError("fieldName and comment are required");
@@ -1275,7 +1316,18 @@ export const addVendorReviewComment = asyncWrapper(
     // A rejection comment uses the `❌ Rejected:` prefix written by the
     // admin's reject flow. We tailor the notification copy to that case
     // so vendors immediately see which thing was rejected and the reason.
-    const isRejection = comment.startsWith("❌ Rejected:");
+    // Explicit `type` from the client wins over prefix detection; legacy
+    // callers that still embed "❌ Rejected:" continue to work.
+    const isRejection = explicitType
+      ? explicitType === "ADMIN_REJECTION"
+      : comment.startsWith("❌ Rejected:");
+    // Effective type stored on the row. If the client didn't specify,
+    // derive from the rejection detection.
+    const effectiveType:
+      | "ADMIN_REJECTION"
+      | "VENDOR_REQUEST"
+      | "ADMIN_COMMENT" =
+      explicitType ?? (isRejection ? "ADMIN_REJECTION" : "ADMIN_COMMENT");
     const reasonText = isRejection
       ? comment.replace(/^❌ Rejected:\s*/, "").trim()
       : comment;
@@ -1356,6 +1408,22 @@ export const addVendorReviewComment = asyncWrapper(
       }
     }
 
+    // Policy B (mirrors partner): if the admin is rejecting a field that had
+    // a pending VENDOR_REQUEST comment on it, resolve that marker first.
+    // This cleanly transitions the field from "editable at vendor's request"
+    // to "admin found problem with your edit — please fix."
+    if (isRejection) {
+      await prisma.vendorReviewComment.updateMany({
+        where: {
+          vendorId: id,
+          fieldName,
+          isResolved: false,
+          type: "VENDOR_REQUEST",
+        },
+        data: { isResolved: true, resolvedAt: new Date() },
+      });
+    }
+
     // When resolveOnCreate is true (used by admin's per-field Accept for
     // CHANGED-but-uncommented fields), create the comment already resolved
     // AND skip the vendor-facing notification. This is an audit-trail
@@ -1366,6 +1434,7 @@ export const addVendorReviewComment = asyncWrapper(
           vendorId: id,
           fieldName,
           comment,
+          type: effectiveType,
           createdBy: req.user!.id,
           isResolved: true,
           resolvedAt: new Date(),
@@ -1386,6 +1455,7 @@ export const addVendorReviewComment = asyncWrapper(
           vendorId: id,
           fieldName,
           comment,
+          type: effectiveType,
           createdBy: req.user!.id,
         },
       }),
@@ -1885,6 +1955,9 @@ export const requestVendorChanges = asyncWrapper(
         companyName: true,
         crNumber: true,
         vatNumber: true,
+        chamberOfCommerceNumber: true,
+        baladyNumber: true,
+        nationalAddress: true,
         contactPerson: true,
         contactPhone: true,
         address: true,
@@ -1905,6 +1978,10 @@ export const requestVendorChanges = asyncWrapper(
       companyName: currentVendor?.companyName ?? null,
       crNumber: currentVendor?.crNumber ?? null,
       vatNumber: currentVendor?.vatNumber ?? null,
+      chamberOfCommerceNumber:
+        (currentVendor as any)?.chamberOfCommerceNumber ?? null,
+      baladyNumber: (currentVendor as any)?.baladyNumber ?? null,
+      nationalAddress: (currentVendor as any)?.nationalAddress ?? null,
       contactPerson: currentVendor?.contactPerson ?? null,
       contactPhone: currentVendor?.contactPhone ?? null,
       address: currentVendor?.address ?? null,

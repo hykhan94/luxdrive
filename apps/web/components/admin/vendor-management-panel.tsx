@@ -235,6 +235,64 @@ function formatDate(d: string | null | undefined) {
   });
 }
 
+/**
+ * Is this comment an admin rejection? Prefer the backend enum column; fall
+ * back to the legacy "❌ Rejected:" prefix for pre-refactor rows.
+ * Mirrors partner-management-panel.tsx.
+ */
+function isRejectionComment(c: {
+  comment: string;
+  type?:
+    | "ADMIN_REJECTION"
+    | "VENDOR_REQUEST"
+    | "PARTNER_REQUEST"
+    | "ADMIN_COMMENT";
+}): boolean {
+  if (c.type) return c.type === "ADMIN_REJECTION";
+  return c.comment.startsWith("❌ Rejected:");
+}
+
+/**
+ * Strip the legacy "❌ Rejected:" prefix from a comment for display. New
+ * comments don't include it, but old rows still do.
+ */
+function stripRejectionPrefix(comment: string): string {
+  return comment.replace(/^❌\s*Rejected:\s*/, "");
+}
+
+/**
+ * "Did the admin Accept this field this round?" Any resolved ADMIN_COMMENT
+ * (per-field Accept audit trail) OR resolved ADMIN_REJECTION (admin accepted
+ * the vendor's fix by resolving the rejection) counts. VENDOR_REQUEST rows
+ * don't count as accept — they're grants of edit permission, not decisions.
+ * Mirrors partner-management-panel.tsx isAcceptedInRound.
+ */
+function isAcceptedInRound(
+  comments: Array<{
+    type?:
+      | "ADMIN_REJECTION"
+      | "VENDOR_REQUEST"
+      | "PARTNER_REQUEST"
+      | "ADMIN_COMMENT";
+    isResolved: boolean;
+  }>,
+): boolean {
+  return comments.some(
+    (c) =>
+      c.isResolved &&
+      (c.type === "ADMIN_COMMENT" || c.type === "ADMIN_REJECTION"),
+  );
+}
+
+/**
+ * Normalize a field value for equivalence comparison. Treats null/undefined/
+ * empty/whitespace as the same so an untouched empty field doesn't fire
+ * hasChanged. Mirrors partner's norm() inline helper.
+ */
+function normValue(v: unknown): string {
+  return (v ?? "").toString().trim();
+}
+
 function isPdf(
   url: string | null | undefined,
   fileName?: string | null,
@@ -1339,7 +1397,11 @@ export default function VendorManagementPanel({
       }
       await adminApi.addVendorReviewComment(vendorId, {
         fieldName,
+        // Keep the "❌ Rejected:" prefix in the comment text so pre-refactor
+        // consumers (any lingering prefix-based readers, plus the vendor-facing
+        // notification body) still work. New readers use `type` instead.
         comment: `❌ Rejected: ${rejectFieldComment.trim()}`,
+        type: "ADMIN_REJECTION",
       });
       showNotification("info", "Field rejected — vendor will be notified");
       setRejectingField(null);
@@ -1354,13 +1416,11 @@ export default function VendorManagementPanel({
 
   // Per-field Accept. Two things happen atomically from the admin's POV:
   //   1. Any outstanding unresolved comments on the field get resolved
-  //      (clears the amber "Change requested by vendor" markers).
-  //   2. A resolved-on-create "Accepted" audit-trail comment gets written
-  //      so the ACCEPTED chip survives a page refresh. Detection of this
-  //      state on render intentionally EXCLUDES vendor-request markers,
-  //      so we can't rely on those to signal accept — need the explicit
-  //      "Accepted" row.
-  // Both paths run in sequence: resolve first, then write audit trail.
+  //      (typically the VENDOR_REQUEST marker created on change-request
+  //      approval, or an ADMIN_REJECTION being accepted after vendor addressed it).
+  //   2. A resolved-on-create ADMIN_COMMENT ("Accepted") audit-trail row
+  //      gets written so the ACCEPTED chip survives a page refresh even
+  //      when there were no prior comments (pure CHANGED case).
   const handleAcceptVendorField = async (
     fieldName: string,
     vendorId: string,
@@ -1376,6 +1436,7 @@ export default function VendorManagementPanel({
       await adminApi.addVendorReviewComment(vendorId, {
         fieldName,
         comment: "Accepted",
+        type: "ADMIN_COMMENT",
         resolveOnCreate: true,
       });
       handleOpenReviewProfile(vendorId);
@@ -5561,71 +5622,52 @@ export default function VendorManagementPanel({
                     <div className="grid grid-cols-2 gap-2">
                       {Object.entries(reviewProfile.profile || {}).map(
                         ([key, value]: [string, any]) => {
-                          const unresolvedComments =
-                            reviewProfile.comments?.[key]?.filter(
-                              (c: any) => !c.isResolved,
-                            ) || [];
-                          const hasComments = unresolvedComments.length > 0;
-                          const prev = reviewProfile.previousProfile?.[key];
-                          const hasChanged =
-                            reviewProfile.previousProfile != null &&
-                            prev !== value &&
-                            prev !== undefined;
-                          const isRejected = unresolvedComments.some((c: any) =>
-                            c.comment?.startsWith?.("❌ Rejected:"),
+                          // Full current-round comments (both live and
+                          // resolved during this round). Mirrors partner's
+                          // roundComments. Backend round-scopes via
+                          // profileReviewedAt so old resolved comments from
+                          // previous rounds are already filtered out here.
+                          const roundComments =
+                            reviewProfile.comments?.[key] || [];
+                          const unresolvedComments = roundComments.filter(
+                            (c: any) => !c.isResolved,
                           );
+                          // A field "has comments" if there's any current-
+                          // round comment attached, resolved or not. Used to
+                          // gate hasChanged and card decoration.
+                          const hasComments = roundComments.length > 0;
+                          const prev = reviewProfile.previousProfile?.[key];
+                          // Normalize null/undefined/empty/whitespace to the
+                          // same value so "Empty -> ' '" doesn't fire CHANGED.
+                          // Also gate on `hasComments` so a stale snapshot
+                          // from an earlier change-request cycle doesn't
+                          // flag fields the admin never asked about. Mirrors
+                          // partner exactly.
+                          const hasChanged =
+                            reviewProfile.previousProfile !== undefined &&
+                            hasComments &&
+                            normValue(prev) !== normValue(value);
+                          const isRejected =
+                            roundComments.some(isRejectionComment);
                           // "Addressed" = admin rejected this field AND the
                           // vendor has resubmitted the profile SINCE that
-                          // rejection. Without the submission-vs-rejection
-                          // time check, the flag fires immediately after
-                          // admin clicks Reject (because hasChanged stays
-                          // true from the vendor's earlier edit). We need to
-                          // see a fresh resubmission after the latest
-                          // rejection to call it addressed.
-                          const mostRecentRejectionAt: number =
-                            unresolvedComments
-                              .filter((c: any) =>
-                                c.comment?.startsWith?.("❌ Rejected:"),
-                              )
-                              .reduce((acc: number, c: any) => {
-                                const t = new Date(c.createdAt).getTime();
-                                return t > acc ? t : acc;
-                              }, 0);
+                          // rejection. The submission-vs-rejection time check
+                          // prevents the flag from firing immediately after
+                          // admin clicks Reject (hasChanged would already be
+                          // true from a pre-rejection edit in the same cycle).
+                          const mostRecentRejectionAt: number = roundComments
+                            .filter(isRejectionComment)
+                            .reduce((acc: number, c: any) => {
+                              const t = new Date(c.createdAt).getTime();
+                              return t > acc ? t : acc;
+                            }, 0);
                           const submittedAfterRejection =
                             !!reviewProfile.submittedAt &&
                             new Date(reviewProfile.submittedAt).getTime() >
                               mostRecentRejectionAt;
                           const isAddressed =
                             isRejected && hasChanged && submittedAfterRejection;
-                          // "Accepted" — admin has previously clicked Accept
-                          // on this field, which writes a resolved
-                          // audit-trail comment (see handleAcceptVendorField).
-                          // Detection rules (order matters):
-                          //   1. Skip if there's any unresolved comment — a
-                          //      fresh rejection or new note takes priority
-                          //      over an older accept.
-                          //   2. Look for a resolved comment that is neither
-                          //      a rejection nor a "Change requested by
-                          //      vendor:" marker. Those markers are the
-                          //      admin's approval-of-request writes, NOT
-                          //      accept actions on the vendor's edit — they
-                          //      linger in the DB and would otherwise be
-                          //      misclassified as accepts.
-                          const allComments =
-                            reviewProfile.comments?.[key] || [];
-                          const isAccepted =
-                            !hasComments &&
-                            allComments.some(
-                              (c: any) =>
-                                c.isResolved &&
-                                !c.comment?.startsWith?.("❌ Rejected:") &&
-                                !c.comment?.startsWith?.(
-                                  "Change requested by vendor:",
-                                ) &&
-                                !c.comment?.startsWith?.(
-                                  "Change requested by partner:",
-                                ),
-                            );
+                          const isAccepted = isAcceptedInRound(roundComments);
                           return (
                             <div
                               key={key}
@@ -5650,7 +5692,7 @@ export default function VendorManagementPanel({
                                     ADDRESSED
                                   </span>
                                 )}
-                                {isAccepted && !isAddressed && (
+                                {isAccepted && !isAddressed && !isRejected && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
                                     ACCEPTED
                                   </span>
@@ -5686,19 +5728,23 @@ export default function VendorManagementPanel({
                               )}
                               {hasComments && (
                                 <div className="mt-2">
-                                  {unresolvedComments.map((c: any) => (
-                                    <p
-                                      key={c.id}
-                                      className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                    >
-                                      {c.comment.startsWith("❌ Rejected:") ? (
-                                        <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                      ) : (
-                                        <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                      )}
-                                      {c.comment}
-                                    </p>
-                                  ))}
+                                  {roundComments.map((c: any) => {
+                                    const isRej = isRejectionComment(c);
+                                    const dim = c.isResolved;
+                                    return (
+                                      <p
+                                        key={c.id}
+                                        className={`text-[10px] flex items-start gap-1 mb-1 ${isRej ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                      >
+                                        {isRej ? (
+                                          <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                        ) : (
+                                          <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                        )}
+                                        {stripRejectionPrefix(c.comment)}
+                                      </p>
+                                    );
+                                  })}
                                   {isAddressed ? (
                                     <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                       <CheckCircle2 className="w-3 h-3" />
@@ -5716,8 +5762,10 @@ export default function VendorManagementPanel({
                                       addressed (rejection is locked in until
                                       vendor updates the value); shown when
                                       isAddressed so admin can confirm or
-                                      re-reject the new value. */}
+                                      re-reject the new value. Also hidden
+                                      once already accepted. */}
                                   {(!isRejected || isAddressed) &&
+                                    !isAccepted &&
                                     (rejectingField === key ? (
                                       <div className="mt-2 flex gap-1.5">
                                         <input
@@ -5961,14 +6009,26 @@ export default function VendorManagementPanel({
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           {reviewProfile.documents.map((doc: any) => {
+                            // Full current-round comments (both live and
+                            // resolved during THIS round — backend
+                            // round-scopes via profileReviewedAt). We use
+                            // this for the amber-card decoration and the
+                            // comment list so admin still sees "vendor
+                            // requested edit" markers even after vendor
+                            // submits (submit resolves VENDOR_REQUEST rows,
+                            // but they stay in the round-scoped set until
+                            // the next admin action closes the round).
                             const docComments =
-                              reviewProfile.comments?.[doc.type]?.filter(
-                                (c: any) => !c.isResolved,
-                              ) || [];
-                            const allDocComments =
                               reviewProfile.comments?.[doc.type] || [];
-                            const isRejected = docComments.some((c: any) =>
-                              c.comment?.startsWith?.("❌ Rejected:"),
+                            // Still-unresolved subset, used for Accept/Reject
+                            // enabling and rejection detection.
+                            const docUnresolved = docComments.filter(
+                              (c: any) => !c.isResolved,
+                            );
+                            const isRejected = docUnresolved.some((c: any) =>
+                              c.type
+                                ? c.type === "ADMIN_REJECTION"
+                                : c.comment?.startsWith?.("❌ Rejected:"),
                             );
                             // "Addressed" means: admin previously rejected
                             // the doc and the vendor has since uploaded a
@@ -5983,28 +6043,17 @@ export default function VendorManagementPanel({
                             // this file: isAddressed = isRejected + change.
                             const isAddressed =
                               isRejected && !!doc.replacedSinceLastReview;
-                            // "Accepted" — admin has previously clicked Accept
-                            // on this doc, which resolves the vendor-request
-                            // marker or writes a resolved audit-trail comment.
-                            // Detection rules mirror the input-field pattern:
-                            //   1. Skip if there's any unresolved comment — a
-                            //      fresh rejection or new note takes priority.
-                            //   2. Look for a resolved comment that's neither
-                            //      a rejection nor a lingering vendor-request
-                            //      marker from an earlier cycle.
-                            const isAccepted =
-                              docComments.length === 0 &&
-                              allDocComments.some(
-                                (c: any) =>
-                                  c.isResolved &&
-                                  !c.comment?.startsWith?.("❌ Rejected:") &&
-                                  !c.comment?.startsWith?.(
-                                    "Change requested by vendor:",
-                                  ) &&
-                                  !c.comment?.startsWith?.(
-                                    "Change requested by partner:",
-                                  ),
-                              );
+                            // "Accepted" — admin has previously acted on this
+                            // doc with an accept. Type-based, mirrors partner.
+                            // Any resolved ADMIN_COMMENT (per-field Accept
+                            // audit trail) or resolved ADMIN_REJECTION
+                            // (admin accepted the vendor's fix) counts.
+                            const isAccepted = docComments.some(
+                              (c: any) =>
+                                c.isResolved &&
+                                (c.type === "ADMIN_COMMENT" ||
+                                  c.type === "ADMIN_REJECTION"),
+                            );
                             return (
                               <div
                                 key={doc.type}
@@ -6051,12 +6100,14 @@ export default function VendorManagementPanel({
                                             Replaced
                                           </span>
                                         )}
-                                        {isAccepted && !isAddressed && (
-                                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
-                                            <CheckCircle2 className="w-2 h-2" />
-                                            Accepted
-                                          </span>
-                                        )}
+                                        {isAccepted &&
+                                          !isAddressed &&
+                                          !isRejected && (
+                                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                              <CheckCircle2 className="w-2 h-2" />
+                                              Accepted
+                                            </span>
+                                          )}
                                         {/* Expiry chip — shows urgency when
                                             the doc is expired or expiring
                                             within 30 days. Renders nothing
@@ -6099,21 +6150,25 @@ export default function VendorManagementPanel({
                                 </div>
                                 {docComments.length > 0 && (
                                   <div className="mt-2">
-                                    {docComments.map((c: any) => (
-                                      <p
-                                        key={c.id}
-                                        className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                      >
-                                        {c.comment.startsWith(
-                                          "❌ Rejected:",
-                                        ) ? (
-                                          <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                        ) : (
-                                          <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                        )}
-                                        {c.comment}
-                                      </p>
-                                    ))}
+                                    {docComments.map((c: any) => {
+                                      const isRej = c.type
+                                        ? c.type === "ADMIN_REJECTION"
+                                        : c.comment.startsWith("❌ Rejected:");
+                                      const dim = c.isResolved;
+                                      return (
+                                        <p
+                                          key={c.id}
+                                          className={`text-[10px] flex items-start gap-1 mb-1 ${isRej ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                        >
+                                          {isRej ? (
+                                            <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                          ) : (
+                                            <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                          )}
+                                          {c.comment}
+                                        </p>
+                                      );
+                                    })}
                                     {isAddressed ? (
                                       <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                         <CheckCircle2 className="w-3 h-3" />
@@ -6136,8 +6191,13 @@ export default function VendorManagementPanel({
                                           decide if the replacement resolves
                                           the original rejection.
                                         - Shown for any open / new-comment
-                                          state. */}
+                                          state (e.g. vendor-request cycle
+                                          where admin needs to review the
+                                          vendor's edit).
+                                        - Also hidden once admin has
+                                          per-item Accepted this doc. */}
                                     {(!isRejected || isAddressed) &&
+                                      !isAccepted &&
                                       (rejectingField === doc.type ? (
                                         <div className="mt-2 flex gap-1.5">
                                           <input
@@ -6190,7 +6250,7 @@ export default function VendorManagementPanel({
                                               handleAcceptVendorField(
                                                 doc.type,
                                                 reviewProfile.id,
-                                                docComments,
+                                                docUnresolved,
                                               )
                                             }
                                             disabled={actionLoading !== null}
@@ -6298,100 +6358,108 @@ export default function VendorManagementPanel({
                       <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
                         MOU Document
                       </h4>
-                      <div
-                        className={`p-3 rounded-xl border flex items-center justify-between ${
-                          reviewProfile.comments?.["mou"]?.some(
-                            (c: any) => !c.isResolved,
-                          )
-                            ? "bg-amber-500/5 border-amber-500/20"
-                            : "bg-neutral-800/50 border-neutral-800"
-                        }`}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div
-                            className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                              reviewProfile.comments?.["mou"]?.some(
-                                (c: any) => !c.isResolved,
-                              )
-                                ? "bg-amber-500/20"
-                                : "bg-green-500/20"
-                            }`}
-                          >
-                            {reviewProfile.comments?.["mou"]?.some(
-                              (c: any) => !c.isResolved,
-                            ) ? (
-                              <AlertTriangle className="w-4 h-4 text-amber-400" />
-                            ) : (
-                              <FileText className="w-4 h-4 text-green-400" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-sm text-white font-medium flex items-center gap-1.5 flex-wrap">
-                              MOU
-                              {/* REPLACED badge — mirrors the documents
-                                  pattern. Surfaces when the vendor uploaded
-                                  a new MOU file after admin's last review. */}
-                              {reviewProfile.mou.replacedSinceLastReview && (
-                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
-                                  <RefreshCw className="w-2 h-2" />
-                                  Replaced
-                                </span>
-                              )}
-                            </p>
-                            {reviewProfile.mou.expiryDate && (
-                              <p className="text-xs text-gray-500">
-                                Expires:{" "}
-                                {formatDate(reviewProfile.mou.expiryDate)}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() =>
-                            setViewerDoc({
-                              url: reviewProfile.mou.fileUrl,
-                              title: "MOU",
-                            })
-                          }
-                          className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-lg transition-colors"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
-                      </div>
-                      {(reviewProfile.comments?.["mou"]?.filter(
-                        (c: any) => !c.isResolved,
-                      ).length || 0) > 0 && (
-                        <div className="mt-2 pl-1">
-                          {(() => {
-                            const mouComments = reviewProfile.comments[
-                              "mou"
-                            ].filter((c: any) => !c.isResolved);
-                            const isRejected = mouComments.some((c: any) =>
-                              c.comment?.startsWith?.("❌ Rejected:"),
-                            );
-                            // Mirror the documents pattern: when the MOU was
-                            // re-uploaded after admin's last review, the
-                            // rejection is "addressed" and the buttons come
-                            // back so admin can accept or re-reject the
-                            // replacement.
-                            const isAddressed =
-                              isRejected &&
-                              !!reviewProfile.mou?.replacedSinceLastReview;
-                            return (
-                              <>
-                                {mouComments.map((c: any) => (
-                                  <p
-                                    key={c.id}
-                                    className={`text-[10px] flex items-start gap-1 mb-1 ${c.comment.startsWith("❌ Rejected:") ? "text-red-400" : "text-amber-400"}`}
-                                  >
-                                    {c.comment.startsWith("❌ Rejected:") ? (
-                                      <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
-                                    ) : (
-                                      <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                      {(() => {
+                        // Full current-round comments (both resolved and
+                        // unresolved this round). Unresolved subset used for
+                        // rejection detection and passing to the accept
+                        // handler. Mirrors partner-management-panel.tsx.
+                        const mouComments =
+                          reviewProfile.comments?.["mou"] || [];
+                        const mouUnresolved = mouComments.filter(
+                          (c: any) => !c.isResolved,
+                        );
+                        const isRejected =
+                          mouUnresolved.some(isRejectionComment);
+                        // Backend flag set when vendor re-uploaded MOU
+                        // after admin's most recent unresolved rejection.
+                        const isAddressed =
+                          isRejected &&
+                          !!reviewProfile.mou?.replacedSinceLastReview;
+                        const isAccepted = isAcceptedInRound(mouComments);
+                        return (
+                          <>
+                            <div
+                              className={`p-3 rounded-xl border flex items-center justify-between ${
+                                isAddressed || isAccepted
+                                  ? "bg-emerald-500/5 border-emerald-500/20"
+                                  : mouComments.length > 0
+                                    ? "bg-amber-500/5 border-amber-500/20"
+                                    : "bg-neutral-800/50 border-neutral-800"
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div
+                                  className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                                    mouComments.length > 0
+                                      ? "bg-amber-500/20"
+                                      : "bg-green-500/20"
+                                  }`}
+                                >
+                                  {mouComments.length > 0 ? (
+                                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-green-400" />
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-sm text-white font-medium flex items-center gap-1.5 flex-wrap">
+                                    MOU
+                                    {/* REPLACED badge — signals vendor
+                                        re-uploaded MOU after admin's last
+                                        review action. */}
+                                    {reviewProfile.mou
+                                      ?.replacedSinceLastReview && (
+                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                        <RefreshCw className="w-2 h-2" />
+                                        Replaced
+                                      </span>
                                     )}
-                                    {c.comment}
+                                    {isAccepted && !isRejected && (
+                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                        <CheckCircle2 className="w-2 h-2" />
+                                        Accepted
+                                      </span>
+                                    )}
                                   </p>
-                                ))}
+                                  {reviewProfile.mou.expiryDate && (
+                                    <p className="text-xs text-gray-500">
+                                      Expires:{" "}
+                                      {formatDate(reviewProfile.mou.expiryDate)}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() =>
+                                  setViewerDoc({
+                                    url: reviewProfile.mou.fileUrl,
+                                    title: "MOU",
+                                  })
+                                }
+                                className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-lg transition-colors"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                            </div>
+                            {mouComments.length > 0 && (
+                              <div className="mt-2 pl-1">
+                                {mouComments.map((c: any) => {
+                                  const isRej = isRejectionComment(c);
+                                  const dim = c.isResolved;
+                                  return (
+                                    <p
+                                      key={c.id}
+                                      className={`text-[10px] flex items-start gap-1 mb-1 ${isRej ? "text-red-400" : "text-amber-400"} ${dim ? "opacity-50" : ""}`}
+                                    >
+                                      {isRej ? (
+                                        <XCircle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                      ) : (
+                                        <AlertTriangle className="w-2.5 h-2.5 mt-0.5 flex-shrink-0" />
+                                      )}
+                                      {stripRejectionPrefix(c.comment)}
+                                    </p>
+                                  );
+                                })}
                                 {isAddressed ? (
                                   <div className="mt-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                     <CheckCircle2 className="w-3 h-3" />
@@ -6404,11 +6472,13 @@ export default function VendorManagementPanel({
                                     Changes
                                   </p>
                                 ) : null}
-                                {/* Buttons hidden while rejected-without-
-                                    replacement; shown once the vendor has
-                                    uploaded a fresh MOU so admin can
-                                    Accept or re-reject. */}
+                                {/* Accept/Reject controls — hidden while
+                                    rejected-without-replacement; shown once
+                                    the vendor addressed it OR for any open
+                                    vendor-request state. Also hidden after
+                                    admin has already accepted. */}
                                 {(!isRejected || isAddressed) &&
+                                  !isAccepted &&
                                   (rejectingField === "mou" ? (
                                     <div className="mt-2 flex gap-1.5">
                                       <input
@@ -6457,7 +6527,7 @@ export default function VendorManagementPanel({
                                           handleAcceptVendorField(
                                             "mou",
                                             reviewProfile.id,
-                                            mouComments,
+                                            mouUnresolved,
                                           )
                                         }
                                         disabled={actionLoading !== null}
@@ -6477,82 +6547,81 @@ export default function VendorManagementPanel({
                                       </button>
                                     </div>
                                   ))}
-                              </>
-                            );
-                          })()}
-                        </div>
-                      )}
-                      {/* No-comments-yet path for MOU: surface a Reject
-                          button so the admin can flag the MOU directly
-                          without a generic dropdown. */}
-                      {!reviewProfile.comments?.["mou"]?.filter(
-                        (c: any) => !c.isResolved,
-                      ).length &&
-                        (rejectingField === "mou" ? (
-                          <div className="mt-2 pl-1 flex gap-1.5">
-                            <input
-                              type="text"
-                              value={rejectFieldComment}
-                              onChange={(e) =>
-                                setRejectFieldComment(e.target.value)
-                              }
-                              placeholder="Reason for rejection..."
-                              className="flex-1 px-2 py-1 bg-neutral-900 border border-red-500/30 rounded text-white text-[10px] focus:outline-none focus:border-red-400"
-                              autoFocus
-                              onKeyDown={(e) => {
-                                if (
-                                  e.key === "Enter" &&
-                                  rejectFieldComment.trim()
-                                )
-                                  handleRejectVendorField(
-                                    "mou",
-                                    reviewProfile.id,
-                                  );
-                                if (e.key === "Escape") {
-                                  setRejectingField(null);
-                                  setRejectFieldComment("");
-                                }
-                              }}
-                            />
-                            <button
-                              onClick={() =>
-                                handleRejectVendorField("mou", reviewProfile.id)
-                              }
-                              disabled={
-                                !rejectFieldComment.trim() ||
-                                actionLoading === "reject-mou"
-                              }
-                              className="px-2 py-1 bg-red-500 text-white text-[10px] font-medium rounded hover:bg-red-400 disabled:opacity-50 transition-colors"
-                            >
-                              {actionLoading === "reject-mou" ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
+                              </div>
+                            )}
+                            {/* No-comments-yet Reject pill for MOU. */}
+                            {mouComments.length === 0 &&
+                              (rejectingField === "mou" ? (
+                                <div className="mt-2 pl-1 flex gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={rejectFieldComment}
+                                    onChange={(e) =>
+                                      setRejectFieldComment(e.target.value)
+                                    }
+                                    placeholder="Reason for rejection..."
+                                    className="flex-1 px-2 py-1 bg-neutral-900 border border-red-500/30 rounded text-white text-[10px] focus:outline-none focus:border-red-400"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (
+                                        e.key === "Enter" &&
+                                        rejectFieldComment.trim()
+                                      )
+                                        handleRejectVendorField(
+                                          "mou",
+                                          reviewProfile.id,
+                                        );
+                                      if (e.key === "Escape") {
+                                        setRejectingField(null);
+                                        setRejectFieldComment("");
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    onClick={() =>
+                                      handleRejectVendorField(
+                                        "mou",
+                                        reviewProfile.id,
+                                      )
+                                    }
+                                    disabled={
+                                      !rejectFieldComment.trim() ||
+                                      actionLoading === "reject-mou"
+                                    }
+                                    className="px-2 py-1 bg-red-500 text-white text-[10px] font-medium rounded hover:bg-red-400 disabled:opacity-50 transition-colors"
+                                  >
+                                    {actionLoading === "reject-mou" ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      "Send"
+                                    )}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setRejectingField(null);
+                                      setRejectFieldComment("");
+                                    }}
+                                    className="px-1.5 py-1 text-gray-500 hover:text-white text-[10px] transition-colors"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
                               ) : (
-                                "Send"
-                              )}
-                            </button>
-                            <button
-                              onClick={() => {
-                                setRejectingField(null);
-                                setRejectFieldComment("");
-                              }}
-                              className="px-1.5 py-1 text-gray-500 hover:text-white text-[10px] transition-colors"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="mt-2 pl-1">
-                            <button
-                              onClick={() => {
-                                setRejectingField("mou");
-                                setRejectFieldComment("");
-                              }}
-                              className="px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
-                            >
-                              <XCircle className="w-2.5 h-2.5" /> Reject
-                            </button>
-                          </div>
-                        ))}
+                                <div className="mt-2 pl-1">
+                                  <button
+                                    onClick={() => {
+                                      setRejectingField("mou");
+                                      setRejectFieldComment("");
+                                    }}
+                                    className="px-2 py-0.5 bg-red-500/10 text-red-400/80 text-[10px] font-medium rounded hover:bg-red-500/20 hover:text-red-400 border border-red-500/15 transition-colors flex items-center gap-1"
+                                  >
+                                    <XCircle className="w-2.5 h-2.5" /> Reject
+                                  </button>
+                                </div>
+                              ))}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
 

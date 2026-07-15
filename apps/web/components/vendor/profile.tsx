@@ -462,8 +462,9 @@ export default function VendorProfilePanel({
   const allCommentsAreVendorRequests =
     commentValues.length > 0 &&
     commentValues.every((c: any) => {
-      if (c?.type === "PARTNER_REQUEST") return true;
-      if (c?.type) return false; // typed but not PARTNER_REQUEST
+      if (c?.type === "VENDOR_REQUEST" || c?.type === "PARTNER_REQUEST")
+        return true;
+      if (c?.type) return false; // typed but not a request marker
       return (
         c?.comment?.startsWith("Change requested by partner:") ||
         c?.comment?.startsWith("Change requested by vendor:")
@@ -668,16 +669,14 @@ export default function VendorProfilePanel({
   // ADMIN_REJECTION rows on the DB stay live (unresolved), preserving the
   // admin's outstanding-complaints signal for the re-review.
   //
-  // Vendor-request cycle synthesis: unlike partner, when admin approves a
-  // vendor's request-to-edit, the backend does NOT create ReviewComment
-  // rows — it just flips vendor to CHANGES_REQUESTED with `editableFields`
-  // set and returns `activeApprovedRequest.fields` on the GET. The
-  // context, though, is built for the partner model where `PARTNER_REQUEST`
-  // rows in adminComments drive the "granted-edit" tracking. To reuse the
-  // same context without forking it, we synthesize placeholder
-  // PARTNER_REQUEST-typed items for each field admin approved. The context
-  // will treat them as vendor-request items (informational, gated on
-  // "actually edited"), which is exactly what we want.
+  // Vendor-request cycle synthesis: backwards-compat only. In the current
+  // flow, approveVendorProfileChangeRequest creates VendorReviewComment rows
+  // with `type: "VENDOR_REQUEST"` directly, so this branch never fires for
+  // fresh approvals. Retained for a legacy edge case: any pre-refactor
+  // approvals where comment rows were never created still need the vendor
+  // to see the request markers in the UI. Once the migration is deployed
+  // and any such stale rows are backfilled, this synth becomes dead code
+  // and can be removed.
   let providerAdminComments: Record<
     string,
     Array<{
@@ -685,7 +684,11 @@ export default function VendorProfilePanel({
       comment: string;
       isResolved?: boolean;
       createdAt: string;
-      type?: "ADMIN_REJECTION" | "PARTNER_REQUEST" | "ADMIN_COMMENT";
+      type?:
+        | "ADMIN_REJECTION"
+        | "VENDOR_REQUEST"
+        | "PARTNER_REQUEST"
+        | "ADMIN_COMMENT";
     }>
   > = {};
   if (profile.status === "CHANGES_REQUESTED") {
@@ -694,9 +697,9 @@ export default function VendorProfilePanel({
       profile.activeApprovedRequest.fields.length > 0 &&
       Object.keys(profile.adminComments ?? {}).length === 0
     ) {
-      // Pure vendor-request cycle (no admin-rejection comments). Synthesize
-      // PARTNER_REQUEST-typed items so the context knows these are
-      // granted-edit items, not corrections.
+      // Legacy fallback: no comment rows exist for this approved request.
+      // Synthesize VENDOR_REQUEST-typed items so the context knows these
+      // are granted-edit items, not corrections.
       const synth: typeof providerAdminComments = {};
       for (const field of profile.activeApprovedRequest.fields) {
         synth[field] = [
@@ -705,24 +708,18 @@ export default function VendorProfilePanel({
             comment: profile.activeApprovedRequest.message || "",
             isResolved: false,
             createdAt: new Date().toISOString(),
-            type: "PARTNER_REQUEST",
+            type: "VENDOR_REQUEST",
           },
         ];
       }
       providerAdminComments = synth;
     } else {
-      // Admin-rejection cycle (or mixed) — pass real adminComments through.
+      // Real comment rows exist — pass them through directly. Applies to
+      // both admin-rejection cycles and the (new) vendor-request cycles
+      // where backend creates VENDOR_REQUEST-typed comment rows on approval.
       providerAdminComments = profile.adminComments;
     }
   }
-  // TEMP DIAGNOSTIC — remove after testing
-  console.log("[vendor-request-debug]", {
-    status: profile.status,
-    activeApprovedRequest: profile.activeApprovedRequest,
-    adminCommentsKeys: Object.keys(profile.adminComments ?? {}),
-    providerAdminCommentsKeys: Object.keys(providerAdminComments),
-    profileSnapshot: profile.profileSnapshot,
-  });
   return (
     <RejectionProgressProvider
       adminComments={providerAdminComments}

@@ -1875,7 +1875,7 @@ export default function PartnerManagementPanel({
                                     ADDRESSED
                                   </span>
                                 )}
-                                {isAccepted && !isAddressed && (
+                                {isAccepted && !isAddressed && !isRejected && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
                                     ACCEPTED
                                   </span>
@@ -2271,7 +2271,7 @@ export default function PartnerManagementPanel({
                                           Replaced
                                         </span>
                                       )}
-                                      {isAccepted && (
+                                      {isAccepted && !isRejected && (
                                         <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                           <CheckCircle2 className="w-2 h-2" />
                                           Accepted
@@ -2564,7 +2564,7 @@ export default function PartnerManagementPanel({
                                         Replaced
                                       </span>
                                     )}
-                                    {isAccepted && (
+                                    {isAccepted && !isRejected && (
                                       <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                         <CheckCircle2 className="w-2 h-2" />
                                         Accepted

@@ -987,8 +987,394 @@
       ]
     },
     {
+      "make": "Ford",
+      "models": [
+        {
+          "model": "Taurus",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2018,
+          "maxYear": 2024,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Fusion",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2018,
+          "maxYear": 2020,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Explorer",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Expedition",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Expedition MAX",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Edge",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2024,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Transit",
+          "classes": ["HIACE"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 15
+        },
+        {
+          "model": "Mustang Mach-E",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Chrysler",
+      "models": [
+        {
+          "model": "300",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2018,
+          "maxYear": 2023,
+          "defaultSeats": 4
+        },
+        {
+          "model": "300C",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2018,
+          "maxYear": 2023,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Pacifica",
+          "classes": ["HIACE"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Dodge",
+      "models": [
+        {
+          "model": "Charger",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2018,
+          "maxYear": 2023,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Durango",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        }
+      ]
+    },
+    {
+      "make": "Jeep",
+      "models": [
+        {
+          "model": "Grand Cherokee",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Grand Cherokee L",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Wagoneer",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Grand Wagoneer",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        }
+      ]
+    },
+    {
+      "make": "Land Rover",
+      "models": [
+        {
+          "model": "Defender",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Defender 130",
+          "classes": ["BUSINESS_SUV", "FIRST_CLASS"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 8
+        },
+        {
+          "model": "Discovery",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Discovery Sport",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Jaguar",
+      "models": [
+        {
+          "model": "XF",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2024,
+          "defaultSeats": 4
+        },
+        {
+          "model": "XJ",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2018,
+          "maxYear": 2019,
+          "defaultSeats": 4
+        },
+        {
+          "model": "F-Pace",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "I-Pace",
+          "classes": ["ELECTRIC"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Maserati",
+      "models": [
+        {
+          "model": "Ghibli",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Quattroporte",
+          "classes": ["FIRST_CLASS"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Levante",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Grecale",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2023,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Volkswagen",
+      "models": [
+        {
+          "model": "Passat",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Arteon",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "Touareg",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "Teramont",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Caravelle",
+          "classes": ["HIACE"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 9
+        },
+        {
+          "model": "Multivan",
+          "classes": ["HIACE"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Crafter",
+          "classes": ["HIACE"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 15
+        },
+        {
+          "model": "ID.4",
+          "classes": ["ELECTRIC"],
+          "minYear": 2022,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        }
+      ]
+    },
+    {
+      "make": "Peugeot",
+      "models": [
+        {
+          "model": "508",
+          "classes": ["BUSINESS_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 4
+        },
+        {
+          "model": "3008",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 5
+        },
+        {
+          "model": "5008",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Traveller",
+          "classes": ["HIACE"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 9
+        }
+      ]
+    },
+    {
+      "make": "Higer",
+      "models": [
+        {
+          "model": "Azure",
+          "classes": ["COASTER"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 30
+        },
+        {
+          "model": "KLQ6759",
+          "classes": ["COASTER"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 22
+        },
+        {
+          "model": "KLQ6109",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 45
+        },
+        {
+          "model": "KLQ6122",
+          "classes": ["KING_LONG"],
+          "minYear": 2018,
+          "maxYear": 2026,
+          "defaultSeats": 50
+        }
+      ]
+    },
+    {
       "make": "Mitsubishi",
       "models": [
+        {
+          "model": "Pajero",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2018,
+          "maxYear": 2024,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Montero Sport",
+          "classes": ["BUSINESS_SUV"],
+          "minYear": 2019,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
+        {
+          "model": "Xpander",
+          "classes": ["ECONOMY_SEDAN"],
+          "minYear": 2020,
+          "maxYear": 2026,
+          "defaultSeats": 7
+        },
         {
           "model": "Rosa",
           "classes": ["COASTER"],
