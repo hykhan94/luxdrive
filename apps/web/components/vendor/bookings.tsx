@@ -37,6 +37,7 @@ import {
   UserX,
   CarFront,
   FileText,
+  Eye,
   Star,
 } from "lucide-react";
 import {
@@ -1131,6 +1132,12 @@ export default function VendorBookings({
   const [assigningBooking, setAssigningBooking] = useState<Booking | null>(
     null,
   );
+  // Full detail for the booking being accepted — fetched in parallel
+  // with assignment options in handleOpenAssign. Purely used to render
+  // the map + any richer context in the Accept sidebar summary; the
+  // list-row `assigningBooking` doesn't carry lat/lng.
+  const [assigningBookingDetail, setAssigningBookingDetail] =
+    useState<BookingDetailData | null>(null);
   const [assignmentOptions, setAssignmentOptions] =
     useState<AssignmentOption | null>(null);
   const [selectedDriver, setSelectedDriver] = useState("");
@@ -1284,13 +1291,39 @@ export default function VendorBookings({
 
   const handleOpenAssign = async (booking: Booking) => {
     setAssigningBooking(booking);
+    setAssigningBookingDetail(null);
     setShowAssignModal(true);
     setIsLoadingOptions(true);
     setSelectedDriver("");
     setSelectedVehicle("");
+    // Fire both requests in parallel — the assignment options drive
+    // the picker (blocking), and the full detail feeds the summary
+    // map (non-blocking; if it fails we just don't render the map).
+    // Detail is the same payload used by handleViewDetail; keeping
+    // it separate from `selectedBooking` so the detail modal doesn't
+    // pop up under the Accept sidebar.
     try {
-      const res = await vendorApi.getAssignmentOptions(booking.id);
-      if (res.success && res.data) setAssignmentOptions(res.data);
+      const [optionsRes, detailRes] = await Promise.allSettled([
+        vendorApi.getAssignmentOptions(booking.id),
+        vendorApi.getBooking(booking.id),
+      ]);
+      if (
+        optionsRes.status === "fulfilled" &&
+        optionsRes.value.success &&
+        optionsRes.value.data
+      ) {
+        setAssignmentOptions(optionsRes.value.data);
+      } else if (optionsRes.status === "rejected") {
+        throw optionsRes.reason;
+      }
+      if (
+        detailRes.status === "fulfilled" &&
+        detailRes.value.success &&
+        detailRes.value.data
+      ) {
+        setAssigningBookingDetail(detailRes.value.data);
+      }
+      // Detail fetch failure is silent — map just won't render.
     } catch (err: any) {
       showNotification("error", err.message || "Failed to load options");
       setShowAssignModal(false);
@@ -1314,6 +1347,7 @@ export default function VendorBookings({
         showNotification("success", res.message || "Booking accepted");
         setShowAssignModal(false);
         setAssigningBooking(null);
+        setAssigningBookingDetail(null);
         setAssignmentOptions(null);
         fetchBookings();
         refreshBadges();
@@ -1499,6 +1533,23 @@ export default function VendorBookings({
         ? booking.isActionable
         : isOfferState(booking.status);
 
+    // Small eye button. Rendered alongside every branch's primary
+    // actions so the vendor can always open the detail modal —
+    // previously only surfaced on "no action available" rows, which
+    // meant once vendor accepted a booking (CONFIRMED/IN_PROGRESS)
+    // they lost visibility into pickup/customer/payout until the
+    // trip completed. Same button style as the PO button so they
+    // sit as a matched pair on the right of the action group.
+    const viewDetailsButton = (
+      <button
+        onClick={() => handleViewDetail(booking.id)}
+        title="View booking details"
+        className="inline-flex items-center justify-center p-1.5 bg-neutral-800 text-gray-400 hover:text-luxury-gold hover:bg-neutral-700 border border-neutral-700 rounded-lg transition-colors"
+      >
+        <Eye className="w-3.5 h-3.5" />
+      </button>
+    );
+
     if (showOfferActions) {
       return (
         <div className="flex gap-2 items-center">
@@ -1525,6 +1576,7 @@ export default function VendorBookings({
             {!canAcceptBookings && <ShieldAlert className="w-3 h-3" />}
             Accept
           </button>
+          {viewDetailsButton}
           {poButton(booking.id)}
         </div>
       );
@@ -1544,6 +1596,7 @@ export default function VendorBookings({
               "Start Trip"
             )}
           </button>
+          {viewDetailsButton}
           {poButton(booking.id)}
         </div>
       );
@@ -1563,6 +1616,7 @@ export default function VendorBookings({
               "Complete"
             )}
           </button>
+          {viewDetailsButton}
           {poButton(booking.id)}
         </div>
       );
@@ -2887,18 +2941,148 @@ export default function VendorBookings({
             </div>
 
             {assigningBooking && (
-              <div className="mx-5 mt-4 p-3 rounded-lg border bg-neutral-800/60 border-neutral-700">
-                <p className="text-xs text-gray-500 mb-1.5 uppercase tracking-wider">
-                  Requested Vehicle Class
-                </p>
-                <VehicleClassBadge
-                  vehicleClass={assigningBooking.vehicleClass}
-                />
-                <p className="text-xs text-gray-500 mt-1.5">
-                  {assigningBooking.guestName} ·{" "}
-                  {formatDate(assigningBooking.tripDate)} at{" "}
-                  {assigningBooking.tripTime}
-                </p>
+              <div className="mx-5 mt-4 rounded-xl border border-neutral-700 bg-neutral-800/60 overflow-hidden">
+                {/* Compact booking summary — mirrors the sections in the
+                    detail modal (customer, trip, pricing) at reduced
+                    density so the vendor keeps full context while
+                    picking driver + vehicle. Payout is the anchor
+                    fact for the accept decision, so it's the last
+                    row with prominent gold styling. */}
+                <div className="px-4 pt-3 pb-2 border-b border-neutral-700/60">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-mono font-semibold text-white truncate">
+                        {assigningBooking.bookingRef}
+                      </p>
+                      <span
+                        className={`mt-1 inline-block px-1.5 py-0.5 text-[10px] rounded-full border ${getStatusColor(assigningBooking.status)}`}
+                      >
+                        {assigningBooking.statusLabel}
+                      </span>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <TripTypeBadge
+                        tripType={assigningBooking.tripType}
+                        hours={assigningBooking.hours}
+                        hourlyDuration={assigningBooking.hourlyDuration}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Customer */}
+                <div className="px-4 py-2.5 border-b border-neutral-700/60 text-xs space-y-1">
+                  <div className="flex items-center gap-2">
+                    <User className="w-3 h-3 text-luxury-gold flex-shrink-0" />
+                    <span className="text-white truncate">
+                      {assigningBooking.guestName}
+                    </span>
+                  </div>
+                  {assigningBooking.guestPhone && (
+                    <div className="flex items-center gap-2">
+                      <Phone className="w-3 h-3 text-gray-500 flex-shrink-0" />
+                      <span className="text-gray-400">
+                        {assigningBooking.guestPhone}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Trip — dense, trip-type-aware. HOURLY shows pickup
+                    only; ONE_WAY shows pickup → dropoff with a small
+                    arrow. Date + time on the right for both. */}
+                <div className="px-4 py-2.5 border-b border-neutral-700/60 text-xs space-y-1.5">
+                  {assigningBooking.tripType === "HOURLY" ? (
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-3 h-3 text-green-400 flex-shrink-0 mt-0.5" />
+                      <span className="text-white leading-snug break-words">
+                        {assigningBooking.pickupAddress || "—"}
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-3 h-3 text-green-400 flex-shrink-0 mt-0.5" />
+                        <span className="text-white leading-snug break-words">
+                          {assigningBooking.pickupAddress || "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-3 h-3 text-red-400 flex-shrink-0 mt-0.5" />
+                        <span className="text-white leading-snug break-words">
+                          {assigningBooking.dropoffAddress || "—"}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  <div className="flex items-center gap-2 pt-1 text-gray-400">
+                    <Clock className="w-3 h-3 text-gray-500 flex-shrink-0" />
+                    <span>
+                      {formatDate(assigningBooking.tripDate)} at{" "}
+                      {assigningBooking.tripTime}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Compact map — pulls coords from the parallel-fetched
+                    full detail (list-row Booking doesn't carry lat/lng).
+                    BookingMap self-guards against missing coords or
+                    missing API key, so no explicit null-check needed
+                    here. Renders inside the summary card so the map
+                    reads as part of the trip context, not a detached
+                    element. */}
+                {assigningBookingDetail && (
+                  <div className="border-b border-neutral-700/60">
+                    <BookingMap
+                      tripType={assigningBookingDetail.trip.tripType}
+                      pickupLat={assigningBookingDetail.trip.pickupLat}
+                      pickupLng={assigningBookingDetail.trip.pickupLng}
+                      dropoffLat={assigningBookingDetail.trip.dropoffLat}
+                      dropoffLng={assigningBookingDetail.trip.dropoffLng}
+                    />
+                  </div>
+                )}
+
+                {/* Vehicle class + passengers meta row */}
+                <div className="px-4 py-2.5 border-b border-neutral-700/60 flex items-center gap-4 text-xs flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-gray-500 uppercase tracking-wider text-[10px]">
+                      Requires
+                    </span>
+                    <VehicleClassBadge
+                      vehicleClass={assigningBooking.vehicleClass}
+                    />
+                  </div>
+                  {assigningBooking.passengers != null && (
+                    <div className="flex items-center gap-1.5 text-gray-400">
+                      <User className="w-3 h-3 text-luxury-gold" />
+                      <span>{assigningBooking.passengers} pax</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Payout — the anchor of the accept decision. Mirrors
+                    the Pricing card's payout row from the detail modal
+                    but sits inline at the bottom of the summary strip
+                    with prominent gold styling so the vendor sees it
+                    without scrolling. Falls back to totalPrice when
+                    backend hasn't exposed payout on the list endpoint
+                    yet (see interface note on vendorPayoutAmount). */}
+                <div className="px-4 py-3 bg-luxury-gold/5 flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wider text-luxury-gold/80">
+                    Your Payout
+                  </span>
+                  <span className="text-base font-semibold text-luxury-gold">
+                    SAR{" "}
+                    {Number(
+                      assigningBooking.vendorPayoutAmount ??
+                        assigningBooking.totalPrice,
+                    ).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
               </div>
             )}
 
