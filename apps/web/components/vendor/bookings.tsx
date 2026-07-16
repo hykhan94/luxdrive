@@ -2053,15 +2053,23 @@ export default function VendorBookings({
           />
           <div className="relative ml-auto w-full max-w-md bg-neutral-900 border-l border-neutral-700 shadow-2xl h-full overflow-y-auto">
             <div className="flex items-center justify-between p-5 border-b border-neutral-800 sticky top-0 bg-neutral-900 z-10">
-              <div>
-                <h3 className="text-lg font-semibold text-white">
-                  Booking Details
-                </h3>
-                <p className="text-sm text-luxury-gold font-mono">
+              <div className="min-w-0">
+                {/* Header mirrors the admin booking detail modal: booking
+                    ref is the primary heading, status pill sits directly
+                    beneath. Removed the "Booking Details" title and the
+                    separate badge row (trip type + vehicle class are now
+                    surfaced in the Trip Details card and the meta row
+                    respectively — same as admin). */}
+                <h2 className="text-xl font-bold text-white font-mono truncate">
                   {selectedBooking.bookingRef}
-                </p>
+                </h2>
+                <span
+                  className={`mt-1 inline-block px-2 py-0.5 text-xs rounded-full border ${getStatusColor(selectedBooking.status)}`}
+                >
+                  {selectedBooking.statusLabel}
+                </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-shrink-0">
                 {/* Download PO — also exposed inline on each row, but
                     surfaced prominently here since the detail panel
                     is where vendors spend the most time reviewing a
@@ -2096,23 +2104,20 @@ export default function VendorBookings({
                 </button>
               </div>
             </div>
-            <div className="p-5 space-y-5">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`px-3 py-1.5 text-sm rounded border ${getStatusColor(selectedBooking.status)}`}
-                  >
-                    {selectedBooking.statusLabel}
-                  </span>
-                  <TripTypeBadge
-                    tripType={selectedBooking.trip.tripType}
-                    hours={selectedBooking.trip.hours}
-                    hourlyDuration={selectedBooking.trip.hourlyDuration}
-                  />
-                  <VehicleClassBadge
-                    vehicleClass={selectedBooking.vehicleClass}
-                  />
-                </div>
+            <div className="p-5 space-y-4">
+              {/* Trip type + vehicle class badges. Small metadata pills,
+                  visually secondary to the status. Kept because the
+                  vendor's list view surfaces them and users expect to
+                  see them mirrored here. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <TripTypeBadge
+                  tripType={selectedBooking.trip.tripType}
+                  hours={selectedBooking.trip.hours}
+                  hourlyDuration={selectedBooking.trip.hourlyDuration}
+                />
+                <VehicleClassBadge
+                  vehicleClass={selectedBooking.vehicleClass}
+                />
               </div>
 
               {selectedBooking.timeline &&
@@ -2156,16 +2161,39 @@ export default function VendorBookings({
                   </div>
                 )}
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-xs text-gray-500 mb-1">Customer</p>
-                  <p className="text-white font-medium">
-                    {selectedBooking.customer.name}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-500 mb-1">Phone</p>
-                  <p className="text-white">{selectedBooking.customer.phone}</p>
+              {/* Customer card — mirrors the admin's booking-detail
+                  layout: iconified section heading, label/value rows.
+                  Email surfaces here too (vendor's detail payload
+                  exposes it as nullable). Vendor detail intentionally
+                  omits partner/origin attribution, so no Partner row
+                  appears — that's admin-only. */}
+              <div className="bg-neutral-800 rounded-xl p-4">
+                <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                  <User className="w-4 h-4 text-luxury-gold" /> Customer
+                </h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-500 flex-shrink-0">Name</span>
+                    <span className="text-white text-right break-words">
+                      {selectedBooking.customer.name}
+                    </span>
+                  </div>
+                  {selectedBooking.customer.email && (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-gray-500 flex-shrink-0">Email</span>
+                      <span className="text-white text-right break-all">
+                        {selectedBooking.customer.email}
+                      </span>
+                    </div>
+                  )}
+                  {selectedBooking.customer.phone && (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-gray-500 flex-shrink-0">Phone</span>
+                      <span className="text-white text-right">
+                        {selectedBooking.customer.phone}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2363,37 +2391,53 @@ export default function VendorBookings({
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-xs text-gray-500 mb-1">Date & Time</p>
-                  <p className="text-white">
-                    {formatDate(selectedBooking.trip.tripDate)} at{" "}
-                    {selectedBooking.trip.tripTime}
-                  </p>
+              {/* Vehicle + Passenger meta row — small metadata line
+                  under the Trip Route/Service Window card, matches
+                  the admin panel's structure. Date & time already
+                  live inside the trip card above, so we don't
+                  duplicate them here. */}
+              <div className="bg-neutral-800 rounded-xl p-3 flex items-center gap-4 text-sm flex-wrap">
+                <div className="flex items-center gap-2">
+                  <Car className="w-4 h-4 text-luxury-gold" />
+                  <span className="text-gray-400">Vehicle:</span>
+                  <span className="text-white">
+                    {selectedBooking.vehicleClass || "—"}
+                  </span>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-500 mb-1">Passengers</p>
-                  <p className="text-white">{selectedBooking.passengers}</p>
-                </div>
+                {selectedBooking.passengers != null && (
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-luxury-gold" />
+                    <span className="text-gray-400">Passengers:</span>
+                    <span className="text-white">
+                      {selectedBooking.passengers}
+                    </span>
+                  </div>
+                )}
               </div>
 
-              {/* Pricing block — Stage 3B-1 direction inversion.
-                  Under new direction the vendor should see what they
-                  earn from this booking (vendorPayoutAmount), NOT the
-                  partner/customer-facing price breakdown. We prefer
-                  the payout when backend exposes it; the legacy
-                  basePrice/vatAmount/totalPrice breakdown is kept as
-                  a fallback for compat during the transition. */}
-              <div className="p-4 bg-luxury-gold/10 border border-luxury-gold/30 rounded-lg">
+              {/* Pricing card — admin-style icon header. Content
+                  branches on backend payload (Stage 3B-1 direction
+                  inversion): the vendor sees `vendorPayoutAmount`
+                  (what they earn) when it's exposed; otherwise falls
+                  back to the legacy basePrice/vat/total breakdown for
+                  compat. Card chrome matches the admin panel exactly;
+                  only the values shown differ. */}
+              <div className="bg-neutral-800 rounded-xl p-4">
+                <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-luxury-gold" /> Pricing
+                </h3>
                 {selectedBooking.pricing.vendorPayoutAmount != null ? (
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-base font-semibold">
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between pt-1 font-semibold">
                       <span className="text-white">Your Payout</span>
                       <span className="text-luxury-gold">
                         SAR{" "}
                         {Number(
                           selectedBooking.pricing.vendorPayoutAmount,
-                        ).toFixed(2)}
+                        ).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
                       </span>
                     </div>
                     <p className="text-[11px] text-gray-400 leading-snug">
@@ -2403,26 +2447,41 @@ export default function VendorBookings({
                     </p>
                   </div>
                 ) : (
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-gray-400">Base Price</span>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Base Price</span>
                       <span className="text-white">
                         SAR{" "}
-                        {Number(selectedBooking.pricing.basePrice).toFixed(2)}
+                        {Number(
+                          selectedBooking.pricing.basePrice,
+                        ).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
                       </span>
                     </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-gray-400">VAT (15%)</span>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">VAT (15%)</span>
                       <span className="text-white">
                         SAR{" "}
-                        {Number(selectedBooking.pricing.vatAmount).toFixed(2)}
+                        {Number(
+                          selectedBooking.pricing.vatAmount,
+                        ).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
                       </span>
                     </div>
-                    <div className="flex justify-between text-base font-semibold pt-2 border-t border-luxury-gold/20">
+                    <div className="flex justify-between pt-2 border-t border-neutral-700 font-semibold">
                       <span className="text-white">Total</span>
                       <span className="text-luxury-gold">
                         SAR{" "}
-                        {Number(selectedBooking.pricing.totalPrice).toFixed(2)}
+                        {Number(
+                          selectedBooking.pricing.totalPrice,
+                        ).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
                       </span>
                     </div>
                   </div>
