@@ -59,11 +59,14 @@ export const getDashboardSummary = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: mStart, lte: mEnd },
         },
-        _sum: { totalPrice: true },
+        // Vendor earnings = sum of per-booking payout admin owes them.
+        // NOT the partner-facing totalPrice (which includes admin's
+        // margin). See Booking.vendorPayoutAmount in schema.prisma.
+        _sum: { vendorPayoutAmount: true },
       });
       monthlyEarnings.push({
         month: label,
-        amount: Number(agg._sum.totalPrice || 0),
+        amount: Number(agg._sum.vendorPayoutAmount || 0),
       });
     }
 
@@ -332,12 +335,14 @@ export const getRecentBookings = asyncWrapper(
           tripDate: true,
           tripTime: true,
           vehicleClass: true,
-          totalPrice: true,
-          // Vendor cares about their payout, not the customer's
-          // total price. Surfaced alongside totalPrice — the row
-          // can show vendorPayoutAmount as the headline number for
-          // the vendor; totalPrice is left here in case anything
-          // downstream still expects it.
+          // Vendor's per-booking payout — the only price surface the
+          // vendor sees. Partner-facing totalPrice is NOT selected;
+          // Booking.vendorId is only ever set alongside
+          // vendorPayoutAmount in the same admin/vendor writes (see
+          // admin/booking.controller and vendor/bookings.controller),
+          // so the fallback path was unreachable — and even as dead
+          // code, the field would leak the partner rate in the JSON
+          // response.
           vendorPayoutAmount: true,
           status: true,
           // source / partner intentionally not selected — vendor-facing
@@ -363,7 +368,6 @@ export const getRecentBookings = asyncWrapper(
       tripDate: b.tripDate,
       tripTime: b.tripTime,
       vehicleClass: b.vehicleClass,
-      totalPrice: Number(b.totalPrice),
       vendorPayoutAmount: b.vendorPayoutAmount
         ? Number(b.vendorPayoutAmount)
         : null,
@@ -549,7 +553,10 @@ export const getPendingPayouts = asyncWrapper(
         status: "COMPLETED",
         tripDate: { gte: prevMonthStart, lte: prevMonthEnd },
       },
-      _sum: { totalPrice: true },
+      // Vendor's payout-eligible amount for the period — sum of what
+      // admin owes them per booking. See earnings/analytics for the
+      // same treatment.
+      _sum: { vendorPayoutAmount: true },
       _count: { id: true },
     });
 
@@ -581,7 +588,7 @@ export const getPendingPayouts = asyncWrapper(
             month: "long",
             year: "numeric",
           }),
-          amount: Number(lastMonthBookings._sum.totalPrice || 0),
+          amount: Number(lastMonthBookings._sum.vendorPayoutAmount || 0),
           bookingCount: lastMonthBookings._count.id,
           isPaid: existingPayout?.status === "PAID",
           payoutId: existingPayout?.id || null,

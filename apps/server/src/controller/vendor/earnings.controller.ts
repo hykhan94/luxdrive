@@ -99,7 +99,7 @@ export const getEarningsSummary = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: currentMonthStart, lte: currentMonthEnd },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
         _count: { id: true },
       }),
       prisma.booking.aggregate({
@@ -108,7 +108,7 @@ export const getEarningsSummary = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: prevMonthStart, lte: prevMonthEnd },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
         _count: { id: true },
       }),
       // Last-month payout status. Was: VendorReceipt for vendor's own
@@ -152,15 +152,21 @@ export const getEarningsSummary = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: ytdStart, lte: ytdEnd },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
         _count: { id: true },
       }),
     ]);
 
     // === Tile 1 + 2 derived data ===
-    const currentRevenue = Number(currentMonthEarnings._sum.totalPrice || 0);
+    // All revenue figures are vendor-payout-based (what admin owes),
+    // not partner-facing totalPrice. Swap is Stage 4 in the payment-
+    // direction refactor — see the invoice section further down for
+    // the matching per-booking treatment.
+    const currentRevenue = Number(
+      currentMonthEarnings._sum.vendorPayoutAmount || 0,
+    );
     const currentRides = currentMonthEarnings._count.id;
-    const prevRevenue = Number(prevMonthEarnings._sum.totalPrice || 0);
+    const prevRevenue = Number(prevMonthEarnings._sum.vendorPayoutAmount || 0);
     const prevRides = prevMonthEarnings._count.id;
 
     // Month-over-month delta. Only meaningful when prev > 0 — otherwise
@@ -229,7 +235,7 @@ export const getEarningsSummary = asyncWrapper(
     );
 
     // === Tile 4 derived data ===
-    const ytdRevenue = Number(ytdEarnings._sum.totalPrice || 0);
+    const ytdRevenue = Number(ytdEarnings._sum.vendorPayoutAmount || 0);
     const ytdRides = ytdEarnings._count.id;
     // Monthly average: divide by elapsed months in current year (so Jan
     // shows the actual Jan figure, not Jan/12). Round to integer for
@@ -473,12 +479,11 @@ export const getReceiptDetail = asyncWrapper(
         tripDate: true,
         tripTime: true,
         vehicleClass: true,
-        basePrice: true,
-        vatAmount: true,
-        totalPrice: true,
         // Vendor's per-booking payout — what admin agreed to pay this
         // vendor for the booking. This is the amount that actually
-        // appears in their payout total.
+        // appears in their payout total. Partner-facing basePrice/
+        // vatAmount/totalPrice are NOT selected — they would leak the
+        // partner rate through the invoice endpoint.
         vendorPayoutAmount: true,
         // source / partner intentionally not selected — vendor-facing
         // responses must not carry booking-origin attribution.
@@ -513,18 +518,26 @@ export const getReceiptDetail = asyncWrapper(
       paymentProofUrl = await getReadUrl(receipt.receiptUrl);
     }
 
-    // Totals across booked rides for this period. Vendor's payout
-    // total = sum of vendorPayoutAmount (the per-booking admin-
-    // offered price). subTotal/totalVat/grandTotal continue to reflect
-    // BOOKING values (partner-facing prices) — useful for admin's
-    // settlement reconciliation but should not be displayed prominently
-    // to the vendor in the UI (Stage 4 task).
-    const subTotal = bookings.reduce((sum, b) => sum + Number(b.basePrice), 0);
-    const totalVat = bookings.reduce((sum, b) => sum + Number(b.vatAmount), 0);
-    const grandTotal = bookings.reduce(
-      (sum, b) => sum + Number(b.totalPrice),
-      0,
-    );
+    // Totals across booked rides for this period. Vendor's payout is
+    // stored VAT-inclusive on Booking.vendorPayoutAmount; break each
+    // booking down as base = payout / 1.15, vat = payout − base.
+    // Previously used partner-facing basePrice/vatAmount/totalPrice
+    // (see prior comment on this block) which surfaced the partner's
+    // billed amount instead of the vendor's own entitled payout.
+    // Stage 4 fix.
+    const perBookingSplits = bookings.map((b) => {
+      const payoutTotal = b.vendorPayoutAmount
+        ? Number(b.vendorPayoutAmount)
+        : 0;
+      const payoutBase =
+        payoutTotal > 0 ? Math.round((payoutTotal / 1.15) * 100) / 100 : 0;
+      const payoutVat = Math.round((payoutTotal - payoutBase) * 100) / 100;
+      return { id: b.id, payoutBase, payoutVat, payoutTotal };
+    });
+    const splitById = new Map(perBookingSplits.map((s) => [s.id, s]));
+    const subTotal = perBookingSplits.reduce((s, p) => s + p.payoutBase, 0);
+    const totalVat = perBookingSplits.reduce((s, p) => s + p.payoutVat, 0);
+    const grandTotal = perBookingSplits.reduce((s, p) => s + p.payoutTotal, 0);
 
     res.json({
       success: true,
@@ -561,24 +574,31 @@ export const getReceiptDetail = asyncWrapper(
           bankName: "—",
           iban: "—",
         },
-        bookings: bookings.map((b) => ({
-          id: b.id,
-          bookingRef: b.bookingRef,
-          guestName: b.guestName || "—",
-          route: b.route || `${b.pickupAddress} → ${b.dropoffAddress}`,
-          tripDate: b.tripDate,
-          tripTime: b.tripTime,
-          vehicleClass: b.vehicleClass,
-          basePrice: Number(b.basePrice),
-          vatAmount: Number(b.vatAmount),
-          totalPrice: Number(b.totalPrice),
-          // source / partnerName intentionally omitted — vendor-facing
-          // responses don't surface booking origin. See
-          // vendor/bookings.controller for the full rationale.
-          driverName: b.driver
-            ? `${b.driver.firstName} ${b.driver.lastName}`
-            : null,
-        })),
+        bookings: bookings.map((b) => {
+          const split = splitById.get(b.id)!;
+          return {
+            id: b.id,
+            bookingRef: b.bookingRef,
+            guestName: b.guestName || "—",
+            route: b.route || `${b.pickupAddress} → ${b.dropoffAddress}`,
+            tripDate: b.tripDate,
+            tripTime: b.tripTime,
+            vehicleClass: b.vehicleClass,
+            // Field names retained (basePrice/vatAmount/totalPrice)
+            // so the vendor-facing frontend consumes them unchanged.
+            // Values now reflect the vendor's payout, not the
+            // partner-facing booking total. VAT-inclusive split.
+            basePrice: split.payoutBase,
+            vatAmount: split.payoutVat,
+            totalPrice: split.payoutTotal,
+            // source / partnerName intentionally omitted — vendor-facing
+            // responses don't surface booking origin. See
+            // vendor/bookings.controller for the full rationale.
+            driverName: b.driver
+              ? `${b.driver.firstName} ${b.driver.lastName}`
+              : null,
+          };
+        }),
         totals: {
           subTotal: Math.round(subTotal * 100) / 100,
           vatAmount: Math.round(totalVat * 100) / 100,
@@ -670,15 +690,35 @@ export const downloadReceiptPdf = asyncWrapper(
         tripDate: true,
         tripTime: true,
         vehicleClass: true,
-        basePrice: true,
-        vatAmount: true,
-        totalPrice: true,
+        // Vendor payout is the source of truth for the receipt.
+        // Partner-facing basePrice/vatAmount/totalPrice are NOT
+        // selected — they would leak the partner rate into a
+        // downloadable file.
+        vendorPayoutAmount: true,
       },
     });
 
-    const subTotal = bookings.reduce((s, b) => s + Number(b.basePrice), 0);
-    const totalVat = bookings.reduce((s, b) => s + Number(b.vatAmount), 0);
-    const grandTotal = bookings.reduce((s, b) => s + Number(b.totalPrice), 0);
+    // VAT-inclusive per-booking split, same rules as the JSON invoice
+    // endpoint. Field names retained on the rendered rows so the
+    // receipt HTML template didn't need any structural change.
+    const bookingsWithSplit = bookings.map((b) => {
+      const payoutTotal = b.vendorPayoutAmount
+        ? Number(b.vendorPayoutAmount)
+        : 0;
+      const payoutBase =
+        payoutTotal > 0 ? Math.round((payoutTotal / 1.15) * 100) / 100 : 0;
+      const payoutVat = Math.round((payoutTotal - payoutBase) * 100) / 100;
+      return {
+        ...b,
+        basePrice: payoutBase,
+        vatAmount: payoutVat,
+        totalPrice: payoutTotal,
+      };
+    });
+
+    const subTotal = bookingsWithSplit.reduce((s, b) => s + b.basePrice, 0);
+    const totalVat = bookingsWithSplit.reduce((s, b) => s + b.vatAmount, 0);
+    const grandTotal = bookingsWithSplit.reduce((s, b) => s + b.totalPrice, 0);
 
     const periodEndDate = new Date(receipt.periodEnd);
     const dueDate = new Date(
@@ -699,7 +739,7 @@ export const downloadReceiptPdf = asyncWrapper(
       displayStatus = "PENDING";
     }
 
-    const html = buildReceiptHtml(receipt, vendorFull, bookings, {
+    const html = buildReceiptHtml(receipt, vendorFull, bookingsWithSplit, {
       subTotal,
       totalVat,
       grandTotal,

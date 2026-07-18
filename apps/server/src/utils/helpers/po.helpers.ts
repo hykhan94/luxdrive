@@ -121,6 +121,25 @@ export function buildPOHtml(
   const peakMultiplier = Number(booking.peakMultiplier);
   const peakSurcharge = basePrice - basePrice / peakMultiplier;
 
+  // Vendor perspective — swap partner-facing numbers for the
+  // vendor's own payout. `vendorPayoutAmount` is stored VAT-inclusive:
+  //   base = payout / 1.15
+  //   vat  = payout − base
+  //   total = payout
+  // Peak surcharge is a partner-facing concept (partners pay more
+  // during peak); vendor gets a flat locked payout, so no surcharge
+  // line for them. NULL payout falls back to zero so the document
+  // still renders — happens only in the edge case where a vendor
+  // downloads a PO for a booking that had a payout offer withdrawn.
+  const vendorPayoutTotal =
+    booking.vendorPayoutAmount != null ? Number(booking.vendorPayoutAmount) : 0;
+  const vendorPayoutBase =
+    vendorPayoutTotal > 0
+      ? Math.round((vendorPayoutTotal / 1.15) * 100) / 100
+      : 0;
+  const vendorPayoutVat =
+    Math.round((vendorPayoutTotal - vendorPayoutBase) * 100) / 100;
+
   const tripDateObj = new Date(booking.tripDate);
   const tripDate = tripDateObj.toLocaleDateString("en-SA", {
     weekday: "long",
@@ -370,10 +389,20 @@ export function buildPOHtml(
     <table class="pricing-table">
       <thead><tr><th>Description</th><th class="amount">Amount (SAR)</th></tr></thead>
       <tbody>
+        ${
+          perspective === "vendor"
+            ? `
+        <tr><td>Service Payout — ${vehicleClassLabel}</td><td class="amount">${vendorPayoutBase.toFixed(2)}</td></tr>
+        <tr><td>VAT (15%)</td><td class="amount">${vendorPayoutVat.toFixed(2)}</td></tr>
+        <tr class="total-row"><td>Total Payout</td><td class="amount">SAR ${vendorPayoutTotal.toFixed(2)}</td></tr>
+        `
+            : `
         <tr><td>${pricingDescription}</td><td class="amount">${(basePrice / peakMultiplier).toFixed(2)}</td></tr>
         ${peakMultiplier > 1 ? `<tr><td>Peak Pricing Surcharge (×${peakMultiplier})</td><td class="amount">${peakSurcharge.toFixed(2)}</td></tr>` : ""}
         <tr><td>VAT (15%)</td><td class="amount">${vatAmount.toFixed(2)}</td></tr>
         <tr class="total-row"><td>Total</td><td class="amount">SAR ${totalPrice.toFixed(2)}</td></tr>
+        `
+        }
       </tbody>
     </table>
   </div>

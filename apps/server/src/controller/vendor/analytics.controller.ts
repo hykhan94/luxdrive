@@ -495,7 +495,7 @@ export const getAnalytics = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: currentStart, lte: currentEnd },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
       }),
       // Tile 2: Earnings — previous period
       prisma.booking.aggregate({
@@ -504,7 +504,7 @@ export const getAnalytics = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: previousStart, lte: previousEnd },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
       }),
       // Tile 4: All bookings — current (for completion rate)
       prisma.booking.count({
@@ -572,8 +572,12 @@ export const getAnalytics = asyncWrapper(
       }),
     ]);
 
-    const currentEarnings = Number(currentEarningsAgg._sum.totalPrice || 0);
-    const previousEarnings = Number(previousEarningsAgg._sum.totalPrice || 0);
+    const currentEarnings = Number(
+      currentEarningsAgg._sum.vendorPayoutAmount || 0,
+    );
+    const previousEarnings = Number(
+      previousEarningsAgg._sum.vendorPayoutAmount || 0,
+    );
     const currentAvgTrip =
       currentCompletedTrips > 0 ? currentEarnings / currentCompletedTrips : 0;
     const previousAvgTrip =
@@ -658,14 +662,14 @@ export const getAnalytics = asyncWrapper(
           status: "COMPLETED",
           tripDate: { gte: bucket.start, lte: bucket.end },
         },
-        _sum: { totalPrice: true },
+        _sum: { vendorPayoutAmount: true },
         _count: { id: true },
       });
 
       monthlyEarnings.push({
         month: bucket.label,
         monthKey: bucket.monthKey,
-        amount: Number(result._sum.totalPrice || 0),
+        amount: Number(result._sum.vendorPayoutAmount || 0),
         rides: result._count.id,
       });
     }
@@ -864,7 +868,7 @@ export const getAnalytics = asyncWrapper(
         const stats = await prisma.booking.aggregate({
           where: { vehicleId: v.id, status: "COMPLETED" },
           _count: { id: true },
-          _sum: { totalPrice: true },
+          _sum: { vendorPayoutAmount: true },
         });
 
         return {
@@ -875,7 +879,7 @@ export const getAnalytics = asyncWrapper(
           categoryLabel: VEHICLE_CLASS_LABELS[v.category] || v.category,
           isActive: v.isActive,
           totalTrips: stats._count.id,
-          totalEarnings: Number(stats._sum.totalPrice || 0),
+          totalEarnings: Number(stats._sum.vendorPayoutAmount || 0),
           rating: null as number | null, // Placeholder — review system not yet implemented
           performance:
             stats._count.id > 0
@@ -906,7 +910,7 @@ export const getAnalytics = asyncWrapper(
         driverId: { not: null },
       },
       _count: { id: true },
-      _sum: { totalPrice: true },
+      _sum: { vendorPayoutAmount: true },
       orderBy: { _count: { id: "desc" } },
       take: 5,
     });
@@ -947,7 +951,7 @@ export const getAnalytics = asyncWrapper(
           photoUrl: signedPhotoUrl,
           rating: driver?.rating ? Number(driver.rating) : null,
           totalTrips: stat._count.id,
-          totalEarnings: Number(stat._sum.totalPrice || 0),
+          totalEarnings: Number(stat._sum.vendorPayoutAmount || 0),
         };
       }),
     );
@@ -1054,15 +1058,25 @@ export const exportAnalyticsReport = asyncWrapper(
         tripTime: true,
         city: true,
         vehicleClass: true,
-        basePrice: true,
-        vatAmount: true,
-        totalPrice: true,
+        // Vendor payout is the source of truth for CSV export;
+        // partner-facing basePrice/vatAmount/totalPrice are omitted
+        // to prevent partner rate leakage in the exported file.
+        vendorPayoutAmount: true,
         // source / partner intentionally not selected — see comment
         // in vendor/bookings.controller.ts. The vendor analytics CSV
         // export shouldn't carry booking-origin attribution either.
         driver: { select: { firstName: true, lastName: true } },
         vehicle: { select: { make: true, model: true, plateNumber: true } },
       },
+    });
+
+    // Per-booking VAT-inclusive split of vendorPayoutAmount. Used for
+    // both the CSV rows and the totals footer so the two agree.
+    const splits = bookings.map((b) => {
+      const total = b.vendorPayoutAmount ? Number(b.vendorPayoutAmount) : 0;
+      const base = total > 0 ? Math.round((total / 1.15) * 100) / 100 : 0;
+      const vat = Math.round((total - base) * 100) / 100;
+      return { base, vat, total };
     });
 
     // "Source" column intentionally omitted — same rationale as the
@@ -1083,7 +1097,7 @@ export const exportAnalyticsReport = asyncWrapper(
       "Vehicle",
     ];
 
-    const rows = bookings.map((b) => [
+    const rows = bookings.map((b, i) => [
       b.bookingRef,
       b.guestName || "",
       b.guestPhone || "",
@@ -1092,9 +1106,9 @@ export const exportAnalyticsReport = asyncWrapper(
       b.tripTime,
       b.city,
       b.vehicleClass,
-      Number(b.basePrice).toFixed(2),
-      Number(b.vatAmount).toFixed(2),
-      Number(b.totalPrice).toFixed(2),
+      splits[i].base.toFixed(2),
+      splits[i].vat.toFixed(2),
+      splits[i].total.toFixed(2),
       b.driver ? `${b.driver.firstName} ${b.driver.lastName}` : "",
       b.vehicle
         ? `${b.vehicle.make} ${b.vehicle.model} (${b.vehicle.plateNumber})`
@@ -1102,9 +1116,9 @@ export const exportAnalyticsReport = asyncWrapper(
     ]);
 
     // Add totals
-    const subTotal = bookings.reduce((s, b) => s + Number(b.basePrice), 0);
-    const totalVat = bookings.reduce((s, b) => s + Number(b.vatAmount), 0);
-    const grandTotal = bookings.reduce((s, b) => s + Number(b.totalPrice), 0);
+    const subTotal = splits.reduce((s, x) => s + x.base, 0);
+    const totalVat = splits.reduce((s, x) => s + x.vat, 0);
+    const grandTotal = splits.reduce((s, x) => s + x.total, 0);
 
     rows.push([]);
     rows.push([

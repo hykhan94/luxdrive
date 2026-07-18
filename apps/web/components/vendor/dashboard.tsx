@@ -82,11 +82,10 @@ interface RecentBooking {
   tripDate: string;
   tripTime: string;
   vehicleClass: string;
-  totalPrice: number;
-  // Vendor-side bookings carry the *vendor's* payout, not the
-  // customer's total price. We surface payout as the headline
-  // figure in the row; totalPrice is kept around for fallback
-  // until every consumer is migrated.
+  // Vendor's payout — the only price surface exposed on the vendor
+  // side. Partner-facing totalPrice is not part of this shape;
+  // backend response doesn't include it (see dashboard.controller
+  // recent-bookings SELECT for the rationale).
   vendorPayoutAmount: number | null;
   status: string;
   // No isPartnerBooking / partnerName — vendor-facing responses
@@ -730,15 +729,16 @@ export default function VendorDashboard({
           <div className="space-y-3">
             {recentBookings.slice(0, 4).map((booking) => {
               const isHourly = booking.tripType === "HOURLY";
-              // Vendor headline figure prefers payout (what they
-              // earn) over totalPrice (what the customer paid).
-              // Fall through to totalPrice if payout isn't set
-              // yet (booking still in PENDING and never offered).
-              const headlineAmount =
-                booking.vendorPayoutAmount ?? booking.totalPrice;
-              const amountLabel = booking.vendorPayoutAmount
-                ? "Payout"
-                : "Total";
+              // Vendor headline figure is the payout only. Under
+              // current backend rules a booking on the vendor's list
+              // always has a payout set (Booking.vendorId is only
+              // written alongside vendorPayoutAmount in the same
+              // update — see admin/booking.controller and
+              // vendor/bookings.controller). We render an em-dash for
+              // the theoretical null case rather than falling back to
+              // the partner's totalPrice, which would leak the
+              // partner rate.
+              const hasPayout = booking.vendorPayoutAmount != null;
               return (
                 <div
                   key={booking.id}
@@ -763,9 +763,11 @@ export default function VendorDashboard({
                     </div>
                     <div className="text-right flex-shrink-0">
                       <p className="text-sm font-semibold text-luxury-gold">
-                        SAR {Number(headlineAmount).toLocaleString()}
+                        {hasPayout
+                          ? `SAR ${Number(booking.vendorPayoutAmount).toLocaleString()}`
+                          : "—"}
                       </p>
-                      <p className="text-[10px] text-gray-500">{amountLabel}</p>
+                      <p className="text-[10px] text-gray-500">Payout</p>
                     </div>
                   </div>
 
