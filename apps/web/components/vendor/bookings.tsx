@@ -68,19 +68,11 @@ interface Booking {
   vehicleClass: string;
   city: string;
   passengers: number;
-  basePrice: number;
-  vatAmount: number;
-  totalPrice: number;
-  // Stage 3B-1: the payout admin denormalized onto the booking when
-  // the offer was accepted (or is currently outstanding). Optional
-  // until backend exposes it on this endpoint — when present it's the
-  // primary money figure the vendor should see. The partner-side
-  // totalPrice above stays in the response for compat; under spec
-  // ("vendor never sees partner price") it should eventually be
-  // dropped from this endpoint and the frontend should fall back to
-  // vendorPayoutAmount exclusively. TODO(backend): expose
-  // vendorPayoutAmount in the vendor bookings list response (it's
-  // already on the booking row).
+  // Vendor's own payout — the only pricing surface exposed on this
+  // interface. Partner-facing basePrice/vatAmount/totalPrice were
+  // removed with the Stage 4 payout refactor (see the vendor
+  // bookings.controller SELECT). Null on old bookings that pre-date
+  // the vendorPayoutAmount column; renderer shows "—" in that case.
   vendorPayoutAmount?: number | null;
   status: string;
   statusLabel: string;
@@ -163,10 +155,8 @@ interface BookingDetailData {
     rating: number | null;
   } | null;
   pricing: {
-    basePrice: number;
-    vatAmount: number;
-    totalPrice: number;
-    // See same note on Booking.vendorPayoutAmount above.
+    // Vendor's payout only. Partner-facing basePrice/vatAmount/
+    // totalPrice removed with Stage 4 payout refactor.
     vendorPayoutAmount?: number | null;
   };
   notes: string | null;
@@ -420,9 +410,6 @@ function detailToBookingShape(d: BookingDetailData): Booking {
     vehicleClass: d.vehicleClass,
     city: d.trip.city,
     passengers: d.passengers,
-    basePrice: d.pricing.basePrice,
-    vatAmount: d.pricing.vatAmount,
-    totalPrice: d.pricing.totalPrice,
     vendorPayoutAmount: d.pricing.vendorPayoutAmount ?? null,
     status: d.status,
     statusLabel: d.statusLabel,
@@ -1458,11 +1445,32 @@ export default function VendorBookings({
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const params: Record<string, any> = { tab: activeTab };
+      const params: Record<string, string> = { tab: activeTab };
       if (dateFrom) params.startDate = dateFrom;
       if (dateTo) params.endDate = dateTo;
 
-      await vendorApi.exportBookingsCsv(params);
+      // Bypass the shared apiFetch wrapper — it discards non-JSON
+      // response bodies, so a text/csv response would be silently
+      // dropped and the user would see the success toast with no
+      // file. Match the pattern used in partner/bookings-panel.tsx:
+      // direct fetch, read as blob, trigger a synthetic <a download>
+      // click, revoke the object URL. Cookies are still forwarded via
+      // credentials: "include" so auth works unchanged.
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"}/api/v1/vendor/bookings/export/csv?${new URLSearchParams(params).toString()}`,
+        { credentials: "include" },
+      );
+
+      if (!response.ok) throw new Error("Export failed");
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vendor-bookings-${activeTab}-${new Date().toISOString().split("T")[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
       showNotification("success", "CSV export downloaded");
     } catch (err: any) {
       showNotification("error", err.message || "Export failed");
@@ -1861,12 +1869,10 @@ export default function VendorBookings({
                     <Clock className="w-3.5 h-3.5 ml-2" />
                     <span>{booking.tripTime}</span>
                   </div>
-                  {/* Money display: prefer vendorPayoutAmount (what
-                      admin offered/agreed with this vendor) when
-                      backend exposes it; otherwise fall back to
-                      totalPrice for backwards-compat. For offer-state
-                      bookings the payout is the figure the vendor
-                      needs to see when deciding whether to accept. */}
+                  {/* Money display — vendorPayoutAmount is the only
+                      figure the vendor sees. Renders "—" for the
+                      theoretical null case (booking pre-dating the
+                      payout column); no fallback to partner rate. */}
                   {booking.vendorPayoutAmount != null ? (
                     <div className="text-right">
                       <p className="text-[10px] text-gray-500 leading-none">
@@ -1878,9 +1884,7 @@ export default function VendorBookings({
                       </span>
                     </div>
                   ) : (
-                    <span className="text-sm font-medium text-white">
-                      SAR {Number(booking.totalPrice).toLocaleString()}
-                    </span>
+                    <span className="text-sm font-medium text-gray-500">—</span>
                   )}
                 </div>
                 <div className="pt-3 border-t border-neutral-800">
@@ -1978,9 +1982,7 @@ export default function VendorBookings({
                             </p>
                           </>
                         ) : (
-                          <span className="text-white">
-                            SAR {Number(booking.totalPrice).toLocaleString()}
-                          </span>
+                          <span className="text-gray-500">—</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -2469,13 +2471,12 @@ export default function VendorBookings({
                 )}
               </div>
 
-              {/* Pricing card — admin-style icon header. Content
-                  branches on backend payload (Stage 3B-1 direction
-                  inversion): the vendor sees `vendorPayoutAmount`
-                  (what they earn) when it's exposed; otherwise falls
-                  back to the legacy basePrice/vat/total breakdown for
-                  compat. Card chrome matches the admin panel exactly;
-                  only the values shown differ. */}
+              {/* Pricing card — admin-style icon header. Shows the
+                  vendor's payout only. Partner-facing base/VAT/total
+                  are no longer part of the vendor detail response
+                  (Stage 4 payout refactor). Null payout renders
+                  em-dash — should only occur on bookings that
+                  pre-date the vendorPayoutAmount column. */}
               <div className="bg-neutral-800 rounded-xl p-4">
                 <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
                   <Calendar className="w-4 h-4 text-luxury-gold" /> Pricing
@@ -2501,44 +2502,7 @@ export default function VendorBookings({
                     </p>
                   </div>
                 ) : (
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">Base Price</span>
-                      <span className="text-white">
-                        SAR{" "}
-                        {Number(
-                          selectedBooking.pricing.basePrice,
-                        ).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">VAT (15%)</span>
-                      <span className="text-white">
-                        SAR{" "}
-                        {Number(
-                          selectedBooking.pricing.vatAmount,
-                        ).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </span>
-                    </div>
-                    <div className="flex justify-between pt-2 border-t border-neutral-700 font-semibold">
-                      <span className="text-white">Total</span>
-                      <span className="text-luxury-gold">
-                        SAR{" "}
-                        {Number(
-                          selectedBooking.pricing.totalPrice,
-                        ).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </span>
-                    </div>
-                  </div>
+                  <p className="text-sm text-gray-500">—</p>
                 )}
               </div>
 
@@ -3073,14 +3037,14 @@ export default function VendorBookings({
                     Your Payout
                   </span>
                   <span className="text-base font-semibold text-luxury-gold">
-                    SAR{" "}
-                    {Number(
-                      assigningBooking.vendorPayoutAmount ??
-                        assigningBooking.totalPrice,
-                    ).toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {assigningBooking.vendorPayoutAmount != null
+                      ? `SAR ${Number(
+                          assigningBooking.vendorPayoutAmount,
+                        ).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}`
+                      : "—"}
                   </span>
                 </div>
               </div>

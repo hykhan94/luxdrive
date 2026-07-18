@@ -256,17 +256,14 @@ export const getBookingsList = asyncWrapper(
           city: true,
           vehicleClass: true,
           passengers: true,
-          basePrice: true,
-          vatAmount: true,
-          totalPrice: true,
-          // Stage 3B-1: denormalized payout amount admin agreed with
-          // this vendor for the booking. Stage 7 surfaces this to the
-          // frontend so the vendor sees what they're being paid
-          // instead of the partner-facing totalPrice. The legacy
-          // basePrice/vatAmount/totalPrice fields are kept in the
-          // response for backwards-compat with older clients; planned
-          // removal once all vendors are on a build that prefers
-          // vendorPayoutAmount.
+          // Vendor's per-booking payout — the only pricing surface
+          // returned to the vendor. Partner-facing basePrice/
+          // vatAmount/totalPrice are NOT selected: even though older
+          // frontend builds fell back to totalPrice when payout was
+          // null, that fallback is unreachable in practice
+          // (Booking.vendorId is only written alongside
+          // vendorPayoutAmount in the same admin/vendor updates) and
+          // shipping the field at all would leak the partner rate.
           vendorPayoutAmount: true,
           status: true,
           // source / partner intentionally not selected — vendor-facing
@@ -344,13 +341,10 @@ export const getBookingsList = asyncWrapper(
         city: b.city,
         vehicleClass: b.vehicleClass,
         passengers: b.passengers,
-        basePrice: Number(b.basePrice),
-        vatAmount: Number(b.vatAmount),
-        totalPrice: Number(b.totalPrice),
-        // Null when admin hasn't offered yet (PENDING booking with no
-        // BookingAssignmentOffer row), or when the booking pre-dates
-        // Stage 2 schema changes. Frontend handles either case by
-        // falling back to totalPrice.
+        // vendorPayoutAmount is the only price surface exposed. Null
+        // is theoretically possible (booking pre-dating Stage 2 schema
+        // changes) — frontend renders "—" in that edge case rather
+        // than falling back to a partner amount.
         vendorPayoutAmount:
           b.vendorPayoutAmount != null ? Number(b.vendorPayoutAmount) : null,
         status: b.status,
@@ -605,14 +599,10 @@ export const getBookingDetail = asyncWrapper(
             }
           : null,
 
-        // Pricing
+        // Pricing — vendor sees their payout only. Partner-facing
+        // basePrice/vatAmount/totalPrice are NOT exposed (see the list
+        // endpoint select for the same-shape rationale).
         pricing: {
-          basePrice: Number(booking.basePrice),
-          vatAmount: Number(booking.vatAmount),
-          totalPrice: Number(booking.totalPrice),
-          // See same note in getBookings — vendor-specific payout
-          // surfaces here so the detail modal can show "Your Payout"
-          // instead of the partner price breakdown.
           vendorPayoutAmount:
             booking.vendorPayoutAmount != null
               ? Number(booking.vendorPayoutAmount)
@@ -1566,9 +1556,11 @@ export const exportBookingsCsv = asyncWrapper(
         city: true,
         vehicleClass: true,
         passengers: true,
-        basePrice: true,
-        vatAmount: true,
-        totalPrice: true,
+        // Vendor payout drives the CSV pricing columns; partner-facing
+        // basePrice/vatAmount/totalPrice are NOT selected to prevent
+        // partner rate leakage through the exported file. Matches the
+        // treatment on analytics CSV export + earnings receipt HTML.
+        vendorPayoutAmount: true,
         status: true,
         // source / partner intentionally not selected for the CSV
         // export — see the "Source column intentionally omitted"
@@ -1577,6 +1569,18 @@ export const exportBookingsCsv = asyncWrapper(
         driver: { select: { firstName: true, lastName: true } },
         vehicle: { select: { make: true, model: true, plateNumber: true } },
       },
+    });
+
+    // Per-booking VAT-inclusive split of vendorPayoutAmount. `Base` is
+    // exclusive of VAT (payout / 1.15), `VAT` is the 15% component
+    // (payout − base), `Total` is the payout itself. Null payout →
+    // zeroes so a booking with no offer ever sent (edge case)
+    // renders as three 0.00 cells rather than blowing up formatting.
+    const splits = bookings.map((b) => {
+      const total = b.vendorPayoutAmount ? Number(b.vendorPayoutAmount) : 0;
+      const base = total > 0 ? Math.round((total / 1.15) * 100) / 100 : 0;
+      const vat = Math.round((total - base) * 100) / 100;
+      return { base, vat, total };
     });
 
     // Source column intentionally omitted — see list/detail response
@@ -1606,7 +1610,7 @@ export const exportBookingsCsv = asyncWrapper(
       "Created",
     ];
 
-    const rows = bookings.map((b) => [
+    const rows = bookings.map((b, i) => [
       b.bookingRef,
       b.guestName || "",
       b.guestPhone || "",
@@ -1620,9 +1624,9 @@ export const exportBookingsCsv = asyncWrapper(
       b.city,
       b.vehicleClass,
       b.passengers,
-      Number(b.basePrice).toFixed(2),
-      Number(b.vatAmount).toFixed(2),
-      Number(b.totalPrice).toFixed(2),
+      splits[i].base.toFixed(2),
+      splits[i].vat.toFixed(2),
+      splits[i].total.toFixed(2),
       STATUS_LABELS[b.status] || b.status,
       b.driver ? `${b.driver.firstName} ${b.driver.lastName}` : "",
       b.vehicle
