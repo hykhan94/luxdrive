@@ -1519,25 +1519,39 @@ export default function VendorManagementPanel({
     const isRejected = unresolved.some((c: any) =>
       c.comment?.startsWith?.("❌ Rejected:"),
     );
-    const prev = snapshot?.[fieldName];
-    // Snapshot must be a real populated object with this specific field
-    // present. Empty-object snapshot ({} — set by approveProfile flow)
-    // and null snapshot (first-ever submission) both fall through here
-    // and produce hasChanged=false, which is correct — no real previous
-    // value to diff against.
+    // Snapshot must be a real populated object. Empty-object snapshot
+    // ({} — set by approveProfile flow) and null snapshot (first-ever
+    // submission) both fall through here and produce hasChanged=false,
+    // which is correct — no real previous value to diff against.
     const snapshotIsPopulated =
       snapshot !== null &&
       snapshot !== undefined &&
       typeof snapshot === "object" &&
       Object.keys(snapshot).length > 0;
+    // Missing-snapshot-key fallback — if the snapshot doesn't carry
+    // this specific field (typical for scalar identity fields whose
+    // snapshot was written by an older code path, or any field added
+    // to the review flow after the snapshot was captured), treat the
+    // pre-value as empty. That way the vendor's non-empty edit still
+    // registers as a real change, admin sees the strikethrough diff,
+    // and the Accept / Reject buttons appear on addressed tiles.
+    const prevRaw = snapshot?.[fieldName];
+    const prev = snapshotIsPopulated && prevRaw === undefined ? "" : prevRaw;
     const hasChanged =
       snapshotIsPopulated && prev !== undefined && prev !== currentValue;
     const isAddressed = isRejected && hasChanged;
+    // Green "Accepted" — vendor changed the value and admin has
+    // resolved any unresolved comments on it (either explicitly via
+    // Accept, or implicitly if the change never had comments). Used
+    // to render an "✓ Accepted" badge instead of Accept/Reject buttons
+    // so admin sees at a glance that this field's cycle is closed.
+    const isAccepted = hasChanged && !hasComments && !isRejected;
     return {
       unresolved,
       hasComments,
       isRejected,
       isAddressed,
+      isAccepted,
       hasChanged,
       prev,
       current: currentValue,
@@ -3376,16 +3390,23 @@ export default function VendorManagementPanel({
                             >
                               <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5 flex items-center gap-1 flex-wrap">
                                 {f.label}
-                                {state.isAddressed && (
+                                {state.isAccepted && (
+                                  <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
+                                    ✓ ACCEPTED
+                                  </span>
+                                )}
+                                {state.isAddressed && !state.isAccepted && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
                                     ADDRESSED
                                   </span>
                                 )}
-                                {state.hasChanged && !state.isAddressed && (
-                                  <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
-                                    CHANGED
-                                  </span>
-                                )}
+                                {state.hasChanged &&
+                                  !state.isAddressed &&
+                                  !state.isAccepted && (
+                                    <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
+                                      CHANGED
+                                    </span>
+                                  )}
                                 {state.isRejected && !state.isAddressed && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[9px] font-medium">
                                     REJECTED
@@ -3490,19 +3511,19 @@ export default function VendorManagementPanel({
                                         ✕
                                       </button>
                                     </div>
-                                  ) : state.isAddressed ? (
-                                    // Field was rejected and the vendor has
-                                    // submitted a new value. Mirror the
-                                    // doc-card pattern: offer Accept (which
-                                    // resolves all unresolved comments on
-                                    // this field) and Reject (which reopens
-                                    // the rejection form to add a new
-                                    // comment). Without Accept here, admin
-                                    // had no way to clear the addressed
-                                    // state on info fields — only the
-                                    // global "Accept All" widget at the
-                                    // bottom of the modal could resolve
-                                    // them, which is unintuitive.
+                                  ) : state.isAccepted ? null : state.hasChanged ? (
+                                    // Vendor changed the field's value —
+                                    // either as an addressed rejection
+                                    // (isAddressed) or an unsolicited
+                                    // update (blue CHANGED state, from
+                                    // an approved vendor-initiated
+                                    // change request). Either way, admin
+                                    // needs to Accept the new value
+                                    // (which resolves any unresolved
+                                    // comments on the field) or Reject
+                                    // it (opens the rejection form for
+                                    // a new comment). Same UX as the
+                                    // doc-tile pattern below.
                                     <div className="flex items-center gap-2">
                                       <button
                                         onClick={async () => {
@@ -3587,6 +3608,12 @@ export default function VendorManagementPanel({
                             snapshot !== undefined &&
                             typeof snapshot === "object" &&
                             Object.keys(snapshot).length > 0;
+                          // Missing-snapshot-key fallback — legacy
+                          // snapshots may not carry every doc key; treat
+                          // undefined as empty so any current fileUrl
+                          // registers as a replacement.
+                          const normDoc = (v: any) =>
+                            v === undefined || v === null ? "" : String(v);
                           const prevPhotoUrl = snapshotIsPopulated
                             ? snapshot.photoUrl
                             : undefined;
@@ -3595,12 +3622,17 @@ export default function VendorManagementPanel({
                             : undefined;
                           const photoReplaced =
                             snapshotIsPopulated &&
-                            ((prevPhotoUrl !== undefined &&
-                              prevPhotoUrl !== driver.photoPath) ||
-                              (prevProfilePhotoDocUrl !== undefined &&
-                                prevProfilePhotoDocUrl !==
-                                  profilePhotoDoc?.filePath));
+                            (normDoc(prevPhotoUrl) !==
+                              normDoc(driver.photoPath) ||
+                              normDoc(prevProfilePhotoDocUrl) !==
+                                normDoc(profilePhotoDoc?.filePath));
                           const photoAddressed = photoRejected && photoReplaced;
+                          // Green "Accepted" state — replacement submitted
+                          // and admin has resolved all comments on it.
+                          const photoAccepted =
+                            photoReplaced &&
+                            !hasPhotoComments &&
+                            !photoRejected;
                           return (
                             <div
                               className={`p-3 rounded-xl border ${
@@ -3683,7 +3715,8 @@ export default function VendorManagementPanel({
                                 </div>
                               )}
                               {driver.status === "PENDING_REVIEW" &&
-                                (!photoRejected || photoAddressed) && (
+                                !photoAccepted &&
+                                (!photoRejected || photoReplaced) && (
                                   <div className="mt-2">
                                     {rejectingField === "photo" ? (
                                       <div className="flex gap-1.5">
@@ -3743,7 +3776,7 @@ export default function VendorManagementPanel({
                                       </div>
                                     ) : (
                                       <div className="flex items-center gap-2">
-                                        {photoAddressed && (
+                                        {photoReplaced && (
                                           <button
                                             onClick={async () => {
                                               for (const c of photoComments) {
@@ -3778,7 +3811,12 @@ export default function VendorManagementPanel({
                                     )}
                                   </div>
                                 )}
-                              {photoAddressed ? (
+                              {photoAccepted ? (
+                                <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Accepted
+                                </div>
+                              ) : photoAddressed ? (
                                 <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                   <CheckCircle2 className="w-3 h-3" />
                                   Vendor uploaded a new photo — review the
@@ -3814,11 +3852,15 @@ export default function VendorManagementPanel({
                           const prevIdFileUrl = idSnapshotIsPopulated
                             ? snapshot[idFieldKey]
                             : undefined;
+                          const normId = (v: any) =>
+                            v === undefined || v === null ? "" : String(v);
                           const idReplaced =
                             idSnapshotIsPopulated &&
-                            prevIdFileUrl !== undefined &&
-                            prevIdFileUrl !== idDocLocal?.filePath;
+                            normId(prevIdFileUrl) !==
+                              normId(idDocLocal?.filePath);
                           const idAddressed = idRejected && idReplaced;
+                          const idAccepted =
+                            idReplaced && !hasIdComments && !idRejected;
                           return (
                             <div
                               className={`p-3 rounded-xl border ${
@@ -3932,7 +3974,8 @@ export default function VendorManagementPanel({
                                 </div>
                               )}
                               {driver.status === "PENDING_REVIEW" &&
-                                (!idRejected || idAddressed) && (
+                                !idAccepted &&
+                                (!idRejected || idReplaced) && (
                                   <div className="mt-2">
                                     {rejectingField === idFieldKey ? (
                                       <div className="flex gap-1.5">
@@ -3990,7 +4033,7 @@ export default function VendorManagementPanel({
                                       </div>
                                     ) : (
                                       <div className="flex items-center gap-2">
-                                        {idAddressed && (
+                                        {idReplaced && (
                                           <button
                                             onClick={async () => {
                                               for (const c of idComments) {
@@ -4025,7 +4068,12 @@ export default function VendorManagementPanel({
                                     )}
                                   </div>
                                 )}
-                              {idAddressed ? (
+                              {idAccepted ? (
+                                <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Accepted
+                                </div>
+                              ) : idAddressed ? (
                                 <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                   <CheckCircle2 className="w-3 h-3" />
                                   Vendor uploaded a new document — review the
@@ -4061,11 +4109,15 @@ export default function VendorManagementPanel({
                           const prevLicFileUrl = licSnapshotIsPopulated
                             ? snapshot.DRIVING_LICENSE
                             : undefined;
+                          const normLic = (v: any) =>
+                            v === undefined || v === null ? "" : String(v);
                           const licReplaced =
                             licSnapshotIsPopulated &&
-                            prevLicFileUrl !== undefined &&
-                            prevLicFileUrl !== licDocLocal?.filePath;
+                            normLic(prevLicFileUrl) !==
+                              normLic(licDocLocal?.filePath);
                           const licAddressed = licRejected && licReplaced;
+                          const licAccepted =
+                            licReplaced && !hasLicComments && !licRejected;
                           return (
                             <div
                               className={`p-3 rounded-xl border col-span-2 sm:col-span-1 ${
@@ -4184,7 +4236,8 @@ export default function VendorManagementPanel({
                                 </div>
                               )}
                               {driver.status === "PENDING_REVIEW" &&
-                                (!licRejected || licAddressed) && (
+                                !licAccepted &&
+                                (!licRejected || licReplaced) && (
                                   <div className="mt-2">
                                     {rejectingField === "licenseDocument" ? (
                                       <div className="flex gap-1.5">
@@ -4242,7 +4295,7 @@ export default function VendorManagementPanel({
                                       </div>
                                     ) : (
                                       <div className="flex items-center gap-2">
-                                        {licAddressed && (
+                                        {licReplaced && (
                                           <button
                                             onClick={async () => {
                                               for (const c of licComments) {
@@ -4277,7 +4330,12 @@ export default function VendorManagementPanel({
                                     )}
                                   </div>
                                 )}
-                              {licAddressed ? (
+                              {licAccepted ? (
+                                <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Accepted
+                                </div>
+                              ) : licAddressed ? (
                                 <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                   <CheckCircle2 className="w-3 h-3" />
                                   Vendor uploaded a new document — review the
@@ -4579,16 +4637,23 @@ export default function VendorManagementPanel({
                             >
                               <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5 flex items-center gap-1 flex-wrap">
                                 {f.label}
-                                {state.isAddressed && (
+                                {state.isAccepted && (
+                                  <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
+                                    ✓ ACCEPTED
+                                  </span>
+                                )}
+                                {state.isAddressed && !state.isAccepted && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-medium">
                                     ADDRESSED
                                   </span>
                                 )}
-                                {state.hasChanged && !state.isAddressed && (
-                                  <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
-                                    CHANGED
-                                  </span>
-                                )}
+                                {state.hasChanged &&
+                                  !state.isAddressed &&
+                                  !state.isAccepted && (
+                                    <span className="ml-1.5 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[9px] font-medium">
+                                      CHANGED
+                                    </span>
+                                  )}
                                 {state.isRejected && !state.isAddressed && (
                                   <span className="ml-1.5 px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[9px] font-medium">
                                     REJECTED
@@ -4699,16 +4764,18 @@ export default function VendorManagementPanel({
                                         ✕
                                       </button>
                                     </div>
-                                  ) : state.isAddressed ? (
-                                    // Mirrors the driver-side fix and the
-                                    // existing vehicle-doc pattern: when
-                                    // the vendor has updated a previously-
-                                    // rejected field, admin needs Accept
-                                    // (resolves all unresolved comments)
-                                    // and Reject (reopens the form to add
-                                    // a new rejection comment) right next
-                                    // to the field — not just the global
-                                    // "Accept All" widget at the bottom.
+                                  ) : state.isAccepted ? null : state.hasChanged ? (
+                                    // Vendor changed the field's value —
+                                    // either as an addressed rejection
+                                    // (isAddressed) or an unsolicited
+                                    // update (blue CHANGED state, from
+                                    // an approved vendor-initiated
+                                    // change request). Either way, admin
+                                    // needs Accept (resolves any
+                                    // unresolved comments) or Reject
+                                    // (opens the form for a new rejection
+                                    // comment). Same UX as the doc-tile
+                                    // pattern below.
                                     <div className="flex items-center gap-2">
                                       <button
                                         onClick={async () => {

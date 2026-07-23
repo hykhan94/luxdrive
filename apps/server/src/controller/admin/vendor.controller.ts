@@ -1519,6 +1519,8 @@ const VALID_DRIVER_FIELDS = [
   "firstName",
   "lastName",
   "phone",
+  "nationalId",
+  "licenseNumber",
   // Individual doc-type enum values (used by the per-doc review UI)
   "PROFILE_PHOTO",
   "IQAMA_NATIONAL_ID",
@@ -1574,7 +1576,13 @@ export const addDriverReviewComment = asyncWrapper(
         "IQAMA_NATIONAL_ID",
         "DRIVING_LICENSE",
       ];
-      const DRIVER_INPUT_FIELDS = ["firstName", "lastName", "phone"];
+      const DRIVER_INPUT_FIELDS = [
+        "firstName",
+        "lastName",
+        "phone",
+        "nationalId",
+        "licenseNumber",
+      ];
 
       let updatedSnapshot: Record<string, any> | null = null;
 
@@ -2478,6 +2486,8 @@ export const getVendorDrivers = asyncWrapper(
           firstName: driver.firstName,
           lastName: driver.lastName,
           phone: driver.phone,
+          nationalId: driver.nationalId,
+          licenseNumber: driver.licenseNumber,
           photoUrl: await getReadUrl(driver.photoUrl),
           status: driver.status,
           isActive: driver.isActive,
@@ -2610,6 +2620,8 @@ export const getVendorDriverDetail = asyncWrapper(
         lastName: driver.lastName,
         name: `${driver.firstName} ${driver.lastName}`,
         phone: driver.phone,
+        nationalId: driver.nationalId,
+        licenseNumber: driver.licenseNumber,
         photoUrl: signedPhotoUrl,
         // Raw GCS path for the driver photo — paired with the signed
         // photoUrl above so the admin's "REPLACED" detection on the
@@ -2735,6 +2747,8 @@ export const requestDriverChanges = asyncWrapper(
       "firstName",
       "lastName",
       "phone",
+      "nationalId",
+      "licenseNumber",
       // Doc-type enums
       "PROFILE_PHOTO",
       "IQAMA_NATIONAL_ID",
@@ -2770,10 +2784,10 @@ export const requestDriverChanges = asyncWrapper(
     // by their doc.type (PROFILE_PHOTO, IQAMA_NATIONAL_ID,
     // DRIVING_LICENSE).
     //
-    // Note: nationalId and licenseNumber are NOT Driver columns —
-    // those identifiers live as DriverDocument rows (type
-    // IQAMA_NATIONAL_ID, DRIVING_LICENSE) and surface in the admin
-    // UI via the doc-tile diff path, not the input-field diff path.
+    // Scalar identity fields (nationalId, licenseNumber) are Driver
+    // columns and belong in the snapshot alongside firstName/lastName/
+    // phone so the vendor's "Addressed" UI can diff the pre-review
+    // value against the vendor's corrected value once they edit inline.
     //
     // Without the doc fileUrls in the snapshot the rejected-photo/
     // doc path stayed stuck on "❌ Rejected — vendor will be
@@ -2785,6 +2799,8 @@ export const requestDriverChanges = asyncWrapper(
         firstName: true,
         lastName: true,
         phone: true,
+        nationalId: true,
+        licenseNumber: true,
         photoUrl: true,
       },
     });

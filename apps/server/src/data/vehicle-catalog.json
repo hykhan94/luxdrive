@@ -19,7 +19,7 @@
         },
         {
           "model": "Maybach S-Class",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2021,
           "maxYear": 2026,
           "defaultSeats": 4
@@ -100,6 +100,13 @@
           "minYear": 2023,
           "maxYear": 2026,
           "defaultSeats": 4
+        },
+        {
+          "model": "Maybach GLS 600",
+          "classes": ["ULTRA_LUXURY", "BUSINESS_SUV"],
+          "minYear": 2021,
+          "maxYear": 2026,
+          "defaultSeats": 5
         }
       ]
     },
@@ -790,17 +797,24 @@
       "models": [
         {
           "model": "Flying Spur",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2020,
           "maxYear": 2026,
           "defaultSeats": 4
         },
         {
           "model": "Bentayga",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2020,
           "maxYear": 2026,
           "defaultSeats": 5
+        },
+        {
+          "model": "Mulsanne",
+          "classes": ["ULTRA_LUXURY"],
+          "minYear": 2018,
+          "maxYear": 2020,
+          "defaultSeats": 4
         }
       ]
     },
@@ -809,28 +823,28 @@
       "models": [
         {
           "model": "Ghost",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2021,
           "maxYear": 2026,
           "defaultSeats": 4
         },
         {
           "model": "Phantom",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2020,
           "maxYear": 2026,
           "defaultSeats": 4
         },
         {
           "model": "Cullinan",
-          "classes": ["FIRST_CLASS"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS"],
           "minYear": 2020,
           "maxYear": 2026,
           "defaultSeats": 5
         },
         {
           "model": "Spectre",
-          "classes": ["FIRST_CLASS", "ELECTRIC"],
+          "classes": ["ULTRA_LUXURY", "FIRST_CLASS", "ELECTRIC"],
           "minYear": 2024,
           "maxYear": 2026,
           "defaultSeats": 4

@@ -52,24 +52,6 @@ const usersToSeed = [
     phone: "+966500000001",
     role: "ADMIN" as const,
   },
-  {
-    email: "vendor@luxdriveksa.com",
-    password: "ChangeMe!Vendor2026",
-    name: "LuxDrive Vendor",
-    firstName: "LuxDrive",
-    lastName: "Vendor",
-    phone: "+966500000002",
-    role: "VENDOR" as const,
-  },
-  {
-    email: "partner@luxdriveksa.com",
-    password: "ChangeMe!Partner2026",
-    name: "LuxDrive Partner",
-    firstName: "LuxDrive",
-    lastName: "Partner",
-    phone: "+966500000003",
-    role: "PARTNER" as const,
-  },
 ];
 
 async function main() {

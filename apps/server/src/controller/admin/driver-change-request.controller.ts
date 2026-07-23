@@ -16,6 +16,8 @@ const DRIVER_FIELD_LABELS: Record<string, string> = {
   firstName: "First Name",
   lastName: "Last Name",
   phone: "Phone Number",
+  nationalId: "National ID / Iqama",
+  licenseNumber: "Driving Licence Number",
   PROFILE_PHOTO: "Profile Photo",
   IQAMA_NATIONAL_ID: "Iqama / National ID",
   DRIVING_LICENSE: "Driving License",
@@ -102,12 +104,17 @@ export const approveDriverChangeRequest = asyncWrapper(
 
     const fields = request.fields as string[];
 
-    // 1. Snapshot the driver's current state (so admin can see diff later)
+    // 1. Snapshot the driver's current state (so admin can see diff later).
+    // Includes all scalar fields the vendor might edit — firstName /
+    // lastName / phone / nationalId / licenseNumber — so the vendor's
+    // "Addressed" pill lights up correctly once each field is corrected.
     const snapshot = {
       photoUrl: request.driver.photoUrl,
       firstName: request.driver.firstName,
       lastName: request.driver.lastName,
       phone: request.driver.phone,
+      nationalId: request.driver.nationalId,
+      licenseNumber: request.driver.licenseNumber,
     };
 
     // 2. Approve the change request, save snapshot, set driver to CHANGES_REQUESTED

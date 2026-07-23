@@ -83,19 +83,13 @@ enum TripType {
   HOURLY
 }
 
-enum City {
-  RIYADH
-  JEDDAH
-  MAKKAH
-  MADINAH
-}
-
 enum VehicleClass {
   ECONOMY_SEDAN
   BUSINESS_SEDAN
   BUSINESS_SUV
   FIRST_CLASS
   ELECTRIC
+  ULTRA_LUXURY
   HIACE
   COASTER
   KING_LONG
@@ -892,6 +886,15 @@ model Driver {
   firstName         String
   lastName          String
   phone             String
+  // Saudi National ID / Iqama number (10 digits). Kept as scalar so the
+  // admin review UI can display and let admins comment on it as a
+  // discrete field, separate from the ID document image which lives
+  // on DriverDocument.
+  nationalId        String?
+  // Driving licence number as printed on the licence card. Same
+  // rationale as nationalId — a comment-able field distinct from the
+  // scanned licence document.
+  licenseNumber     String?
   photoUrl          String?
   rating            Decimal?     @db.Decimal(2, 1)
   isActive          Boolean      @default(true)
@@ -961,7 +964,10 @@ model Booking {
 
   // Trip Details
   tripType TripType
-  city     City
+  // City code — references cities.code (see City model). Was a
+  // Prisma enum before the partner-priced-bookings refactor; now
+  // a mutable set of cities that admin manages at runtime.
+  city     String
   route    String?
   hours    Int?
 
@@ -980,10 +986,7 @@ model Booking {
   terminalNo       String?
   terminalLocation String?
 
-  // Route tariff reference (which admin-defined route was selected)
-  routeTariffId String?
-
-  // For hourly bookings — the duration label from the route (e.g., "6-8 Hours")
+  // For hourly bookings — human-readable duration label (e.g. "6 hours")
   hourlyDuration String?
 
   // Vehicle
@@ -1053,22 +1056,6 @@ model Booking {
   @@map("bookings")
 }
 
-model Tariff {
-  id           String       @id @default(cuid())
-  city         City
-  tripType     TripType
-  route        String?
-  hours        Int?
-  vehicleClass VehicleClass
-  price        Decimal      @db.Decimal(10, 2)
-  isActive     Boolean      @default(true)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-
-  @@unique([city, tripType, route, hours, vehicleClass])
-  @@map("tariffs")
-}
-
 model Invoice {
   id               String        @id @default(cuid())
   invoiceNumber    String        @unique
@@ -1091,19 +1078,6 @@ model Invoice {
   @@index([partnerId])
   @@index([status])
   @@map("invoices")
-}
-
-model PeakPricing {
-  id         String   @id @default(cuid())
-  name       String
-  multiplier Decimal  @db.Decimal(3, 2)
-  startDate  DateTime
-  endDate    DateTime
-  cities     City[]
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-
-  @@map("peak_pricing")
 }
 
 model Notification {
@@ -1207,89 +1181,30 @@ model DefaultPricing {
   @@map("default_pricing")
 }
 
-// Route tariffs - prices per route per vehicle class
-model RouteTariff {
-  id              String    @id @default(cuid())
-  city            City
-  routeType       RouteType // ONE_WAY, HOURLY
-  routeName       String // "RUH Airport → Riyadh City" or "6-8 Hours (Day Rate)"
-  pickupLocation  String
-  dropoffLocation String
+// Cities — mutable list of cities LuxDrive operates in. Replaces
+// the previous City enum so admin can add new cities at runtime
+// without a code deploy. Per-city toggles govern whether the
+// ELECTRIC and ULTRA_LUXURY vehicle classes are available to be
+// selected in that city.
+model City {
+  id                 String   @id @default(cuid())
+  // Stable identifier stored on bookings.city, drivers.city, and
+  // vendor_coverage_cities.city. UPPER_SNAKE_CASE by convention
+  // (RIYADH, JEDDAH, etc.) — matches the pre-refactor enum values
+  // so existing rows keep working without migration.
+  code               String   @unique
+  name               String
+  region             String?
+  sortOrder          Int      @default(0)
+  isActive           Boolean  @default(true)
+  electricEnabled    Boolean  @default(false)
+  ultraLuxuryEnabled Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  // Prices per vehicle class (null = TBD)
-  economySedan  Decimal? @db.Decimal(10, 2)
-  businessSedan Decimal? @db.Decimal(10, 2)
-  firstClass    Decimal? @db.Decimal(10, 2)
-  businessSuv   Decimal? @db.Decimal(10, 2)
-  hiace         Decimal? @db.Decimal(10, 2)
-  coaster       Decimal? @db.Decimal(10, 2)
-  kingLong      Decimal? @db.Decimal(10, 2)
-
-  // For per-km routes (optional)
-  isPerKm Boolean @default(false)
-
-  isActive  Boolean  @default(true)
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([city, routeType, routeName])
-  @@index([city])
-  @@index([routeType])
-  @@map("route_tariffs")
-}
-
-// Electric fleet tariffs (Riyadh only)
-model ElectricTariff {
-  id              String   @id @default(cuid())
-  city            City     @default(RIYADH)
-  routeName       String
-  pickupLocation  String
-  dropoffLocation String
-  price           Decimal? @db.Decimal(10, 2)
-  isPerKm         Boolean  @default(false)
-  isActive        Boolean  @default(true)
-  sortOrder       Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@unique([city, routeName])
-  @@map("electric_tariffs")
-}
-
-// Electric fleet config (enable/disable)
-model ElectricFleetConfig {
-  id        String   @id @default(cuid())
-  isEnabled Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("electric_fleet_config")
-}
-
-// Tariff change history for audit log
-model TariffChangeLog {
-  id           String     @id @default(cuid())
-  userId       String
-  userName     String
-  action       String // "updated", "created", "deleted", "bulk_update"
-  routeName    String
-  vehicleClass String? // Which vehicle class was changed
-  oldValue     Decimal?   @db.Decimal(10, 2)
-  newValue     Decimal?   @db.Decimal(10, 2)
-  bulkPercent  Decimal?   @db.Decimal(5, 2) // For bulk updates
-  city         City?
-  routeType    RouteType?
-  createdAt    DateTime   @default(now())
-
-  @@index([createdAt])
-  @@map("tariff_change_logs")
-}
-
-// Add this enum
-enum RouteType {
-  ONE_WAY
-  HOURLY
+  @@index([isActive])
+  @@index([sortOrder])
+  @@map("cities")
 }
 
 // Online payments from customers (PayTabs gateway)

@@ -45,7 +45,11 @@ import {
   EmptyDescription,
 } from "@/components/ui/empty";
 import { useNotification } from "@/lib/notification-context";
-import { PhoneInput, EmailInput } from "@/components/ui/form-fields";
+import {
+  PhoneInput,
+  EmailInput,
+  SaudiIdInput,
+} from "@/components/ui/form-fields";
 
 import { proxiedImageUrl } from "@/lib/image-url";
 // ============== TYPES ==============
@@ -105,6 +109,8 @@ interface DriverDetail {
   lastName: string;
   name: string;
   phone: string;
+  nationalId: string | null;
+  licenseNumber: string | null;
   photoUrl: string | null;
   rating: number | null;
   isActive: boolean;
@@ -563,6 +569,8 @@ const DRIVER_FIELD_LABELS: Record<string, string> = {
   firstName: "First Name",
   lastName: "Last Name",
   phone: "Phone",
+  nationalId: "National ID / Iqama",
+  licenseNumber: "Driving Licence Number",
 };
 
 // ============== CHANGE REQUEST (port of fleet's flow) ==============
@@ -590,6 +598,8 @@ const DRIVER_CHANGE_REQUEST_FIELD_GROUPS = [
       { key: "firstName", label: "First Name" },
       { key: "lastName", label: "Last Name" },
       { key: "phone", label: "Phone Number" },
+      { key: "nationalId", label: "National ID / Iqama" },
+      { key: "licenseNumber", label: "Driving Licence Number" },
     ],
   },
   {
@@ -702,6 +712,8 @@ export default function VendorDrivers({
     lastName: "",
     phone: "",
     email: "",
+    nationalId: "",
+    licenseNumber: "",
   });
 
   // Step 2 document file pickers — null if user hasn't picked a new file for the field
@@ -761,6 +773,10 @@ export default function VendorDrivers({
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Hidden file input for the "Upload Photo from Device" alternative
+  // to the camera capture. Reuses the same verification pipeline
+  // (POST /vendor/drivers/verify-photo → Google Cloud Vision).
+  const photoUploadInputRef = useRef<HTMLInputElement>(null);
 
   // Document upload
   const [uploadingDocType, setUploadingDocType] = useState<string | null>(null);
@@ -881,6 +897,95 @@ export default function VendorDrivers({
     setVerificationResult(null);
     setVerifiedPhotoFile(null);
     setShowCameraModal(true);
+  };
+
+  /** Triggers the hidden file picker for the "Upload Photo from Device"
+   * flow. Uses the same context tracking as the camera path so the
+   * verified photo lands on the right sidebar (add / detail). */
+  const handleTriggerUpload = (context: "add" | "detail") => {
+    setCaptureContext(context);
+    photoUploadInputRef.current?.click();
+  };
+
+  /** Handles file selection from the upload picker. Reads the file as
+   * a data URL for preview (mirrors the camera-capture data-URL model
+   * so the same preview UI works), then runs verification against the
+   * SAME endpoint the camera flow uses — Google Cloud Vision checks
+   * for face, formal shirt, and tie. */
+  const handleUploadedPhoto = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    // Reset the input immediately so picking the same file twice in a
+    // row still fires onChange the second time.
+    e.target.value = "";
+    if (!file) return;
+
+    // Basic file-type guard. `accept="image/*"` handles most of this
+    // at the OS picker level but a defensive check is cheap.
+    if (!file.type.startsWith("image/")) {
+      setVerificationState("failed");
+      setVerificationResult({
+        passed: false,
+        message: "Please select an image file (JPG, PNG, etc).",
+      });
+      return;
+    }
+    // 10 MB ceiling — well above any reasonable phone photo, well
+    // below anything that would time out on the verify endpoint.
+    if (file.size > 10 * 1024 * 1024) {
+      setVerificationState("failed");
+      setVerificationResult({
+        passed: false,
+        message: "Photo is too large. Please use an image under 10 MB.",
+      });
+      return;
+    }
+
+    // Read to data URL for the preview <img>. Uses the SAME
+    // capturedPhoto state as the camera flow so the verified/failed
+    // preview cards render identically no matter the source.
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
+    setCapturedPhoto(dataUrl);
+    setVerificationState("verifying");
+    setVerificationResult(null);
+
+    // Route through the exact same verify-photo endpoint the camera
+    // path calls — no branching on server side, one source of truth
+    // for what "verified" means (face + formal shirt + tie).
+    try {
+      const res = await vendorApi.verifyDriverPhoto(file);
+      if (res.success && res.data) {
+        setVerificationResult(res.data);
+        if (res.data.passed) {
+          setVerificationState("passed");
+          setVerifiedPhotoFile(file);
+        } else {
+          setVerificationState("failed");
+          setVerifiedPhotoFile(null);
+        }
+      } else {
+        setVerificationState("failed");
+        setVerificationResult({
+          passed: false,
+          message: "Verification failed. Please try again.",
+        });
+      }
+    } catch (err: any) {
+      setVerificationState("failed");
+      setVerificationResult({
+        passed: false,
+        message:
+          err?.message ||
+          "Photo verification service is unavailable. Please try again.",
+      });
+    }
   };
 
   const handleCloseCamera = () => {
@@ -1176,6 +1281,8 @@ export default function VendorDrivers({
       lastName: "",
       phone: "",
       email: "",
+      nationalId: "",
+      licenseNumber: "",
     });
     setCapturedPhoto(null);
     setVerifiedPhotoFile(null);
@@ -1228,6 +1335,16 @@ export default function VendorDrivers({
         lastName: d.lastName || "",
         phone: d.phone || "",
         email: "",
+        // Legacy drafts created before this feature landed will have
+        // placeholder "0000000000" values from the photo-first
+        // draft-creation path. Treat those as empty so the vendor sees
+        // a blank required field, not a bogus fake number.
+        nationalId:
+          d.nationalId && d.nationalId !== "0000000000" ? d.nationalId : "",
+        licenseNumber:
+          d.licenseNumber && d.licenseNumber !== "0000000000"
+            ? d.licenseNumber
+            : "",
       });
       const photoDoc = d.documents.find((doc) => doc.type === "PROFILE_PHOTO");
       const iqamaDoc = d.documents.find(
@@ -1304,10 +1421,23 @@ export default function VendorDrivers({
 
       if (!id) {
         // No draft yet. Need to create one. Use existing form values if present, else placeholders.
+        // nationalId + licenseNumber are required by the backend so
+        // we send obvious placeholder values here that will be
+        // overwritten when the vendor fills in Step 2. The "0000000000"
+        // and "PENDING-" prefixes make it visually obvious in the
+        // admin panel if a vendor somehow ships a driver without
+        // completing Step 2.
         const seed = {
           firstName: driverForm.firstName.trim() || "Draft",
           lastName: driverForm.lastName.trim() || "Driver",
           phone: driverForm.phone.trim() || `draft-${Date.now()}`,
+          // Backend requires 10-digit format for both fields. Send
+          // obvious all-zero placeholders when the vendor hasn't yet
+          // filled Step 2 — the draft-load path treats "0000000000"
+          // as empty so the vendor sees a clean required field
+          // and can't ship a driver with placeholder identity data.
+          nationalId: driverForm.nationalId.trim() || "0000000000",
+          licenseNumber: driverForm.licenseNumber.trim() || "0000000000",
         };
         const created = await vendorApi.addDriver(seed);
         if (!created.success || !created.data?.id) {
@@ -1484,6 +1614,8 @@ export default function VendorDrivers({
       if (fieldName === "firstName") data.firstName = value.trim();
       else if (fieldName === "lastName") data.lastName = value.trim();
       else if (fieldName === "phone") data.phone = value.trim();
+      else if (fieldName === "nationalId") data.nationalId = value.trim();
+      else if (fieldName === "licenseNumber") data.licenseNumber = value.trim();
       else {
         showNotification(
           "error",
@@ -1694,6 +1826,19 @@ export default function VendorDrivers({
 
   return (
     <div className="space-y-6">
+      {/* Hidden file input for the "Upload Photo from Device" flow.
+          Kept at the top of the tree so it's mounted regardless of
+          which sidebar (add/detail) is currently open. Handler routes
+          the file through the same verify-photo endpoint the camera
+          path uses — one source of truth for "verified" driver photos. */}
+      <input
+        ref={photoUploadInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleUploadedPhoto}
+      />
+
       {/* Vendor-status lock banner — explains why write actions are disabled.
           Doc-expired variant takes precedence (more actionable). */}
       {!canModifyDrivers && (hasExpiredDocs || vendorStatus) && (
@@ -2284,28 +2429,79 @@ export default function VendorDrivers({
                             <CheckCircle className="w-3 h-3" /> Verified
                           </div>
                         </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenCamera("add")}
+                            className="px-3 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Camera className="w-4 h-4" /> Retake
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTriggerUpload("add")}
+                            className="px-3 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Upload className="w-4 h-4" /> Upload new
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* No photo yet — vendor picks between camera capture
+                        and device upload. Both routes run the SAME
+                        verify-photo endpoint (face + shirt + tie check). */}
+                    {!capturedPhoto && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <button
                           type="button"
                           onClick={() => handleOpenCamera("add")}
-                          className="w-full px-4 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          className="px-4 py-4 border-2 border-dashed border-neutral-700 rounded-lg text-gray-400 hover:border-luxury-gold/40 hover:text-luxury-gold transition-colors flex flex-col items-center gap-2"
                         >
-                          <RotateCcw className="w-4 h-4" /> Retake Photo
+                          <Camera className="w-6 h-6" />
+                          <span className="text-sm font-medium">
+                            Open Camera
+                          </span>
+                          <span className="text-[10px] text-gray-500">
+                            Capture a live photo
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleTriggerUpload("add")}
+                          className="px-4 py-4 border-2 border-dashed border-neutral-700 rounded-lg text-gray-400 hover:border-luxury-gold/40 hover:text-luxury-gold transition-colors flex flex-col items-center gap-2"
+                        >
+                          <Upload className="w-6 h-6" />
+                          <span className="text-sm font-medium">
+                            Upload from Device
+                          </span>
+                          <span className="text-[10px] text-gray-500">
+                            Same verification checks apply
+                          </span>
                         </button>
                       </div>
                     )}
 
-                    {/* No photo yet */}
-                    {!capturedPhoto && (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenCamera("add")}
-                        className="w-full px-4 py-4 border-2 border-dashed border-neutral-700 rounded-lg text-gray-400 hover:border-luxury-gold/40 hover:text-luxury-gold transition-colors flex flex-col items-center gap-2"
-                      >
-                        <Camera className="w-6 h-6" />
-                        <span className="text-sm font-medium">
-                          Open Camera to Capture Photo
-                        </span>
-                      </button>
+                    {/* Verifying — shown while the Cloud Vision check
+                        is in flight for either capture path. */}
+                    {capturedPhoto && verificationState === "verifying" && (
+                      <div className="space-y-3">
+                        <div className="relative rounded-lg overflow-hidden border-2 border-luxury-gold/40">
+                          <img
+                            src={capturedPhoto}
+                            alt="Verifying driver photo"
+                            className="w-full aspect-[3/4] object-cover opacity-70"
+                          />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                            <div className="flex flex-col items-center gap-2 text-white">
+                              <Loader2 className="w-8 h-8 animate-spin text-luxury-gold" />
+                              <span className="text-sm font-medium">
+                                Verifying photo…
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     )}
 
                     {/* Failed */}
@@ -2321,13 +2517,27 @@ export default function VendorDrivers({
                             <XCircle className="w-3 h-3" /> Failed
                           </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleOpenCamera("add")}
-                          className="w-full px-4 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
-                        >
-                          <RotateCcw className="w-4 h-4" /> Try Again
-                        </button>
+                        {verificationResult?.message && (
+                          <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                            {verificationResult.message}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenCamera("add")}
+                            className="px-3 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Camera className="w-4 h-4" /> Try Camera
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTriggerUpload("add")}
+                            className="px-3 py-2.5 bg-neutral-800 text-white text-sm rounded-lg hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Upload className="w-4 h-4" /> Upload New
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -2450,6 +2660,39 @@ export default function VendorDrivers({
                         setDriverForm((p) => ({ ...p, email }))
                       }
                       label=""
+                    />
+                  </div>
+
+                  {/* ===== Identity numbers =====
+                      National ID / Iqama and licence number are scalar
+                      fields on the driver, separate from the ID and
+                      licence document uploads below. Admin needs to see
+                      and comment on these numbers during review, and
+                      the numbers stay searchable / comparable after any
+                      document re-upload. Both use the same 10-digit
+                      SaudiIdInput as the vendor/partner CR field so
+                      partners see consistent validation across the
+                      platform. */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <SaudiIdInput
+                      value={driverForm.nationalId}
+                      onChange={(v) =>
+                        setDriverForm((p) => ({ ...p, nationalId: v }))
+                      }
+                      label="National ID / Iqama"
+                      placeholder="e.g. 1234567890"
+                      icon="id"
+                      required
+                    />
+                    <SaudiIdInput
+                      value={driverForm.licenseNumber}
+                      onChange={(v) =>
+                        setDriverForm((p) => ({ ...p, licenseNumber: v }))
+                      }
+                      label="Driving Licence Number"
+                      placeholder="e.g. 1234567890"
+                      icon="hash"
+                      required
                     />
                   </div>
 
@@ -3017,11 +3260,6 @@ export default function VendorDrivers({
                   const addressed: string[] = [];
                   const pending: string[] = [];
                   for (const key of allFlagged) {
-                    const prev = snapshot[key];
-                    if (prev === undefined) {
-                      pending.push(key);
-                      continue;
-                    }
                     // Doc keys live in driverDetail.documents[].filePath;
                     // info keys live as direct properties (firstName etc.).
                     // Use filePath (raw, stable) — fileUrl is a signed URL
@@ -3033,6 +3271,15 @@ export default function VendorDrivers({
                       docMatch !== undefined
                         ? docMatch.filePath
                         : (driverDetail as any)[key];
+                    // Missing-snapshot-key fallback: treat as empty string
+                    // so any non-empty current value counts as addressed.
+                    // This handles legacy drivers whose snapshot was
+                    // written before nationalId / licenseNumber were
+                    // added to the snapshot builder — without this,
+                    // those fields would show pending forever even
+                    // after the vendor updates them.
+                    const prevRaw = snapshot[key];
+                    const prev = prevRaw === undefined ? "" : prevRaw;
                     if (norm(prev) !== norm(curr)) addressed.push(key);
                     else pending.push(key);
                   }
@@ -3110,9 +3357,15 @@ export default function VendorDrivers({
 
                   const wasAddressed = (key: string) => {
                     if (!snapshot) return false;
-                    const prev = snapshot[key];
+                    // Missing-snapshot-key fallback — same rationale as
+                    // the counter above. Treat undefined as "" so the
+                    // vendor's non-empty edit still lights up green
+                    // for legacy drivers whose snapshot pre-dates the
+                    // scalar identity fields.
+                    const prevRaw = snapshot[key];
+                    const prev = prevRaw === undefined ? "" : prevRaw;
                     const curr = (driverDetail as any)[key];
-                    return prev !== undefined && prev !== curr && curr != null;
+                    return prev !== curr && curr != null && curr !== "";
                   };
 
                   const infoFields: Array<{
@@ -3138,6 +3391,22 @@ export default function VendorDrivers({
                       label: "Phone",
                       value: driverDetail.phone,
                       type: "tel",
+                    },
+                    // National ID / Iqama and licence number are scalar
+                    // identity fields on the driver, distinct from the
+                    // ID/licence document uploads below. Editable inline
+                    // when admin has flagged the specific field.
+                    {
+                      key: "nationalId",
+                      label: "National ID / Iqama",
+                      value: driverDetail.nationalId,
+                      type: "text",
+                    },
+                    {
+                      key: "licenseNumber",
+                      label: "Licence Number",
+                      value: driverDetail.licenseNumber,
+                      type: "text",
                     },
                   ];
 
@@ -3218,6 +3487,68 @@ export default function VendorDrivers({
                                       value={editingFieldValue}
                                       onChange={setEditingFieldValue}
                                       label=""
+                                    />
+                                  ) : f.key === "nationalId" ? (
+                                    // Digits-only, 10-char cap — matches
+                                    // the Add Driver flow and the backend
+                                    // validation. Strip non-digits as
+                                    // they type so the vendor can't
+                                    // accidentally save "123-456-7890".
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      value={editingFieldValue}
+                                      onChange={(e) =>
+                                        setEditingFieldValue(
+                                          e.target.value
+                                            .replace(/\D/g, "")
+                                            .slice(0, 10),
+                                        )
+                                      }
+                                      className="w-full px-2 py-1.5 bg-neutral-900 border border-luxury-gold/40 rounded text-white text-sm font-mono focus:outline-none focus:border-luxury-gold"
+                                      autoFocus
+                                      placeholder="10-digit number"
+                                      maxLength={10}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter")
+                                          handleSaveInlineField(
+                                            driverDetail.id,
+                                            f.key,
+                                            editingFieldValue,
+                                          );
+                                        if (e.key === "Escape")
+                                          setEditingField(null);
+                                      }}
+                                    />
+                                  ) : f.key === "licenseNumber" ? (
+                                    // Same 10-digit Saudi format as the
+                                    // National ID field — driving licence
+                                    // numbers in KSA follow the same rule.
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      value={editingFieldValue}
+                                      onChange={(e) =>
+                                        setEditingFieldValue(
+                                          e.target.value
+                                            .replace(/\D/g, "")
+                                            .slice(0, 10),
+                                        )
+                                      }
+                                      className="w-full px-2 py-1.5 bg-neutral-900 border border-luxury-gold/40 rounded text-white text-sm font-mono focus:outline-none focus:border-luxury-gold"
+                                      autoFocus
+                                      placeholder="10-digit number"
+                                      maxLength={10}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter")
+                                          handleSaveInlineField(
+                                            driverDetail.id,
+                                            f.key,
+                                            editingFieldValue,
+                                          );
+                                        if (e.key === "Escape")
+                                          setEditingField(null);
+                                      }}
                                     />
                                   ) : (
                                     <input
@@ -3369,8 +3700,6 @@ export default function VendorDrivers({
                     currentFileUrl: string | null | undefined,
                   ): boolean => {
                     if (!snapshot) return false;
-                    const prev = snapshot[docType];
-                    if (prev === undefined) return false;
                     // Both sides normalised — empty vs null shouldn't
                     // read as a change. PROFILE_PHOTO also surfaces
                     // through a different snapshot key on some legacy
@@ -3378,6 +3707,13 @@ export default function VendorDrivers({
                     // canonical path.
                     const norm = (v: any) =>
                       v === undefined || v === null ? "" : String(v);
+                    // Missing-snapshot-key fallback — legacy drivers'
+                    // snapshots may pre-date a required doc type. If the
+                    // key is missing but the vendor has uploaded a file,
+                    // treat that as addressed rather than silently
+                    // leaving the tile stuck on "Action Required" forever.
+                    const prevRaw = snapshot[docType];
+                    const prev = prevRaw === undefined ? "" : prevRaw;
                     return norm(prev) !== norm(currentFileUrl);
                   };
                   return (

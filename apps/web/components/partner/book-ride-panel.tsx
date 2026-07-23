@@ -1,19 +1,24 @@
 // ============================================
-// !!! DESTINATION PATH: apps/web/components/partner/book-ride-panel.tsx
+// apps/web/components/partner/book-ride-panel.tsx
+//
+// Partner Portal — Book a Ride (post partner-priced refactor).
+//
+// The partner now sets the total price directly — there are no
+// admin-defined tariffs to look up. The novel piece of UI in this
+// panel is the "receipt card": a single hero SAR input that
+// dominates the page, with base + VAT + total dropping out
+// automatically as the partner types. It reads like an invoice
+// preview, which is exactly what the partner will see on the PO
+// after the booking is created — no surprises.
+//
+// Vehicle-class options are filtered by the selected city's per-city
+// flags (electricEnabled, ultraLuxuryEnabled) which come from
+// partnerApi.getCities().
 // ============================================
+
 "use client";
 
-// ============================================
-// components/partner/book-ride/book-ride-panel.tsx
-// Partner Portal — Book a Ride
-//
-// SETUP REQUIRED:
-//   1. Install: yarn add @react-google-maps/api
-//   2. Add to .env.local: NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=AIzaSy...
-//   3. Enable in Google Cloud Console: Places API (New), Maps JavaScript API
-// ============================================
-
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { partnerApi } from "@/lib/api";
 import { useNotification } from "@/lib/notification-context";
 import { useLoadScript, Autocomplete } from "@react-google-maps/api";
@@ -21,214 +26,113 @@ import { PhoneInput, EmailInput } from "@/components/ui/form-fields";
 import { DatePicker } from "@/components/ui/date-picker";
 import { TimePicker } from "@/components/ui/time-picker";
 import {
-  Plus,
   Loader2,
   Plane,
-  DollarSign,
-  Leaf,
-  Zap,
-  AlertCircle,
   MapPin,
+  Users,
+  Calendar,
+  Clock,
+  Car,
+  Crown,
+  Zap,
+  StickyNote,
+  Send,
+  AlertCircle,
+  Route,
+  Info,
   ShieldAlert,
 } from "lucide-react";
 
 // Google Maps libraries to load
 const GOOGLE_MAPS_LIBRARIES: "places"[] = ["places"];
 
-// ============== TYPES ==============
+// Saudi VAT rate — matches server splitVatInclusive helper. The
+// partner input is treated as VAT-inclusive so what they type here is
+// EXACTLY what appears on the PO/invoice total line.
+const VAT_RATE = 0.15;
 
-interface RouteOption {
-  id: string;
-  routeName: string;
-  pickupLocation: string;
-  dropoffLocation: string;
-  isPerKm: boolean;
-  isHourly: boolean;
-  isExtraHour: boolean;
-  isAirport: boolean;
-}
-
-interface VehicleOption {
-  vehicleClass: string;
-  label: string;
-  /** Marketed model example ("Ford Taurus / Lexus or Similar"), sourced
-   *  from the landing fleet-showcase so partners see the same class-to-car
-   *  mapping customers see. Optional — legacy or ELECTRIC routes may not
-   *  carry it yet, in which case we render just the class label. */
-  modelExample?: string;
-  category: string;
-  maxPassengers: number;
-  price: number | null;
-  basePrice: number | null;
-  isElectric: boolean;
-  available: boolean;
-  isPeakActive: boolean;
-  peakMultiplier: number | null;
-  // Set by backend on HOURLY responses only. unavailableReason surfaces
-  // the calculator's exact rejection ("Per Hour Rate is not configured
-  // for X in Y"); pendingHours signals the partner hasn't picked hours
-  // yet so prices are placeholders.
-  unavailableReason?: string | null;
-  pendingHours?: boolean;
-}
-
-interface PriceBreakdownData {
-  basePrice: number;
-  peakMultiplier: number;
-  peakSurcharge: number;
-  subtotal: number;
-  vatRate: number;
-  vatAmount: number;
-  totalPrice: number;
-  // Populated only for HOURLY bookings — backend returns a structured
-  // breakdown of how the bracket logic resolved (day rate vs per-hour
-  // vs day + extras).
-  hourly?: {
-    hours: number;
-    tier: "PER_HOUR" | "DAY_RATE" | "DAY_RATE_PLUS_EXTRA";
-    breakdown: Array<{
-      label: string;
-      hours: number | null;
-      rate: number;
-      amount: number;
-    }>;
-    subtotalBeforePeak: number;
-  } | null;
-}
-
-// ============== CONSTANTS ==============
-
-const CITIES = [
-  { id: "RIYADH", name: "Riyadh", province: "Central Province" },
-  { id: "JEDDAH", name: "Jeddah", province: "Western Province" },
-  { id: "MAKKAH", name: "Makkah", province: "Western Province" },
-  { id: "MADINAH", name: "Madinah", province: "Western Province" },
-];
-
-// Bias autocomplete to Saudi Arabia city centers
-const CITY_BOUNDS: Record<string, { lat: number; lng: number }> = {
-  RIYADH: { lat: 24.7136, lng: 46.6753 },
-  JEDDAH: { lat: 21.4858, lng: 39.1925 },
-  MAKKAH: { lat: 21.3891, lng: 39.8579 },
-  MADINAH: { lat: 24.4539, lng: 39.6142 },
+// Max passenger cap per class — mirrors the server-side
+// VEHICLE_MAX_PASSENGERS map. Duplicated here so the picker can
+// validate before the API round-trip and gray out impossible combos.
+const VEHICLE_MAX_PASSENGERS: Record<string, number> = {
+  ECONOMY_SEDAN: 3,
+  BUSINESS_SEDAN: 3,
+  FIRST_CLASS: 3,
+  BUSINESS_SUV: 7,
+  ELECTRIC: 3,
+  ULTRA_LUXURY: 2,
+  HIACE: 10,
+  COASTER: 23,
+  KING_LONG: 49,
 };
 
-const TRIP_TYPES = [
-  { id: "ONE_WAY", label: "One Way" },
-  { id: "HOURLY", label: "By the Hour" },
+// Vehicle class metadata for the picker — order here is the
+// visible order in the UI. Taglines use "or similar" wording since
+// the exact model depends on which vendor is assigned to the booking.
+const VEHICLE_CLASSES: Array<{
+  code: string;
+  label: string;
+  tagline: string;
+  requiresFlag?: "electric" | "ultraLuxury";
+}> = [
+  {
+    code: "ECONOMY_SEDAN",
+    label: "Economy Sedan",
+    tagline: "Ford Taurus or similar — 3 pax",
+  },
+  {
+    code: "BUSINESS_SEDAN",
+    label: "Business Sedan",
+    tagline: "Mercedes E-Class, BMW 5-Series or similar — 3 pax",
+  },
+  {
+    code: "FIRST_CLASS",
+    label: "First Class",
+    tagline: "Mercedes S-Class, BMW 7-Series or similar — 3 pax",
+  },
+  {
+    code: "BUSINESS_SUV",
+    label: "Business SUV",
+    tagline: "GMC Yukon, Chevrolet Tahoe or similar — 7 pax",
+  },
+  {
+    code: "ELECTRIC",
+    label: "Electric",
+    tagline: "Lucid Air or similar — 3 pax",
+    requiresFlag: "electric",
+  },
+  {
+    code: "ULTRA_LUXURY",
+    label: "Ultra Luxury",
+    tagline: "Rolls, Bentley, Maybach — 2 pax",
+    requiresFlag: "ultraLuxury",
+  },
+  { code: "HIACE", label: "HiAce", tagline: "10-seat van" },
+  { code: "COASTER", label: "Coaster", tagline: "23-seat coach" },
+  { code: "KING_LONG", label: "King Long", tagline: "49-seat coach" },
 ];
 
-const PASSENGER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 23, 49];
-
-const CATEGORY_LABELS: Record<string, string> = {
-  sedan: "SEDANS",
-  suv: "SUV",
-  group: "GROUP TRANSPORT",
-  ev: "ECO FLEET",
-  other: "OTHER",
-};
-
-// ============== GOOGLE PLACES AUTOCOMPLETE INPUT ==============
-
-interface PlacesInputProps {
-  label: string;
-  value: string;
-  placeholder: string;
-  required?: boolean;
-  cityBias: { lat: number; lng: number };
-  icon?: "pickup" | "dropoff";
-  onSelect: (address: string, lat: number, lng: number) => void;
-  onChange: (value: string) => void;
+interface City {
+  code: string;
+  name: string;
+  region: string | null;
+  electricEnabled: boolean;
+  ultraLuxuryEnabled: boolean;
 }
-
-function PlacesAutocompleteInput({
-  label,
-  value,
-  placeholder,
-  required,
-  cityBias,
-  icon,
-  onSelect,
-  onChange,
-}: PlacesInputProps) {
-  const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
-
-  const onLoad = useCallback(
-    (autocomplete: google.maps.places.Autocomplete) => {
-      autocompleteRef.current = autocomplete;
-    },
-    [],
-  );
-
-  const onPlaceChanged = useCallback(() => {
-    if (!autocompleteRef.current) return;
-    const place = autocompleteRef.current.getPlace();
-    if (place.geometry?.location) {
-      const lat = place.geometry.location.lat();
-      const lng = place.geometry.location.lng();
-      const address = place.formatted_address || place.name || "";
-      onSelect(address, lat, lng);
-    }
-  }, [onSelect]);
-
-  // Update autocomplete bounds when city changes
-  useEffect(() => {
-    if (autocompleteRef.current && cityBias) {
-      const bounds = new google.maps.LatLngBounds(
-        new google.maps.LatLng(cityBias.lat - 0.5, cityBias.lng - 0.5),
-        new google.maps.LatLng(cityBias.lat + 0.5, cityBias.lng + 0.5),
-      );
-      autocompleteRef.current.setBounds(bounds);
-    }
-  }, [cityBias]);
-
-  const iconColor =
-    icon === "pickup"
-      ? "text-green-400"
-      : icon === "dropoff"
-        ? "text-red-400"
-        : "text-gray-400";
-
-  return (
-    <div>
-      <label className="block text-sm text-gray-400 mb-2 flex items-center gap-1.5">
-        {icon && <MapPin className={`w-3.5 h-3.5 ${iconColor}`} />}
-        {label}
-      </label>
-      <Autocomplete
-        onLoad={onLoad}
-        onPlaceChanged={onPlaceChanged}
-        options={{
-          componentRestrictions: { country: "sa" },
-          fields: ["formatted_address", "geometry", "name"],
-          types: ["establishment", "geocode"],
-        }}
-      >
-        <input
-          type="text"
-          required={required}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none placeholder-gray-500"
-        />
-      </Autocomplete>
-    </div>
-  );
-}
-
-// ============== MAIN COMPONENT ==============
 
 interface BookRidePanelProps {
-  onSuccess: () => void;
-  rebookData?: any | null;
-  // Partner's current status — used to gate the booking form submit.
-  // Only APPROVED partners can create new bookings.
+  // Called after a booking is successfully created. Parent uses this
+  // to jump the partner to the Bookings tab and refresh sidebar
+  // badges so the new booking's status counter shows up right away.
+  onSuccess?: () => void;
+  // Partner's current status — accepted for API compatibility with
+  // the parent page but not gated on here (the parent's route-level
+  // isActivePartner middleware already handles suspension routing,
+  // and the backend rejects create if docs are invalid).
   partnerStatus?: string | null;
-  // Required profile docs (CR/VAT/Chamber/Balady/National-Address/IBAN-Letter)
-  // that are past their expiry date. When non-empty, the booking form is
-  // locked even if partnerStatus is APPROVED — partner must renew via the
-  // profile change-request flow before new bookings can be created.
+  // Any required documents that have expired. Shown as a warning
+  // banner so the partner knows submit will be rejected before they
+  // fill out the form.
   expiredRequiredDocs?: Array<{
     type: string;
     label: string;
@@ -236,1054 +140,1065 @@ interface BookRidePanelProps {
   }>;
 }
 
+// ============================================
+// Root component
+// ============================================
 export default function BookRidePanel({
   onSuccess,
-  rebookData,
-  partnerStatus,
   expiredRequiredDocs,
-}: BookRidePanelProps) {
-  const { showNotification } = useNotification();
+}: BookRidePanelProps = {}) {
+  const notify = useNotification();
+  const [cities, setCities] = useState<City[]>([]);
+  const [citiesLoading, setCitiesLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Doc-expiry is its own axis on top of partnerStatus. Same lock effect but
-  // we surface a distinct, more actionable banner ("Balady Expired") instead
-  // of the generic "profile under review" copy.
-  const hasExpiredDocs = (expiredRequiredDocs?.length ?? 0) > 0;
+  // Form state
+  const [guestName, setGuestName] = useState("");
+  const [guestPhone, setGuestPhone] = useState("");
+  const [guestEmail, setGuestEmail] = useState("");
+  const [tripType, setTripType] = useState<"ONE_WAY" | "HOURLY">("ONE_WAY");
+  const [cityCode, setCityCode] = useState("");
+  const [vehicleClass, setVehicleClass] = useState("");
+  const [pickupAddress, setPickupAddress] = useState("");
+  const [pickupCoords, setPickupCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [dropoffAddress, setDropoffAddress] = useState("");
+  const [dropoffCoords, setDropoffCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [tripDate, setTripDate] = useState<string>("");
+  const [tripTime, setTripTime] = useState("");
+  const [hours, setHours] = useState<number | "">("");
+  const [passengers, setPassengers] = useState<number | "">("");
+  const [flightNumber, setFlightNumber] = useState("");
+  const [totalPriceInput, setTotalPriceInput] = useState<string>("");
+  const [notes, setNotes] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Partner must be APPROVED AND have no expired required docs to book a new
-  // ride. Other actions (browsing routes, viewing prices) remain available
-  // because they're informational — partner needs to see them to understand
-  // what they can/can't do.
-  const canBookRide = partnerStatus === "APPROVED" && !hasExpiredDocs;
-  const bookLockReason = hasExpiredDocs
-    ? `The following profile document${expiredRequiredDocs!.length > 1 ? "s have" : " has"} expired: ${expiredRequiredDocs!.map((d) => d.label).join(", ")}. Submit a profile change request to renew before booking a new ride.`
-    : partnerStatus === "INVITED"
-      ? "Complete and submit your profile to start booking rides"
-      : partnerStatus === "PENDING_REVIEW"
-        ? "Your profile is being reviewed. Booking will be available once approved."
-        : partnerStatus === "CHANGES_REQUESTED"
-          ? "Admin has requested changes to your profile. Update the highlighted fields and resubmit before booking new rides."
-          : "Your profile must be approved before you can book a ride.";
-
-  // Load Google Maps SDK
-  const { isLoaded: mapsLoaded, loadError: mapsError } = useLoadScript({
+  // Google Places for pickup/dropoff. Same pattern already used
+  // elsewhere in the app.
+  const { isLoaded: mapsLoaded } = useLoadScript({
     googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "",
     libraries: GOOGLE_MAPS_LIBRARIES,
+    region: "SA",
+    language: "en",
   });
 
-  // Step state
-  const [city, setCity] = useState("RIYADH");
-  const [tripType, setTripType] = useState("ONE_WAY");
-
-  // API data
-  const [routes, setRoutes] = useState<RouteOption[]>([]);
-  const [vehicles, setVehicles] = useState<VehicleOption[]>([]);
-  const [priceBreakdown, setPriceBreakdown] =
-    useState<PriceBreakdownData | null>(null);
-  const [loadingRoutes, setLoadingRoutes] = useState(false);
-  const [loadingVehicles, setLoadingVehicles] = useState(false);
-  const [loadingPrice, setLoadingPrice] = useState(false);
-
-  // Form data with lat/lng from Google Places
-  const [formData, setFormData] = useState({
-    guestName: "",
-    guestPhone: "",
-    guestEmail: "",
-    routeId: "",
-    pickupAddress: "",
-    pickupLat: null as number | null,
-    pickupLng: null as number | null,
-    dropoffAddress: "",
-    dropoffLat: null as number | null,
-    dropoffLng: null as number | null,
-    tripDate: "",
-    tripTime: "",
-    vehicleClass: "",
-    passengers: "1",
-    flightNumber: "",
-    terminalNo: "",
-    terminalLocation: "",
-    hours: "",
-    notes: "",
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Derived
-  const selectedRoute = routes.find((r) => r.id === formData.routeId);
-  const selectedVehicle = vehicles.find(
-    (v) => v.vehicleClass === formData.vehicleClass,
-  );
-  const isEcoSelected = selectedVehicle?.isElectric || false;
-  const showAirportFields = selectedRoute?.isAirport || false;
-  const cityBias = CITY_BOUNDS[city] || CITY_BOUNDS.RIYADH;
-
-  // ============== FETCH ROUTES when city/tripType changes ==============
-  const fetchRoutes = useCallback(async () => {
-    setLoadingRoutes(true);
-    setRoutes([]);
-    setVehicles([]);
-    setPriceBreakdown(null);
-    setFormData((prev) => ({
-      ...prev,
-      routeId: "",
-      vehicleClass: "",
-      pickupAddress: "",
-      pickupLat: null,
-      pickupLng: null,
-      dropoffAddress: "",
-      dropoffLat: null,
-      dropoffLng: null,
-    }));
-    try {
-      const res = await partnerApi.getAvailableRoutes({ city, tripType });
-      const fetchedRoutes: RouteOption[] = res.data?.routes || [];
-      setRoutes(fetchedRoutes);
-
-      // For HOURLY, the partner shouldn't be choosing among the three
-      // tier rows — that's a calculator-internal detail. Auto-pick the
-      // first available hourly row so the backend's routeId requirement
-      // is satisfied transparently. The calculator (called downstream)
-      // doesn't care which tier we hand it; it derives the right rate
-      // from `hours` regardless.
-      if (tripType === "HOURLY" && fetchedRoutes.length > 0) {
-        setFormData((prev) => ({ ...prev, routeId: fetchedRoutes[0].id }));
-      }
-    } catch (err: any) {
-      showNotification("error", err.message || "Failed to load routes");
-    } finally {
-      setLoadingRoutes(false);
-    }
-  }, [city, tripType, showNotification]);
-
+  // Load active cities on mount
   useEffect(() => {
-    fetchRoutes();
-  }, [fetchRoutes]);
-
-  // ============== FETCH VEHICLES when route selected ==============
-  const fetchVehicles = useCallback(
-    async (routeId: string, hoursForHourly: string | null) => {
-      if (!routeId) return;
-      setLoadingVehicles(true);
-      setVehicles([]);
-      setPriceBreakdown(null);
-      setFormData((prev) => ({ ...prev, vehicleClass: "" }));
+    (async () => {
       try {
-        // For HOURLY, hours drives the calculator-based per-vehicle
-        // pricing. If hours isn't set yet, backend returns vehicles
-        // with placeholder prices and pendingHours=true; we still
-        // render them as disabled so the user knows what to do next.
-        const params: Record<string, any> = { routeId };
-        if (tripType === "HOURLY" && hoursForHourly) {
-          params.hours = Number(hoursForHourly);
-        }
-        const res = await partnerApi.getVehicleOptions(params);
-        if (res.data?.vehicles) setVehicles(res.data.vehicles);
-        // Also accept allVehicles for HOURLY so users can see why a
-        // class is unavailable. Falls back to vehicles[] when backend
-        // doesn't return allVehicles.
-        if (tripType === "HOURLY" && res.data?.allVehicles) {
-          setVehicles(res.data.allVehicles);
-        }
+        const res = await partnerApi.getCities();
+        setCities(res.data);
       } catch (err: any) {
-        showNotification("error", err.message || "Failed to load vehicles");
+        notify.showNotification(
+          "error",
+          err?.message || "Failed to load cities",
+        );
       } finally {
-        setLoadingVehicles(false);
+        setCitiesLoading(false);
       }
-    },
-    [showNotification, tripType],
-  );
-
-  // ============== FETCH PRICE when vehicle selected ==============
-  const fetchPrice = useCallback(
-    async (
-      routeId: string,
-      vehicleClass: string,
-      hoursForHourly: string | number | null,
-    ) => {
-      if (!routeId || !vehicleClass) return;
-      // For HOURLY, hours is mandatory. Don't kick off a request that
-      // we already know will return a "hours required" error — just
-      // wait until the partner picks a value.
-      if (tripType === "HOURLY" && !hoursForHourly) {
-        setPriceBreakdown(null);
-        return;
-      }
-      setLoadingPrice(true);
-      setPriceBreakdown(null);
-      try {
-        const res = await partnerApi.getPriceBreakdown({
-          routeId,
-          vehicleClass,
-          // Backend reads hours when the route is HOURLY; harmless on ONE_WAY.
-          ...(tripType === "HOURLY" && hoursForHourly
-            ? { hours: Number(hoursForHourly) }
-            : {}),
-        });
-        if (res.data) setPriceBreakdown(res.data);
-      } catch (err: any) {
-        showNotification("error", err.message || "Failed to calculate price");
-      } finally {
-        setLoadingPrice(false);
-      }
-    },
-    [showNotification, tripType],
-  );
-
-  // Route selected → pre-fill hint text + fetch vehicles. For HOURLY,
-  // also re-trigger when hours changes so the per-vehicle preview
-  // prices reflect the new bracket.
-  useEffect(() => {
-    if (selectedRoute) {
-      setFormData((prev) => ({
-        ...prev,
-        // Set route's default locations as placeholder hints (user replaces via autocomplete)
-        pickupAddress: "",
-        pickupLat: null,
-        pickupLng: null,
-        dropoffAddress: "",
-        dropoffLat: null,
-        dropoffLng: null,
-      }));
-      fetchVehicles(
-        selectedRoute.id,
-        tripType === "HOURLY" ? formData.hours : null,
-      );
-    }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRoute?.id, tripType === "HOURLY" ? formData.hours : null]);
+  }, []);
 
-  // Vehicle selected → fetch price. For HOURLY, also depends on hours.
-  useEffect(() => {
-    if (formData.routeId && formData.vehicleClass) {
-      fetchPrice(
-        formData.routeId,
-        formData.vehicleClass,
-        tripType === "HOURLY" ? formData.hours : null,
-      );
-    }
-  }, [
-    formData.routeId,
-    formData.vehicleClass,
-    formData.hours,
-    tripType,
-    fetchPrice,
-  ]);
-
-  // Pre-fill from rebook
-  useEffect(() => {
-    if (rebookData) {
-      setFormData((prev) => ({
-        ...prev,
-        guestName: rebookData.guestName || rebookData.customer || "",
-        guestPhone: rebookData.guestPhone || "",
-        guestEmail: rebookData.guestEmail || "",
-        notes: `Rebooking from ${rebookData.bookingRef || rebookData.id}`,
-      }));
-      if (rebookData.city) setCity(rebookData.city);
-      if (rebookData.tripType) setTripType(rebookData.tripType);
-    }
-  }, [rebookData]);
-
-  // ============== SUBMIT ==============
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData.routeId || !formData.vehicleClass) {
-      showNotification(
-        "error",
-        tripType === "HOURLY"
-          ? "Please select hours and a vehicle"
-          : "Please select a route and vehicle",
-      );
-      return;
-    }
-    if (tripType === "HOURLY" && !formData.hours) {
-      showNotification("error", "Please select the number of hours");
-      return;
-    }
-    if (!formData.pickupAddress) {
-      showNotification("error", "Please enter a pickup address");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const res = await partnerApi.createBooking({
-        city,
-        tripType,
-        routeId: formData.routeId,
-        guestName: formData.guestName,
-        guestPhone: formData.guestPhone || undefined,
-        guestEmail: formData.guestEmail || undefined,
-        pickupAddress: formData.pickupAddress,
-        pickupLat: formData.pickupLat,
-        pickupLng: formData.pickupLng,
-        dropoffAddress: formData.dropoffAddress,
-        dropoffLat: formData.dropoffLat,
-        dropoffLng: formData.dropoffLng,
-        tripDate: formData.tripDate,
-        tripTime: formData.tripTime,
-        vehicleClass: formData.vehicleClass,
-        passengers: parseInt(formData.passengers),
-        flightNumber: formData.flightNumber || undefined,
-        terminalNo: formData.terminalNo || undefined,
-        terminalLocation: formData.terminalLocation || undefined,
-        hours:
-          tripType === "HOURLY" && formData.hours
-            ? parseInt(formData.hours)
-            : undefined,
-        notes: formData.notes || undefined,
-      });
-
-      showNotification(
-        "success",
-        `Booking ${res.data?.bookingRef || ""} created! Total: SAR ${priceBreakdown?.totalPrice?.toLocaleString() || ""}`,
-      );
-      onSuccess();
-    } catch (err: any) {
-      showNotification("error", err.message || "Failed to create booking");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Group vehicles by category
-  const groupedVehicles = vehicles.reduce<Record<string, VehicleOption[]>>(
-    (acc, v) => {
-      const cat = v.category || "other";
-      if (!acc[cat]) acc[cat] = [];
-      acc[cat].push(v);
-      return acc;
-    },
-    {},
+  // The currently-selected city record — used by the vehicle-class
+  // picker to filter ELECTRIC and ULTRA_LUXURY, and by validation.
+  const selectedCity = useMemo(
+    () => cities.find((c) => c.code === cityCode) || null,
+    [cities, cityCode],
   );
 
-  // ============== RENDER ==============
+  // Vehicle classes available for the selected city. When no city is
+  // picked yet, we show only the always-available classes so the
+  // partner sees the picker but understands ELECTRIC / ULTRA_LUXURY
+  // are city-gated.
+  const availableClasses = useMemo(() => {
+    return VEHICLE_CLASSES.filter((vc) => {
+      if (vc.requiresFlag === "electric") {
+        return selectedCity?.electricEnabled === true;
+      }
+      if (vc.requiresFlag === "ultraLuxury") {
+        return selectedCity?.ultraLuxuryEnabled === true;
+      }
+      return true;
+    });
+  }, [selectedCity]);
+
+  // Reset vehicle class if the selected one is no longer available
+  // (partner switched city to one without ELECTRIC while ELECTRIC
+  // was selected, for example).
+  useEffect(() => {
+    if (
+      vehicleClass &&
+      !availableClasses.some((c) => c.code === vehicleClass)
+    ) {
+      setVehicleClass("");
+    }
+  }, [availableClasses, vehicleClass]);
+
+  // VAT split — the receipt card renders directly from this. Number()
+  // handles the raw string input; empty/invalid → 0 so the preview
+  // shows a clean SAR 0.00 initial state.
+  const priceSplit = useMemo(() => {
+    const total = Number(totalPriceInput.replace(/,/g, ""));
+    if (!Number.isFinite(total) || total <= 0) {
+      return { total: 0, base: 0, vat: 0, isValid: false };
+    }
+    const base = Math.round((total / (1 + VAT_RATE)) * 100) / 100;
+    const vat = Math.round((total - base) * 100) / 100;
+    return { total, base, vat, isValid: true };
+  }, [totalPriceInput]);
+
+  // Implied hourly rate — useful convenience hint for HOURLY bookings.
+  // Divides the partner-set total by the hours they entered.
+  const impliedHourly = useMemo(() => {
+    if (tripType !== "HOURLY") return null;
+    const h = Number(hours);
+    if (!Number.isFinite(h) || h <= 0) return null;
+    if (!priceSplit.isValid) return null;
+    return Math.round((priceSplit.total / h) * 100) / 100;
+  }, [tripType, hours, priceSplit]);
+
+  // Airport-address detection — same heuristic as the server (matches
+  // /airport|intl|international|terminal|kaia|ruh|jed|med/i). If either
+  // pickup or dropoff contains an airport token, we surface the flight
+  // number field and require it.
+  const isAirport = useMemo(() => {
+    const combined = `${pickupAddress} ${dropoffAddress}`.toLowerCase();
+    return /\b(airport|intl|international|terminal|kaia|ruh|jed|med)\b/.test(
+      combined,
+    );
+  }, [pickupAddress, dropoffAddress]);
+
+  // Max passengers for the currently-selected vehicle class. Drives the
+  // passenger input max/hint.
+  const maxPax = vehicleClass
+    ? VEHICLE_MAX_PASSENGERS[vehicleClass] || null
+    : null;
+
+  // ============== Validation ==============
+  function validate(): boolean {
+    const e: Record<string, string> = {};
+    if (!guestName.trim()) e.guestName = "Guest name is required";
+    if (!guestPhone.trim()) e.guestPhone = "Guest phone is required";
+    if (!cityCode) e.city = "Select a city";
+    if (!vehicleClass) e.vehicleClass = "Select a vehicle class";
+    if (!pickupAddress.trim()) e.pickup = "Pickup address is required";
+    if (tripType === "ONE_WAY" && !dropoffAddress.trim())
+      e.dropoff = "Drop-off address is required";
+    if (!tripDate) e.tripDate = "Trip date is required";
+    if (!tripTime) e.tripTime = "Trip time is required";
+    if (tripType === "HOURLY") {
+      const h = Number(hours);
+      if (!Number.isFinite(h) || h <= 0)
+        e.hours = "Enter number of hours (> 0)";
+    }
+    if (!priceSplit.isValid) e.totalPrice = "Enter a total price";
+    if (maxPax && passengers && Number(passengers) > maxPax) {
+      // Look up the friendly label from the class metadata so the
+      // error reads "Business Sedan seats 3" not "BUSINESS_SEDAN seats 3".
+      const vc = VEHICLE_CLASSES.find((v) => v.code === vehicleClass);
+      const label = vc?.label || vehicleClass;
+      e.passengers =
+        `Too many passengers for ${label}. This vehicle class seats ${maxPax} passenger${maxPax === 1 ? "" : "s"} — ` +
+        `you entered ${Number(passengers)}. Reduce the passenger count or pick a larger vehicle class.`;
+    }
+    if (isAirport && !flightNumber.trim()) {
+      e.flightNumber = "Flight number required for airport bookings";
+    }
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  // ============== Submit ==============
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!validate()) {
+      notify.showNotification(
+        "error",
+        "Please fix the highlighted fields before submitting.",
+      );
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const body: Record<string, any> = {
+        guestName: guestName.trim(),
+        guestPhone: guestPhone.trim(),
+        guestEmail: guestEmail.trim() || undefined,
+        tripType,
+        city: cityCode,
+        vehicleClass,
+        pickupAddress: pickupAddress.trim(),
+        dropoffAddress: (dropoffAddress || pickupAddress).trim(),
+        pickupLat: pickupCoords?.lat,
+        pickupLng: pickupCoords?.lng,
+        dropoffLat: dropoffCoords?.lat,
+        dropoffLng: dropoffCoords?.lng,
+        tripDate,
+        tripTime,
+        totalPrice: priceSplit.total,
+        notes: notes.trim() || undefined,
+      };
+      if (tripType === "HOURLY") body.hours = Number(hours);
+      if (passengers) body.passengers = Number(passengers);
+      if (isAirport && flightNumber.trim())
+        body.flightNumber = flightNumber.trim();
+
+      const res = await partnerApi.createBooking(body);
+      notify.showNotification(
+        "success",
+        `Booking ${res.data.bookingRef} created`,
+      );
+      // Reset form for the next booking
+      resetForm();
+      // Notify parent so it can navigate to Bookings + refresh badges
+      onSuccess?.();
+    } catch (err: any) {
+      notify.showNotification(
+        "error",
+        err?.message || "Failed to create booking",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function resetForm() {
+    setGuestName("");
+    setGuestPhone("");
+    setGuestEmail("");
+    setTripType("ONE_WAY");
+    setCityCode("");
+    setVehicleClass("");
+    setPickupAddress("");
+    setPickupCoords(null);
+    setDropoffAddress("");
+    setDropoffCoords(null);
+    setTripDate("");
+    setTripTime("");
+    setHours("");
+    setPassengers("");
+    setFlightNumber("");
+    setTotalPriceInput("");
+    setNotes("");
+    setErrors({});
+  }
+
+  // ============== Render ==============
   return (
-    <div className="max-w-3xl space-y-4 lg:space-y-6">
-      {/* Lock banner — explains why booking is disabled. Doc-expired variant
-          takes precedence (red, names the specific doc) over the generic
-          status-based variant (amber). Both invite the partner to fix the
-          underlying issue via the Profile section. */}
-      {!canBookRide && (hasExpiredDocs || partnerStatus) && (
-        <div
-          className={`p-4 rounded-xl border flex items-start gap-3 ${
-            hasExpiredDocs
-              ? "bg-red-500/5 border-red-500/20"
-              : "bg-amber-500/5 border-amber-500/20"
-          }`}
-        >
-          <ShieldAlert
-            className={`w-5 h-5 flex-shrink-0 mt-0.5 ${
-              hasExpiredDocs ? "text-red-400" : "text-amber-400"
-            }`}
-          />
-          <div className="flex-1">
-            <p
-              className={`text-sm font-medium ${
-                hasExpiredDocs ? "text-red-400" : "text-amber-400"
-              }`}
-            >
-              {hasExpiredDocs
-                ? expiredRequiredDocs!.length === 1
-                  ? `${expiredRequiredDocs![0].label} has expired`
-                  : `${expiredRequiredDocs!.length} required documents have expired`
-                : partnerStatus === "INVITED"
-                  ? "Profile not yet submitted"
-                  : partnerStatus === "PENDING_REVIEW"
-                    ? "Profile under review"
-                    : partnerStatus === "CHANGES_REQUESTED"
-                      ? "Admin requested profile changes"
-                      : "Booking disabled"}
-            </p>
-            <p
-              className={`text-xs mt-0.5 ${
-                hasExpiredDocs ? "text-red-400/70" : "text-amber-400/70"
-              }`}
-            >
-              {hasExpiredDocs
-                ? `Renew the expired document${expiredRequiredDocs!.length > 1 ? "s" : ""} via the profile change-request flow. You can still browse routes and pricing here, but cannot submit a new booking until renewed.`
-                : "You can browse routes and pricing here, but new bookings cannot be submitted until your profile is approved."}
-            </p>
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto min-w-0">
+      {/* Browser autofill on inputs paints a white background by default.
+          These overrides force our dark theme through the autofill
+          shadow. Same trick used across the vendor/partner portals. */}
+      <style jsx>{`
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover,
+        input:-webkit-autofill:focus,
+        input:-webkit-autofill:active {
+          -webkit-box-shadow: 0 0 0 30px #262626 inset !important;
+          -webkit-text-fill-color: #ffffff !important;
+          caret-color: #ffffff !important;
+          transition: background-color 5000s ease-in-out 0s;
+        }
+      `}</style>
+      <div className="mb-6">
+        <div className="text-2xl font-semibold text-white font-sans">
+          Book a Ride
+        </div>
+        <p className="text-sm text-neutral-500 mt-1">
+          Enter the ride details and the total the client is paying — LuxDrive
+          will assign a vendor.
+        </p>
+      </div>
+
+      {/* Expired-docs warning banner. Backend will reject submit anyway
+          via requireApprovedAndDocsValid — surfacing it up front avoids
+          the partner filling out the whole form before finding out. */}
+      {expiredRequiredDocs && expiredRequiredDocs.length > 0 && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 text-sm">
+              <p className="font-medium text-amber-900">
+                Booking is paused — required documents have expired
+              </p>
+              <p className="text-amber-800 mt-1">
+                Renew the following before creating new bookings:{" "}
+                {expiredRequiredDocs.map((d, i) => (
+                  <span key={d.type}>
+                    {i > 0 && ", "}
+                    <span className="font-medium">{d.label}</span>
+                  </span>
+                ))}
+                .
+              </p>
+            </div>
           </div>
         </div>
       )}
 
-      <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl">
-        {/* STEP 1: City */}
-        <div className="mb-6">
-          <label className="block text-sm text-gray-400 mb-3">
-            Step 1: Select City
-          </label>
-          <div className="flex flex-wrap gap-2">
-            {CITIES.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => setCity(c.id)}
-                className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${city === c.id ? "bg-luxury-gold text-black" : "bg-neutral-800 text-gray-400 hover:text-white"}`}
-              >
-                <span>{c.name}</span>
-                <span className="text-xs ml-1 opacity-70">({c.province})</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* STEP 2: Trip Type */}
-        <div className="mb-6">
-          <label className="block text-sm text-gray-400 mb-3">
-            Step 2: Select Booking Type
-          </label>
-          <div className="flex gap-2">
-            {TRIP_TYPES.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setTripType(t.id)}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${tripType === t.id ? "bg-luxury-gold text-black" : "bg-neutral-800 text-gray-400 hover:text-white"}`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-5">
-          {/* Guest Info */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Guest Name *
-              </label>
-              <input
-                type="text"
-                required
-                value={formData.guestName}
-                onChange={(e) =>
-                  setFormData({ ...formData, guestName: e.target.value })
-                }
-                className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                placeholder="Enter guest name"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Guest Phone
-              </label>
-              <PhoneInput
-                value={formData.guestPhone}
-                onChange={(guestPhone) =>
-                  setFormData({ ...formData, guestPhone })
-                }
-                label=""
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Guest Email
-              </label>
+      <form onSubmit={submit} className="grid lg:grid-cols-3 gap-6">
+        {/* ============ Left column: form fields ============ */}
+        <div className="lg:col-span-2 space-y-6">
+          <Section title="Guest">
+            <FormRow>
+              <Field label="Guest name" required error={errors.guestName}>
+                <input
+                  type="text"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  className={inputClass(!!errors.guestName)}
+                  placeholder="Full name"
+                />
+              </Field>
+              <Field label="Phone" required error={errors.guestPhone}>
+                <PhoneInput
+                  value={guestPhone}
+                  onChange={setGuestPhone}
+                  defaultCountry="SA"
+                  label=""
+                />
+              </Field>
+            </FormRow>
+            <Field label="Email (optional)">
               <EmailInput
-                value={formData.guestEmail}
-                onChange={(guestEmail) =>
-                  setFormData({ ...formData, guestEmail })
-                }
+                value={guestEmail}
+                onChange={setGuestEmail}
                 label=""
               />
-            </div>
-          </div>
+            </Field>
+          </Section>
 
-          {/* STEP 3: Route (ONE_WAY) or Hours (HOURLY) */}
-          {tripType === "HOURLY" ? (
-            // For HOURLY, the partner picks hours — not a tier. The
-            // routeId is auto-set by fetchRoutes() to satisfy the
-            // backend; the calculator derives the rate from hours.
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Step 3: Hours *
-              </label>
-              {loadingRoutes ? (
-                <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
-                  <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
-                  <span className="text-sm text-gray-400">
-                    Loading hourly rates...
-                  </span>
-                </div>
-              ) : routes.length === 0 ? (
-                <div className="flex items-center gap-2 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                  <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                  <p className="text-sm text-amber-400">
-                    Hourly bookings are not available for{" "}
-                    {CITIES.find((c) => c.id === city)?.name || city}. Please
-                    contact admin or pick a different city.
-                  </p>
-                </div>
-              ) : (
-                <select
-                  required
-                  value={formData.hours}
-                  onChange={(e) =>
-                    setFormData({ ...formData, hours: e.target.value })
-                  }
-                  className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                >
-                  <option value="">Select number of hours...</option>
-                  {[4, 6, 8, 10, 12].map((h) => (
-                    <option key={h} value={h}>
-                      {h} hours
-                    </option>
-                  ))}
-                </select>
-              )}
+          <Section title="Trip">
+            {/* Trip type — two-tab toggle */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <TripTypeButton
+                active={tripType === "ONE_WAY"}
+                onClick={() => setTripType("ONE_WAY")}
+                icon={<Route className="w-4 h-4" />}
+                label="One-way"
+                subtitle="Point-to-point"
+              />
+              <TripTypeButton
+                active={tripType === "HOURLY"}
+                onClick={() => setTripType("HOURLY")}
+                icon={<Clock className="w-4 h-4" />}
+                label="Hourly"
+                subtitle="By-the-hour"
+              />
             </div>
-          ) : (
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Step 3: Select Route *
-              </label>
-              {loadingRoutes ? (
-                <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
-                  <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
-                  <span className="text-sm text-gray-400">
-                    Loading routes...
-                  </span>
-                </div>
-              ) : (
-                <select
-                  required
-                  value={formData.routeId}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      routeId: e.target.value,
-                      pickupAddress: "",
-                      pickupLat: null,
-                      pickupLng: null,
-                      dropoffAddress: "",
-                      dropoffLat: null,
-                      dropoffLng: null,
-                    })
-                  }
-                  className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                >
-                  <option value="">Select a route...</option>
-                  {routes
-                    .filter((r) => !r.isExtraHour)
-                    .map((route) => (
-                      <option key={route.id} value={route.id}>
-                        {route.pickupLocation} → {route.dropoffLocation}
-                        {route.isPerKm ? " (Per KM)" : ""}
+
+            <FormRow>
+              <Field label="City" required error={errors.city}>
+                {citiesLoading ? (
+                  <div className="h-10 flex items-center px-3 border border-neutral-700 rounded-lg bg-neutral-800/50">
+                    <Loader2 className="w-4 h-4 animate-spin text-neutral-500" />
+                  </div>
+                ) : (
+                  <select
+                    value={cityCode}
+                    onChange={(e) => setCityCode(e.target.value)}
+                    className={inputClass(!!errors.city)}
+                  >
+                    <option value="">Select city…</option>
+                    {cities.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.name}
+                        {c.region ? ` · ${c.region}` : ""}
                       </option>
                     ))}
-                </select>
-              )}
-            </div>
-          )}
-
-          {/* STEP 4: Precise Pickup & Dropoff with Google Places */}
-          {selectedRoute && (
-            <div className="p-4 bg-neutral-800/30 rounded-lg border border-neutral-700/50 space-y-4">
-              <div className="flex items-center gap-2">
-                <MapPin className="w-4 h-4 text-luxury-gold" />
-                <p className="text-sm text-luxury-gold font-medium">
-                  Enter precise locations
-                </p>
-              </div>
-              <p className="text-xs text-gray-500 -mt-2">
-                Start typing to search for the exact address within{" "}
-                {CITIES.find((c) => c.id === city)?.name || city}.
-              </p>
-
-              {mapsLoaded ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <PlacesAutocompleteInput
-                    label="Pickup Address *"
-                    value={formData.pickupAddress}
-                    placeholder={
-                      selectedRoute.pickupLocation ||
-                      "Search pickup location..."
-                    }
-                    required
-                    cityBias={cityBias}
-                    icon="pickup"
-                    onChange={(val) =>
-                      setFormData({
-                        ...formData,
-                        pickupAddress: val,
-                        pickupLat: null,
-                        pickupLng: null,
-                      })
-                    }
-                    onSelect={(addr, lat, lng) =>
-                      setFormData({
-                        ...formData,
-                        pickupAddress: addr,
-                        pickupLat: lat,
-                        pickupLng: lng,
-                      })
-                    }
-                  />
-                  {tripType === "ONE_WAY" && (
-                    <PlacesAutocompleteInput
-                      label="Drop-off Address *"
-                      value={formData.dropoffAddress}
-                      placeholder={
-                        selectedRoute.dropoffLocation ||
-                        "Search drop-off location..."
-                      }
-                      required
-                      cityBias={cityBias}
-                      icon="dropoff"
-                      onChange={(val) =>
-                        setFormData({
-                          ...formData,
-                          dropoffAddress: val,
-                          dropoffLat: null,
-                          dropoffLng: null,
-                        })
-                      }
-                      onSelect={(addr, lat, lng) =>
-                        setFormData({
-                          ...formData,
-                          dropoffAddress: addr,
-                          dropoffLat: lat,
-                          dropoffLng: lng,
-                        })
-                      }
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2 flex items-center gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 text-green-400" /> Pickup
-                      Address *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={formData.pickupAddress}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          pickupAddress: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                      placeholder={selectedRoute.pickupLocation}
-                    />
-                  </div>
-                  {tripType === "ONE_WAY" && (
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-2 flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-red-400" /> Drop-off
-                        Address *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={formData.dropoffAddress}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            dropoffAddress: e.target.value,
-                          })
-                        }
-                        className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                        placeholder={selectedRoute.dropoffLocation}
-                      />
-                    </div>
-                  )}
-                  {mapsError && (
-                    <p className="sm:col-span-2 text-xs text-amber-400 flex items-center gap-1">
-                      <AlertCircle className="w-3.5 h-3.5" /> Google Maps
-                      unavailable. Enter address manually.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* Pinpoint status indicators */}
-              <div className="flex gap-4 text-xs">
-                <span
-                  className={`flex items-center gap-1 ${formData.pickupLat ? "text-green-400" : "text-gray-500"}`}
-                >
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full ${formData.pickupLat ? "bg-green-400" : "bg-gray-600"}`}
-                  />
-                  Pickup{" "}
-                  {formData.pickupLat ? "pinpointed" : "not pinpointed yet"}
-                </span>
-                {tripType === "ONE_WAY" && (
-                  <span
-                    className={`flex items-center gap-1 ${formData.dropoffLat ? "text-green-400" : "text-gray-500"}`}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${formData.dropoffLat ? "bg-green-400" : "bg-gray-600"}`}
-                    />
-                    Drop-off{" "}
-                    {formData.dropoffLat ? "pinpointed" : "not pinpointed yet"}
-                  </span>
+                  </select>
                 )}
-              </div>
-
-              {/* Airport fields */}
-              {showAirportFields && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-3 border-t border-neutral-700/50">
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">
-                      <Plane className="w-4 h-4 inline mr-1" /> Flight Number *
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.flightNumber}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          flightNumber: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                      placeholder="e.g. SV123"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">
-                      Terminal No.
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.terminalNo}
-                      onChange={(e) =>
-                        setFormData({ ...formData, terminalNo: e.target.value })
-                      }
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                      placeholder="e.g. T1, T2"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">
-                      Terminal Location
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.terminalLocation}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          terminalLocation: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-                      placeholder="e.g. Arrivals"
-                    />
-                  </div>
-                </div>
+              </Field>
+              {tripType === "HOURLY" && (
+                <Field label="Hours" required error={errors.hours}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.5"
+                    value={hours}
+                    onChange={(e) =>
+                      setHours(
+                        e.target.value === "" ? "" : Number(e.target.value),
+                      )
+                    }
+                    className={inputClass(!!errors.hours)}
+                    placeholder="e.g. 4"
+                  />
+                </Field>
               )}
-            </div>
-          )}
+            </FormRow>
 
-          {/* STEP 5: Date, Time, Passengers
-              (Hours moved to Step 3 for HOURLY trip type.) */}
-          <div className="grid gap-4 grid-cols-3">
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">Date *</label>
-              <DatePicker
-                value={formData.tripDate}
-                onChange={(v) => setFormData({ ...formData, tripDate: v })}
-                min={new Date().toISOString().split("T")[0]}
-                required
-                placeholder="Select trip date"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">Time *</label>
-              <TimePicker
-                value={formData.tripTime}
-                onChange={(v) => setFormData({ ...formData, tripTime: v })}
-                required
-                placeholder="Select trip time"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                Passengers *
+            {/* Vehicle class chips */}
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-neutral-300 mb-2">
+                Vehicle class <span className="text-red-500">*</span>
               </label>
-              <select
-                value={formData.passengers}
-                onChange={(e) =>
-                  setFormData({ ...formData, passengers: e.target.value })
-                }
-                className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none"
-              >
-                {PASSENGER_OPTIONS.map((n) => (
-                  <option key={n} value={n}>
-                    {n} {n === 1 ? "Passenger" : "Passengers"}
-                  </option>
+              {!cityCode && (
+                <div className="text-xs text-neutral-500 mb-2 flex items-center gap-1.5">
+                  <Info className="w-3 h-3" />
+                  Select a city first — Electric and Ultra Luxury availability
+                  is per-city.
+                </div>
+              )}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {availableClasses.map((vc) => (
+                  <VehicleChip
+                    key={vc.code}
+                    active={vehicleClass === vc.code}
+                    onClick={() => setVehicleClass(vc.code)}
+                    label={vc.label}
+                    tagline={vc.tagline}
+                    icon={vehicleIcon(vc.code)}
+                  />
                 ))}
-              </select>
-            </div>
-          </div>
-
-          {/* Passenger limit warning */}
-          {selectedVehicle &&
-            parseInt(formData.passengers) > selectedVehicle.maxPassengers && (
-              <div className="flex items-center gap-2 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                <p className="text-sm text-amber-400">
-                  {selectedVehicle.label} supports max{" "}
-                  {selectedVehicle.maxPassengers} passengers.
+              </div>
+              {errors.vehicleClass && (
+                <p className="text-xs text-red-500 mt-1">
+                  {errors.vehicleClass}
                 </p>
-              </div>
-            )}
-
-          {/* STEP 6: Vehicle Class */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">
-              Step 6: Vehicle Class *
-            </label>
-            {loadingVehicles ? (
-              <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800 rounded-lg">
-                <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
-                <span className="text-sm text-gray-400">
-                  Loading vehicles...
-                </span>
-              </div>
-            ) : tripType === "HOURLY" && !formData.hours && formData.routeId ? (
-              // HOURLY-specific empty state: backend can't price vehicles
-              // until the partner selects hours. Don't show a sea of
-              // disabled options — just tell them what to do next.
-              <p className="text-sm text-gray-400 px-4 py-3 bg-neutral-800/50 border border-neutral-700 rounded-lg flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-luxury-gold flex-shrink-0" />
-                Select hours above to see vehicle prices.
-              </p>
-            ) : vehicles.length === 0 && formData.routeId ? (
-              <p className="text-sm text-gray-500 px-4 py-3 bg-neutral-800 rounded-lg">
-                No vehicles available for this route.
-              </p>
-            ) : (
-              <select
-                value={formData.vehicleClass}
-                onChange={(e) =>
-                  setFormData({ ...formData, vehicleClass: e.target.value })
-                }
-                className={`w-full px-4 py-3 rounded-lg text-white focus:outline-none transition-colors ${
-                  isEcoSelected
-                    ? "bg-green-900/30 border-2 border-green-500/50 focus:border-green-400"
-                    : "bg-neutral-800 border border-neutral-700 focus:border-luxury-gold"
-                }`}
-              >
-                <option value="">Select vehicle...</option>
-                {Object.entries(groupedVehicles).map(([cat, items]) => (
-                  <optgroup
-                    key={cat}
-                    label={CATEGORY_LABELS[cat] || cat.toUpperCase()}
-                  >
-                    {items.map((v) => {
-                      // For HOURLY unavailable vehicles, surface the
-                      // calculator's exact reason (e.g. "Per Hour Rate
-                      // not configured for King Long in Riyadh") so
-                      // the partner knows what's wrong and can escalate
-                      // to admin if needed.
-                      const reason =
-                        !v.available && (v as any).unavailableReason
-                          ? ` — ${(v as any).unavailableReason}`
-                          : !v.available
-                            ? " (Unavailable)"
-                            : "";
-                      return (
-                        <option
-                          key={v.vehicleClass}
-                          value={v.vehicleClass}
-                          disabled={!v.available}
-                        >
-                          {/* Class name followed by the marketed model
-                              example so "Business Sedan" reads as
-                              "Business Sedan — Mercedes E-Class / BMW 5
-                              Series or Similar", matching what customers
-                              see on the landing page fleet showcase. */}
-                          {v.label}
-                          {v.modelExample ? ` — ${v.modelExample}` : ""}{" "}
-                          {v.price !== null
-                            ? `· SAR ${v.price.toLocaleString()}`
-                            : ""}
-                          {reason}
-                        </option>
-                      );
-                    })}
-                  </optgroup>
-                ))}
-              </select>
-            )}
-            {isEcoSelected && (
-              <div className="flex items-center gap-2 mt-2 text-green-400 text-xs">
-                <Leaf className="w-3.5 h-3.5" />
-                <span>Zero Emissions - Eco-Friendly Choice</span>
-              </div>
-            )}
-          </div>
-
-          {/* Notes */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">
-              Notes (Optional)
-            </label>
-            <textarea
-              value={formData.notes}
-              onChange={(e) =>
-                setFormData({ ...formData, notes: e.target.value })
-              }
-              className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:border-luxury-gold focus:outline-none resize-none"
-              rows={2}
-              placeholder="Any special requests..."
-            />
-          </div>
-
-          {/* Price Breakdown */}
-          {loadingPrice && (
-            <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800/50 rounded-lg">
-              <Loader2 className="w-4 h-4 text-luxury-gold animate-spin" />
-              <span className="text-sm text-gray-400">
-                Calculating price...
-              </span>
+              )}
             </div>
-          )}
-          {/* HOURLY pre-quote hint: vehicle picked but hours not yet selected. */}
-          {!loadingPrice &&
-            !priceBreakdown &&
-            tripType === "HOURLY" &&
-            formData.routeId &&
-            formData.vehicleClass &&
-            !formData.hours && (
-              <div className="flex items-center gap-2 px-4 py-3 bg-neutral-800/50 border border-neutral-700 rounded-lg">
-                <AlertCircle className="w-4 h-4 text-luxury-gold flex-shrink-0" />
-                <span className="text-sm text-gray-300">
-                  Select the number of hours to see the price.
-                </span>
-              </div>
-            )}
-          {priceBreakdown && !loadingPrice && (
-            <div
-              className={`p-4 rounded-lg transition-all ${isEcoSelected ? "bg-gradient-to-r from-green-500/10 to-transparent border-2 border-green-500/40" : "bg-gradient-to-r from-luxury-gold/10 to-transparent border border-luxury-gold/30"}`}
+          </Section>
+
+          <Section title="Locations">
+            <Field
+              label="Pickup address"
+              required
+              error={errors.pickup}
+              icon={<MapPin className="w-4 h-4 text-neutral-500" />}
             >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  {isEcoSelected ? (
-                    <Leaf className="w-5 h-5 text-green-400" />
-                  ) : (
-                    <DollarSign className="w-5 h-5 text-luxury-gold" />
+              <PlacesInput
+                mapsLoaded={mapsLoaded}
+                value={pickupAddress}
+                onChange={setPickupAddress}
+                onSelect={(addr, coords) => {
+                  setPickupAddress(addr);
+                  setPickupCoords(coords);
+                }}
+                placeholder="Address or landmark"
+                hasError={!!errors.pickup}
+              />
+            </Field>
+            {tripType === "ONE_WAY" && (
+              <Field
+                label="Drop-off address"
+                required
+                error={errors.dropoff}
+                icon={<MapPin className="w-4 h-4 text-neutral-500" />}
+              >
+                <PlacesInput
+                  mapsLoaded={mapsLoaded}
+                  value={dropoffAddress}
+                  onChange={setDropoffAddress}
+                  onSelect={(addr, coords) => {
+                    setDropoffAddress(addr);
+                    setDropoffCoords(coords);
+                  }}
+                  placeholder="Address or landmark"
+                  hasError={!!errors.dropoff}
+                />
+              </Field>
+            )}
+
+            {/* Airport heuristic surfaces flight number */}
+            {isAirport && (
+              <Field
+                label="Flight number"
+                required
+                error={errors.flightNumber}
+                icon={<Plane className="w-4 h-4 text-luxury-gold" />}
+              >
+                <input
+                  type="text"
+                  value={flightNumber}
+                  onChange={(e) => setFlightNumber(e.target.value)}
+                  className={inputClass(!!errors.flightNumber)}
+                  placeholder="e.g. SV1005"
+                />
+              </Field>
+            )}
+          </Section>
+
+          <Section title="When">
+            <FormRow>
+              <Field
+                label="Trip date"
+                required
+                error={errors.tripDate}
+                icon={<Calendar className="w-4 h-4 text-neutral-500" />}
+              >
+                <DatePicker
+                  value={tripDate}
+                  onChange={setTripDate}
+                  min={new Date().toISOString().slice(0, 10)}
+                />
+              </Field>
+              <Field
+                label="Trip time"
+                required
+                error={errors.tripTime}
+                icon={<Clock className="w-4 h-4 text-neutral-500" />}
+              >
+                <TimePicker value={tripTime} onChange={setTripTime} />
+              </Field>
+            </FormRow>
+            <FormRow>
+              <Field
+                label="Passengers (optional)"
+                error={
+                  // Live check — surfaces the error the moment the
+                  // partner types over the limit rather than waiting
+                  // until submit. Same wording as validate() so nothing
+                  // changes when they hit submit.
+                  errors.passengers ||
+                  (maxPax && passengers && Number(passengers) > maxPax
+                    ? `Too many passengers for ${VEHICLE_CLASSES.find((v) => v.code === vehicleClass)?.label || vehicleClass}. ` +
+                      `This vehicle class seats ${maxPax} passenger${maxPax === 1 ? "" : "s"} — ` +
+                      `you entered ${Number(passengers)}.`
+                    : undefined)
+                }
+                icon={<Users className="w-4 h-4 text-neutral-500" />}
+              >
+                <input
+                  type="number"
+                  min="1"
+                  max={maxPax || undefined}
+                  value={passengers}
+                  onChange={(e) =>
+                    setPassengers(
+                      e.target.value === "" ? "" : Number(e.target.value),
+                    )
+                  }
+                  className={inputClass(
+                    !!errors.passengers ||
+                      !!(maxPax && passengers && Number(passengers) > maxPax),
                   )}
-                  <span className="text-sm font-medium text-white">
-                    Price Breakdown
-                  </span>
-                </div>
-                {isEcoSelected && (
-                  <span className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded-full border border-green-500/30">
-                    Eco-Friendly
-                  </span>
-                )}
-              </div>
-              <div className="space-y-2 text-sm">
-                {/* Hourly bracket breakdown — shown only when backend
-                    returned an hourly quote (HOURLY trip type). The
-                    line items here explain how the partner's chosen
-                    hours mapped onto day rate / per-hour rate / extras,
-                    so the price isn't a mystery number. */}
-                {priceBreakdown.hourly && (
-                  <>
-                    {priceBreakdown.hourly.breakdown.map((line, i) => (
-                      <div
-                        key={i}
-                        className="flex justify-between text-gray-300"
-                      >
-                        <span>{line.label}</span>
-                        <span>SAR {line.amount.toLocaleString()}</span>
-                      </div>
-                    ))}
-                    <div className="border-t border-neutral-700/50 my-1" />
-                  </>
-                )}
-                <div className="flex justify-between text-gray-400">
-                  <span>
-                    {priceBreakdown.hourly ? "Subtotal (ex. VAT)" : "Base Fare"}
-                  </span>
-                  <span>SAR {priceBreakdown.basePrice.toLocaleString()}</span>
-                </div>
-                {priceBreakdown.peakSurcharge > 0 && (
-                  <div className="flex justify-between text-amber-400">
-                    <span>
-                      Peak Surcharge ({priceBreakdown.peakMultiplier}x)
-                    </span>
-                    <span>
-                      SAR {priceBreakdown.peakSurcharge.toLocaleString()}
-                    </span>
-                  </div>
-                )}
-                <div className="flex justify-between text-gray-400">
-                  <span>VAT (15%)</span>
-                  <span>SAR {priceBreakdown.vatAmount.toLocaleString()}</span>
-                </div>
-                <div
-                  className={`flex justify-between text-white font-semibold pt-2 border-t ${isEcoSelected ? "border-green-500/30" : "border-neutral-700"}`}
-                >
-                  <span>Total</span>
-                  <span
-                    className={`text-lg ${isEcoSelected ? "text-green-400" : "text-luxury-gold"}`}
-                  >
-                    SAR {priceBreakdown.totalPrice.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
+                  placeholder={
+                    maxPax ? `Max ${maxPax} for this vehicle` : "e.g. 2"
+                  }
+                />
+              </Field>
+              <div />
+            </FormRow>
+          </Section>
 
-          <p className="text-xs text-gray-500">
-            All prices inclusive of 15% VAT & Municipality taxes (SAR)
-          </p>
+          <Section title="Notes (optional)">
+            <Field icon={<StickyNote className="w-4 h-4 text-neutral-500" />}>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className={`${inputClass(false)} min-h-[80px] resize-y`}
+                placeholder="Anything the vendor should know — luggage, special requests, etc."
+              />
+            </Field>
+          </Section>
+        </div>
 
-          {/* Submit */}
-          <div className="flex gap-3 pt-2">
+        {/* ============ Right column: sticky receipt card ============ */}
+        <div className="lg:col-span-1">
+          <div className="sticky top-6">
+            <ReceiptCard
+              totalPriceInput={totalPriceInput}
+              onChange={setTotalPriceInput}
+              split={priceSplit}
+              impliedHourly={impliedHourly}
+              tripType={tripType}
+              error={errors.totalPrice}
+            />
             <button
               type="submit"
-              disabled={
-                isSubmitting ||
-                !formData.routeId ||
-                !formData.vehicleClass ||
-                !formData.tripDate ||
-                !formData.tripTime ||
-                !formData.guestName ||
-                !canBookRide
-              }
-              title={canBookRide ? undefined : bookLockReason}
-              className={`flex-1 flex items-center justify-center gap-2 px-6 py-3 font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                !canBookRide
-                  ? "bg-neutral-800 text-gray-500"
-                  : isEcoSelected
-                    ? "bg-green-500 text-white hover:bg-green-600"
-                    : "bg-luxury-gold text-black hover:bg-luxury-gold/90"
-              }`}
+              disabled={submitting}
+              className="mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-luxury-gold hover:bg-luxury-gold/90 disabled:opacity-50 disabled:cursor-not-allowed text-black rounded-lg font-medium transition-colors shadow-sm"
             >
-              {isSubmitting ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : !canBookRide ? (
-                <ShieldAlert className="w-5 h-5" />
-              ) : isEcoSelected ? (
-                <Leaf className="w-5 h-5" />
+              {submitting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
-                <Plus className="w-5 h-5" />
+                <Send className="w-4 h-4" />
               )}
-              {isSubmitting
-                ? "Booking..."
-                : !canBookRide
-                  ? hasExpiredDocs
-                    ? "Booking Locked — Renew Documents"
-                    : "Booking Unavailable"
-                  : priceBreakdown
-                    ? `${isEcoSelected ? "Book Eco Ride" : "Book Ride"} - SAR ${priceBreakdown.totalPrice.toLocaleString()}`
-                    : "Book Ride"}
+              {submitting ? "Submitting…" : "Submit booking"}
             </button>
+            <p className="text-xs text-neutral-500 mt-3 text-center">
+              LuxDrive will assign a vendor and confirm shortly.
+            </p>
           </div>
-        </form>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ============================================
+// The Tap-Fare card — mobile-first price entry.
+//
+// Design goal: on mobile, keyboards are slow and error-prone. The
+// partner shouldn't have to type "1250.00" to price a fare — they
+// should be able to tap once for a common preset, then fine-tune by
+// tapping ±100 or ±50 buttons. Typing exact amounts remains available
+// via the hero display (also editable) for edge cases.
+//
+// The receipt-style dashed separator + running VAT breakdown is
+// preserved so what the partner sees here matches the PO/invoice
+// the vendor will see — no surprise translation between screens.
+// ============================================
+function ReceiptCard({
+  totalPriceInput,
+  onChange,
+  split,
+  impliedHourly,
+  tripType,
+  error,
+}: {
+  totalPriceInput: string;
+  onChange: (v: string) => void;
+  split: { total: number; base: number; vat: number; isValid: boolean };
+  impliedHourly: number | null;
+  tripType: "ONE_WAY" | "HOURLY";
+  error?: string;
+}) {
+  // Sanitize keystrokes so the input accepts digits + a single decimal
+  // separator only. We store the raw string so the user can type
+  // "1200." mid-entry without React clobbering it.
+  function handleInput(raw: string) {
+    const cleaned = raw.replace(/[^\d.,]/g, "");
+    onChange(cleaned);
+  }
+
+  // Preset amounts vary by trip type — typical KSA totals a partner
+  // would book at. HOURLY skews higher (4hr/8hr/12hr blocks); ONE_WAY
+  // covers airport transfers to inter-city.
+  const presets =
+    tripType === "HOURLY"
+      ? [400, 800, 1200, 1600, 2400]
+      : [250, 500, 800, 1200, 2000];
+
+  // Fine-tune steps. On mobile tapping these is faster than typing.
+  const stepButtons = [-500, -100, -50, 50, 100, 500];
+
+  function setAmount(next: number) {
+    // Clamp at zero (no negative fares). Round to 2dp for tidy display.
+    const clamped = Math.max(0, next);
+    onChange(clamped ? clamped.toFixed(2) : "");
+  }
+
+  function step(delta: number) {
+    const current = Number(totalPriceInput.replace(/,/g, "")) || 0;
+    setAmount(current + delta);
+  }
+
+  function clear() {
+    onChange("");
+  }
+
+  return (
+    <div className="relative bg-neutral-900 rounded-xl border-2 border-luxury-gold/40 shadow-sm overflow-hidden">
+      {/* Subtle top gold band, like a real receipt header */}
+      <div className="h-1.5 bg-gradient-to-r from-luxury-gold via-luxury-gold/70 to-luxury-gold" />
+
+      <div className="p-4 sm:p-5 space-y-4">
+        {/* ============== Hero display ============== */}
+        <div>
+          <div className="flex items-center justify-between">
+            <div className="text-[10px] sm:text-xs font-medium tracking-widest text-luxury-gold uppercase">
+              Total payable
+            </div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider">
+              VAT-inclusive
+            </div>
+          </div>
+
+          {/* The hero display doubles as an input for exact typing. On
+              mobile it uses inputMode="decimal" so the numeric keyboard
+              opens. Chips + step buttons below make typing optional. */}
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-xs sm:text-sm font-medium text-neutral-500 uppercase">
+              SAR
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={totalPriceInput}
+              onChange={(e) => handleInput(e.target.value)}
+              placeholder="0.00"
+              className="flex-1 text-3xl sm:text-4xl font-bold text-white bg-transparent border-none outline-none focus:ring-0 placeholder:text-neutral-600 min-w-0 tabular-nums"
+              aria-label="Total price (SAR)"
+            />
+            {totalPriceInput && (
+              <button
+                type="button"
+                onClick={clear}
+                className="text-[10px] text-neutral-500 hover:text-neutral-300 uppercase tracking-wider"
+                aria-label="Clear amount"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {error && (
+            <div className="mt-2 text-xs text-red-500 flex items-center gap-1.5">
+              <AlertCircle className="w-3 h-3" />
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* ============== Preset chips ==============
+            Tap once to jump to a common amount. Wraps naturally on
+            small screens. Active state = current amount matches exactly. */}
+        <div>
+          <div className="text-[10px] font-medium text-neutral-500 uppercase tracking-widest mb-2">
+            Quick amounts
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+            {presets.map((amount) => {
+              const isActive = Math.abs(split.total - amount) < 0.01;
+              return (
+                <button
+                  key={amount}
+                  type="button"
+                  onClick={() => setAmount(amount)}
+                  className={`px-2 py-2 rounded-lg text-xs sm:text-sm font-medium tabular-nums transition-colors ${
+                    isActive
+                      ? "bg-luxury-gold text-black"
+                      : "bg-neutral-800 text-neutral-200 hover:bg-neutral-700 active:bg-neutral-600"
+                  }`}
+                >
+                  {formatCompact(amount)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ============== Fine-tune row ==============
+            One-tap increments for adjusting the amount without opening
+            the keyboard. Disabled state on decrements when we'd go
+            below zero to avoid visual "why isn't this working?". */}
+        <div>
+          <div className="text-[10px] font-medium text-neutral-500 uppercase tracking-widest mb-2">
+            Fine-tune
+          </div>
+          <div className="grid grid-cols-6 gap-1">
+            {stepButtons.map((delta) => {
+              const current = Number(totalPriceInput.replace(/,/g, "")) || 0;
+              const wouldGoNegative = delta < 0 && current + delta < 0;
+              return (
+                <button
+                  key={delta}
+                  type="button"
+                  onClick={() => step(delta)}
+                  disabled={wouldGoNegative}
+                  className={`px-1 py-2 rounded-md text-[11px] sm:text-xs font-medium tabular-nums transition-colors ${
+                    delta > 0
+                      ? "bg-luxury-gold/10 text-luxury-gold hover:bg-luxury-gold/20 border border-luxury-gold/30"
+                      : "bg-neutral-800/60 text-neutral-300 hover:bg-neutral-700 border border-neutral-700"
+                  } disabled:opacity-30 disabled:cursor-not-allowed active:scale-95`}
+                >
+                  {delta > 0 ? "+" : ""}
+                  {delta}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Dashed separator, receipt-style */}
+        <div className="border-t-2 border-dashed border-neutral-800" />
+
+        {/* Live breakdown — read-only, no form controls */}
+        <div
+          className="space-y-2 text-sm"
+          aria-live="polite"
+          aria-label="VAT breakdown"
+        >
+          <BreakdownRow
+            label="Base fare"
+            hint="ex-VAT 15%"
+            amount={split.base}
+            muted
+          />
+          <BreakdownRow label="VAT (15%)" amount={split.vat} muted />
+          <div className="border-t border-neutral-800 my-2" />
+          <BreakdownRow label="Total" amount={split.total} bold />
+        </div>
+
+        {/* Hourly implied rate hint — only shows for HOURLY when
+            enough info is present. Same figure will appear on the PO. */}
+        {tripType === "HOURLY" && impliedHourly !== null && (
+          <div className="rounded-lg bg-luxury-gold/10 border border-luxury-gold/30 px-3 py-2 text-xs text-luxury-gold flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5" />
+            Implied rate:{" "}
+            <span className="font-semibold">
+              SAR {formatMoney(impliedHourly)} / hour
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function BreakdownRow({
+  label,
+  hint,
+  amount,
+  muted,
+  bold,
+}: {
+  label: string;
+  hint?: string;
+  amount: number;
+  muted?: boolean;
+  bold?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <div
+        className={`${bold ? "font-semibold text-white" : muted ? "text-neutral-500" : "text-neutral-300"}`}
+      >
+        {label}
+        {hint && (
+          <span className="ml-1 text-[10px] text-neutral-500 uppercase tracking-wider">
+            {hint}
+          </span>
+        )}
+      </div>
+      <div
+        className={`${bold ? "text-lg font-bold text-white" : muted ? "text-neutral-500" : "text-white"} tabular-nums`}
+      >
+        SAR {formatMoney(amount)}
+      </div>
+    </div>
+  );
+}
+
+// ============================================
+// Small components — sections, fields, chips
+// ============================================
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-5">
+      <div className="text-xs font-semibold text-neutral-400 uppercase tracking-widest mb-4">
+        {title}
+      </div>
+      <div className="space-y-4">{children}</div>
+    </div>
+  );
+}
+
+function FormRow({ children }: { children: React.ReactNode }) {
+  return <div className="grid sm:grid-cols-2 gap-4">{children}</div>;
+}
+
+function Field({
+  label,
+  required,
+  error,
+  icon,
+  children,
+}: {
+  label?: string;
+  required?: boolean;
+  error?: string;
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      {label && (
+        <label className="block text-sm font-medium text-neutral-300 mb-1">
+          <span className="inline-flex items-center gap-1.5">
+            {icon}
+            {label}
+          </span>
+          {required && <span className="text-red-500 ml-1">*</span>}
+        </label>
+      )}
+      {children}
+      {error && (
+        <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+          <AlertCircle className="w-3 h-3" />
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TripTypeButton({
+  active,
+  onClick,
+  icon,
+  label,
+  subtitle,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  subtitle: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-4 py-3 rounded-lg border text-left transition-colors ${
+        active
+          ? "border-luxury-gold bg-luxury-gold/10"
+          : "border-neutral-800 bg-neutral-800/40 hover:bg-neutral-800"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`${active ? "text-luxury-gold" : "text-neutral-500"}`}>
+          {icon}
+        </span>
+        <span
+          className={`text-sm font-medium ${active ? "text-white" : "text-neutral-300"}`}
+        >
+          {label}
+        </span>
+      </div>
+      <div className="text-xs text-neutral-500 mt-0.5 ml-6">{subtitle}</div>
+    </button>
+  );
+}
+
+function VehicleChip({
+  active,
+  onClick,
+  label,
+  tagline,
+  icon,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  tagline: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-2.5 rounded-lg border text-left transition-colors ${
+        active
+          ? "border-luxury-gold bg-luxury-gold/10 ring-1 ring-luxury-gold/30"
+          : "border-neutral-800 bg-neutral-800/40 hover:bg-neutral-800"
+      }`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className={active ? "text-luxury-gold" : "text-neutral-500"}>
+          {icon}
+        </span>
+        <span
+          className={`text-sm font-medium ${active ? "text-white" : "text-neutral-300"}`}
+        >
+          {label}
+        </span>
+      </div>
+      <div className="text-[11px] text-neutral-500 mt-0.5">{tagline}</div>
+    </button>
+  );
+}
+
+function PlacesInput({
+  mapsLoaded,
+  value,
+  onChange,
+  onSelect,
+  placeholder,
+  hasError,
+}: {
+  mapsLoaded: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  onSelect: (addr: string, coords: { lat: number; lng: number } | null) => void;
+  placeholder: string;
+  hasError: boolean;
+}) {
+  const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
+
+  function handlePlaceSelected() {
+    if (!autocompleteRef.current) return;
+    const place = autocompleteRef.current.getPlace();
+    const addr = place.formatted_address || place.name || value;
+    const loc = place.geometry?.location;
+    const coords = loc ? { lat: loc.lat(), lng: loc.lng() } : null;
+    onSelect(addr, coords);
+  }
+
+  if (!mapsLoaded) {
+    return (
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={inputClass(hasError)}
+      />
+    );
+  }
+
+  return (
+    <Autocomplete
+      onLoad={(ac) => (autocompleteRef.current = ac)}
+      onPlaceChanged={handlePlaceSelected}
+      restrictions={{ country: "sa" }}
+    >
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={inputClass(hasError)}
+      />
+    </Autocomplete>
+  );
+}
+
+// ============================================
+// Utils
+// ============================================
+function inputClass(hasError: boolean) {
+  return `w-full px-3 py-2 border rounded-lg text-sm bg-neutral-800 text-white placeholder:text-neutral-500 transition-colors focus:outline-none ${
+    hasError
+      ? "border-red-500/50 focus:border-red-500"
+      : "border-neutral-700 focus:border-luxury-gold"
+  }`;
+}
+
+function formatMoney(n: number): string {
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+// Compact formatter for the preset chips — shows "1.5K" instead of
+// "1,500" so chip text stays readable at small mobile widths.
+function formatCompact(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return k % 1 === 0 ? `${k}K` : `${k.toFixed(1)}K`;
+  }
+  return String(n);
+}
+
+function vehicleIcon(code: string): React.ReactNode {
+  if (code === "ELECTRIC") return <Zap className="w-3.5 h-3.5" />;
+  if (code === "ULTRA_LUXURY") return <Crown className="w-3.5 h-3.5" />;
+  if (code === "FIRST_CLASS") return <Crown className="w-3.5 h-3.5" />;
+  return <Car className="w-3.5 h-3.5" />;
 }

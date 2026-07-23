@@ -304,6 +304,39 @@ export const adminApi = {
   // Frontend opens in a popup window with print-to-PDF triggered.
   getBookingPO: (id: string) => api.get(`${ADMIN_BASE}/bookings/${id}/po`),
 
+  // Cities — replaces the retired Tariff Management surface. Admin
+  // creates cities, edits name/region/sortOrder, and toggles per-city
+  // ELECTRIC and ULTRA_LUXURY availability. Passing force=1 to delete
+  // bypasses the "still referenced by bookings" safety check.
+  listCities: () => api.get(`${ADMIN_BASE}/cities`),
+  createCity: (body: {
+    code: string;
+    name: string;
+    region?: string;
+    electricEnabled?: boolean;
+    ultraLuxuryEnabled?: boolean;
+    isActive?: boolean;
+    sortOrder?: number;
+  }) => api.post(`${ADMIN_BASE}/cities`, body),
+  updateCity: (
+    id: string,
+    body: Partial<{
+      name: string;
+      region: string | null;
+      sortOrder: number;
+      isActive: boolean;
+    }>,
+  ) => api.patch(`${ADMIN_BASE}/cities/${id}`, body),
+  toggleCityFlag: (
+    id: string,
+    body: {
+      field: "electricEnabled" | "ultraLuxuryEnabled" | "isActive";
+      value: boolean;
+    },
+  ) => api.patch(`${ADMIN_BASE}/cities/${id}/toggle`, body),
+  deleteCity: (id: string, opts?: { force?: boolean }) =>
+    api.delete(`${ADMIN_BASE}/cities/${id}${opts?.force ? "?force=1" : ""}`),
+
   // Vendor Management
   getVendorSummary: () => api.get(`${ADMIN_BASE}/vendors/summary`),
   getVendorNotifications: () => api.get(`${ADMIN_BASE}/vendors/notifications`),
@@ -680,12 +713,6 @@ export const partnerApi = {
   getContractStats: () => api.get(`${PARTNER_BASE}/dashboard/contract-stats`),
 
   // Book a Ride
-  getAvailableRoutes: (params: Record<string, any>) =>
-    api.get(`${PARTNER_BASE}/book-ride/routes`, params),
-  getVehicleOptions: (params: Record<string, any>) =>
-    api.get(`${PARTNER_BASE}/book-ride/vehicle-options`, params),
-  getPriceBreakdown: (body: any) =>
-    api.post(`${PARTNER_BASE}/book-ride/price-breakdown`, body),
   createBooking: (body: any) => api.post(`${PARTNER_BASE}/book-ride`, body),
   getBookRideDetail: (id: string) => api.get(`${PARTNER_BASE}/book-ride/${id}`),
   cancelBooking: (id: string, body?: any) =>
@@ -699,11 +726,9 @@ export const partnerApi = {
   getBookingDetail: (id: string) => api.get(`${PARTNER_BASE}/bookings/${id}`),
   getBookingPO: (id: string) => api.get(`${PARTNER_BASE}/bookings/${id}/po`),
 
-  // Tariffs
-  getTariffOverview: () => api.get(`${PARTNER_BASE}/tariffs`),
-  getCityTariffs: (city: string) => api.get(`${PARTNER_BASE}/tariffs/${city}`),
-  getCityRouteTypeTariffs: (city: string, routeType: string) =>
-    api.get(`${PARTNER_BASE}/tariffs/${city}/${routeType}`),
+  // Cities (read-only — populates the Book Ride city picker and
+  // its per-city vehicle-class flags: electricEnabled + ultraLuxuryEnabled).
+  getCities: () => api.get(`${PARTNER_BASE}/cities`),
 
   // Invoices
   getMonthlyInvoices: (params?: Record<string, any>) =>

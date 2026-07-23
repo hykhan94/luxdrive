@@ -11,7 +11,6 @@ import {
   LayoutDashboard,
   Car,
   CalendarDays,
-  Receipt,
   FileText,
   Building2,
   BarChart3,
@@ -32,7 +31,6 @@ import {
 import DashboardPanel from "@/components/partner/dashboard-panel";
 import BookRidePanel from "@/components/partner/book-ride-panel";
 import BookingsPanel from "@/components/partner/bookings-panel";
-import TariffsPanel from "@/components/partner/tariffs-panel";
 import InvoicesPanel from "@/components/partner/invoices-panel";
 import ProfilePanel from "@/components/partner/profile-panel";
 import ReportsAnalyticsPanel from "@/components/partner/reports-analytics-panel";
@@ -43,7 +41,6 @@ type TabType =
   | "dashboard"
   | "book"
   | "bookings"
-  | "tariffs"
   | "invoices"
   | "profile"
   | "reports"
@@ -90,7 +87,6 @@ const sidebarItems: Array<{
     icon: CalendarDays,
     minStatus: "submitted",
   },
-  { id: "tariffs", label: "Tariffs", icon: Receipt, minStatus: "submitted" },
   { id: "invoices", label: "Invoices", icon: FileText, minStatus: "submitted" },
   {
     id: "profile",
@@ -164,7 +160,6 @@ function PartnerDashboardInner() {
       "dashboard",
       "book",
       "bookings",
-      "tariffs",
       "invoices",
       "profile",
       "reports",
@@ -830,7 +825,6 @@ function PartnerDashboardInner() {
                   initialDateFilter={bookingsDateFilter}
                 />
               )}
-              {activeTab === "tariffs" && <TariffsPanel />}
               {activeTab === "invoices" && (
                 <InvoicesPanel
                   refreshBadges={refreshBadges}

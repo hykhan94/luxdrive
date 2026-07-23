@@ -7,7 +7,7 @@ import OverviewPanel from "@/components/admin/overview-panel";
 import BookingList from "@/components/admin/booking-list";
 import PricingStrategyPanel from "@/components/admin/pricing-strategy-panel";
 import AdminSettingsPanel from "@/components/admin/admin-settings-panel";
-import TariffManagementPanel from "@/components/admin/tariff-management-panel";
+import CitiesPanel from "@/components/admin/cities-panel";
 import PaymentsPanel from "@/components/admin/payments-panel";
 import UserDriverPanel from "@/components/admin/user-driver-panel";
 import RoleManagerPanel from "@/components/admin/role-manager-panel";
@@ -30,7 +30,7 @@ import {
   LogOut,
   Menu,
   User,
-  Table2,
+  MapPin,
   CreditCard,
   Grid3X3,
 } from "lucide-react";
@@ -42,7 +42,7 @@ type TabType =
   | "overview"
   | "bookings"
   | "pricing"
-  | "tariffs"
+  | "cities"
   | "payments"
   | "partners"
   | "vendors"
@@ -55,7 +55,7 @@ const adminSidebarItems = [
   { id: "overview" as TabType, label: "Overview", icon: Grid3X3 },
   { id: "bookings" as TabType, label: "Bookings", icon: CalendarDays },
   { id: "pricing" as TabType, label: "Pricing Strategy", icon: DollarSign },
-  { id: "tariffs" as TabType, label: "Tariff Management", icon: Table2 },
+  { id: "cities" as TabType, label: "Cities", icon: MapPin },
   { id: "payments" as TabType, label: "Payments", icon: CreditCard },
   { id: "partners" as TabType, label: "Partners", icon: Handshake },
   { id: "vendors" as TabType, label: "Vendors", icon: Building2 },
@@ -410,8 +410,8 @@ export default function AdminDashboard() {
           {/* Pricing Strategy Tab */}
           {activeTab === "pricing" && <PricingStrategyPanel />}
 
-          {/* Tariff Management Tab */}
-          {activeTab === "tariffs" && <TariffManagementPanel />}
+          {/* Cities Tab */}
+          {activeTab === "cities" && <CitiesPanel />}
 
           {/* Payments Tab */}
           {activeTab === "payments" && (

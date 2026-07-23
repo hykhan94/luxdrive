@@ -8,7 +8,7 @@ import { isPartner, isActivePartner } from "../../middleware/auth";
 import dashboardRoutes from "./dashboard.route";
 import bookRideRoutes from "./book-ride.route";
 import bookingsRoutes from "./bookings.route";
-import tariffRoutes from "./tariff.route";
+import citiesRoutes from "./cities.route";
 import invoiceRoutes from "./invoice.route";
 import profileRoutes from "./profile.route";
 import analyticsRoutes from "./analytics.route";
@@ -46,8 +46,8 @@ router.use("/book-ride", bookRideRoutes);
 // ============== BOOKINGS (list, detail, export, PO) ==============
 router.use("/bookings", bookingsRoutes);
 
-// ============== TARIFFS (read-only view of admin-defined rates) ==============
-router.use("/tariffs", tariffRoutes);
+// ============== CITIES (available booking cities + per-city vehicle flags) ==============
+router.use("/cities", citiesRoutes);
 
 // ============== INVOICES (monthly + custom) ==============
 router.use("/invoices", invoiceRoutes);

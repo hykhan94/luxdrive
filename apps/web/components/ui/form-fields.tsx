@@ -6,6 +6,7 @@ import {
   Landmark,
   CreditCard,
   Hash,
+  IdCard,
   Mail,
   Building2,
   ChevronDown,
@@ -908,7 +909,79 @@ export function CRNumberInput({
   );
 }
 
-// ============== VAT NUMBER INPUT ==============
+// ============== SAUDI ID INPUT ==============
+// A 10-digit Saudi identifier field — used for National ID / Iqama
+// numbers on the driver form, and for licence numbers (which also
+// follow the 10-digit format in KSA). Mirrors CRNumberInput's UX:
+// live digit-stripping, live "N/10" counter, green border + tick when
+// the number is complete, red border on error. Callers pick the icon
+// and placeholder to distinguish the two use-cases.
+interface SaudiIdInputProps {
+  value: string | null;
+  onChange: (v: string) => void;
+  label?: string;
+  placeholder?: string;
+  icon?: "id" | "hash";
+  required?: boolean;
+  disabled?: boolean;
+  error?: boolean;
+  className?: string;
+}
+
+export function SaudiIdInput({
+  value,
+  onChange,
+  label,
+  placeholder = "10-digit number",
+  icon = "id",
+  required = false,
+  disabled = false,
+  error = false,
+  className = "",
+}: SaudiIdInputProps) {
+  const raw = (value || "").replace(/\D/g, "");
+  const isComplete = raw.length === 10;
+  const IconComp = icon === "hash" ? Hash : IdCard;
+
+  return (
+    <div className={className}>
+      {label && (
+        <label className="flex items-center gap-1.5 text-sm text-gray-400 mb-2">
+          <IconComp className="w-3.5 h-3.5" />
+          {label} {required && <span className="text-red-400">*</span>}
+        </label>
+      )}
+      <div className="relative">
+        <input
+          type="text"
+          inputMode="numeric"
+          value={raw}
+          onChange={(e) =>
+            onChange(e.target.value.replace(/\D/g, "").slice(0, 10))
+          }
+          disabled={disabled}
+          placeholder={placeholder}
+          maxLength={10}
+          className={`${baseInputClass} px-4 py-3 font-mono ${
+            error ? errorBorder : isComplete ? validBorder : normalBorder
+          } disabled:opacity-50`}
+        />
+        {isComplete && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2">
+            <Check className="w-4 h-4 text-green-400" />
+          </div>
+        )}
+      </div>
+      {raw.length > 0 && (
+        <p
+          className={`text-[10px] mt-1 ${isComplete ? "text-green-400/70" : "text-gray-500"}`}
+        >
+          {raw.length}/10 digits {isComplete && "✓"}
+        </p>
+      )}
+    </div>
+  );
+}
 
 interface VATNumberInputProps {
   value: string | null;

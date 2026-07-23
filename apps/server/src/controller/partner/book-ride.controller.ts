@@ -1,9 +1,22 @@
 // ============================================
-// !!! DESTINATION PATH: apps/server/src/controller/partner/book-ride.controller.ts
-// ============================================
-// ============================================
-// apps/server/src/controller/partner/booking.controller.ts
-// Partner Portal — Book a Ride
+// apps/server/src/controller/partner/book-ride.controller.ts
+//
+// Partner Portal — Book a Ride.
+//
+// Post partner-priced-bookings refactor (July 2026):
+//   - Admin no longer maintains route tariffs; the partner enters the
+//     total price directly on the booking form.
+//   - The `total` supplied by the partner is treated as VAT-inclusive
+//     (matches the platform convention: PO, invoice, receipt are all
+//     VAT-inclusive on the vendor side). Backend derives the base
+//     (total / 1.15) and VAT (total - base) so the stored breakdown
+//     agrees with the receipt the partner downloads.
+//   - Peak surcharge is a partner concept only for the future customer
+//     (B2C) portal — partner bookings hard-code peakMultiplier = 1.00.
+//   - Vehicle-class availability is a per-city admin toggle: ELECTRIC
+//     and ULTRA_LUXURY only appear when the target city has the
+//     corresponding flag enabled. Backend re-validates on submit so
+//     stale frontend state cannot slip through an unavailable class.
 // ============================================
 
 import { Request, Response } from "express";
@@ -16,195 +29,47 @@ import { sendBookingCreatedAdminEmail } from "../../lib/email";
 
 // ============== CONSTANTS ==============
 
-// Max passengers per vehicle class
+// Max passengers per vehicle class. These reflect the *comfortable
+// chauffeured-service* seat count for LuxDrive's fleet — the driver
+// occupies the front-left seat and executive passengers get the
+// remaining seats. Ultra Luxury is capped at 2 because it's a two-
+// rear-seat experience (Rolls / Bentley / Maybach).
 const VEHICLE_MAX_PASSENGERS: Record<string, number> = {
-  ECONOMY_SEDAN: 4,
-  BUSINESS_SEDAN: 4,
-  FIRST_CLASS: 4,
+  ECONOMY_SEDAN: 3,
+  BUSINESS_SEDAN: 3,
+  FIRST_CLASS: 3,
   BUSINESS_SUV: 7,
-  ELECTRIC: 4,
+  ELECTRIC: 3,
+  ULTRA_LUXURY: 2,
   HIACE: 10,
   COASTER: 23,
   KING_LONG: 49,
 };
 
-// Vehicle class to RouteTariff column mapping
-const VEHICLE_TO_TARIFF_COLUMN: Record<string, string> = {
-  ECONOMY_SEDAN: "economySedan",
-  BUSINESS_SEDAN: "businessSedan",
-  FIRST_CLASS: "firstClass",
-  BUSINESS_SUV: "businessSuv",
-  HIACE: "hiace",
-  COASTER: "coaster",
-  KING_LONG: "kingLong",
+// Human-readable labels for error messages. Enum values like
+// ECONOMY_SEDAN read as shouting in a customer-facing error toast.
+const VEHICLE_CLASS_LABELS: Record<string, string> = {
+  ECONOMY_SEDAN: "Economy Sedan",
+  BUSINESS_SEDAN: "Business Sedan",
+  FIRST_CLASS: "First Class",
+  BUSINESS_SUV: "Business SUV",
+  ELECTRIC: "Electric",
+  ULTRA_LUXURY: "Ultra Luxury",
+  HIACE: "HiAce",
+  COASTER: "Coaster",
+  KING_LONG: "King Long",
 };
 
-// VAT rate in Saudi Arabia
+// Saudi VAT rate — used to split the partner-entered total into base
+// + VAT so the stored breakdown lines up with the invoice / PO.
 const VAT_RATE = 0.15;
 
-// ============== HOURLY PRICING ==============
-
-// Fixed duration tiers for HOURLY bookings — must match the admin
-// tariff controller's HOURLY_DURATION_TIERS. The three tiers together
-// define the rate table: short bookings use PER_HOUR, half/full-day
-// bookings use DAY_RATE, and overage beyond 8 hours stacks
-// EXTRA_HOUR on top of DAY_RATE.
-const HOURLY_TIER_DAY_RATE = "6-8 Hours (Day Rate)";
-const HOURLY_TIER_EXTRA_HOUR = "Extra Hour (After 8 Hours)";
-const HOURLY_TIER_PER_HOUR = "Per Hour Rate";
-
-// Bracket boundaries. Hours < DAY_RATE_MIN use per-hour pricing;
-// DAY_RATE_MIN ≤ hours ≤ DAY_RATE_MAX use the flat day rate; hours
-// > DAY_RATE_MAX add extra-hour overage on top of day rate.
-const HOURLY_DAY_RATE_MIN = 6;
-const HOURLY_DAY_RATE_MAX = 8;
-
-export type HourlyBreakdownLine = {
-  label: string; // human-readable, e.g. "Day rate (6-8 hours)"
-  hours: number | null; // null for flat-rate line (day rate)
-  rate: number; // per-unit rate in SAR
-  amount: number; // line total in SAR
-};
-
-export type HourlyQuote = {
-  subtotal: number; // sum of all line amounts (pre-peak, pre-VAT)
-  hours: number;
-  tier: "PER_HOUR" | "DAY_RATE" | "DAY_RATE_PLUS_EXTRA";
-  breakdown: HourlyBreakdownLine[];
-};
-
-/**
- * Calculate the pre-peak, VAT-inclusive subtotal for an HOURLY booking.
- *
- * Reads all three duration-tier rows for (city, HOURLY) from RouteTariff
- * and applies the bracket logic:
- *   hours <  6  → hours × perHourRate              (PER_HOUR)
- *   6 ≤ hours ≤ 8 → dayRate                       (DAY_RATE)
- *   hours >  8  → dayRate + (hours - 8) × extraHourRate (DAY_RATE_PLUS_EXTRA)
- *
- * Throws BadRequestError with a precise message when the tier required
- * for the requested hours is missing or has a null price for this vehicle
- * class (e.g. partner asks for 10 hours of King Long but the Extra Hour
- * rate for King Long isn't set).
- *
- * The returned subtotal is in SAR and VAT-inclusive (admin tariff
- * prices are entered VAT-inclusive). Peak pricing and VAT extraction
- * happen in the caller.
- */
-async function calculateHourlyPrice(
-  city: string,
-  vehicleClass: string,
-  hours: number,
-): Promise<HourlyQuote> {
-  if (!Number.isFinite(hours) || hours <= 0) {
-    throw new BadRequestError("hours must be a positive number");
-  }
-
-  const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
-  if (!column) {
-    throw new BadRequestError(`Invalid vehicle class: ${vehicleClass}`);
-  }
-
-  // Pull all three tier rows for this city in one query.
-  const tierRows = await prisma.routeTariff.findMany({
-    where: { city: city as any, routeType: "HOURLY", isActive: true },
-  });
-
-  const tierByName = new Map(tierRows.map((r) => [r.routeName, r]));
-
-  const priceFromTier = (tierName: string): number | null => {
-    const row = tierByName.get(tierName);
-    if (!row) return null;
-    const raw = (row as any)[column];
-    return raw == null ? null : Number(raw);
-  };
-
-  const lines: HourlyBreakdownLine[] = [];
-  let tier: HourlyQuote["tier"];
-
-  if (hours < HOURLY_DAY_RATE_MIN) {
-    // Short booking — straight per-hour multiplication.
-    const perHour = priceFromTier(HOURLY_TIER_PER_HOUR);
-    if (perHour == null) {
-      throw new BadRequestError(
-        `Per Hour Rate is not configured for ${vehicleClass} in ${city}. Bookings shorter than ${HOURLY_DAY_RATE_MIN} hours require this tier.`,
-      );
-    }
-    tier = "PER_HOUR";
-    lines.push({
-      label: `Per-hour rate × ${hours} hour${hours === 1 ? "" : "s"}`,
-      hours,
-      rate: perHour,
-      amount: perHour * hours,
-    });
-  } else if (hours <= HOURLY_DAY_RATE_MAX) {
-    // Half/full-day flat rate.
-    const dayRate = priceFromTier(HOURLY_TIER_DAY_RATE);
-    if (dayRate == null) {
-      throw new BadRequestError(
-        `Day Rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}.`,
-      );
-    }
-    tier = "DAY_RATE";
-    lines.push({
-      label: `Day rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours)`,
-      hours: null,
-      rate: dayRate,
-      amount: dayRate,
-    });
-  } else {
-    // Day rate plus extra-hour overage.
-    const dayRate = priceFromTier(HOURLY_TIER_DAY_RATE);
-    const extraRate = priceFromTier(HOURLY_TIER_EXTRA_HOUR);
-    if (dayRate == null) {
-      throw new BadRequestError(
-        `Day Rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}.`,
-      );
-    }
-    if (extraRate == null) {
-      throw new BadRequestError(
-        `Extra Hour rate (after ${HOURLY_DAY_RATE_MAX} hours) is not configured for ${vehicleClass} in ${city}. Required for bookings longer than ${HOURLY_DAY_RATE_MAX} hours.`,
-      );
-    }
-    const extraHours = hours - HOURLY_DAY_RATE_MAX;
-    tier = "DAY_RATE_PLUS_EXTRA";
-    lines.push({
-      label: `Day rate (${HOURLY_DAY_RATE_MIN}-${HOURLY_DAY_RATE_MAX} hours)`,
-      hours: null,
-      rate: dayRate,
-      amount: dayRate,
-    });
-    lines.push({
-      label: `Extra hour × ${extraHours} hour${extraHours === 1 ? "" : "s"}`,
-      hours: extraHours,
-      rate: extraRate,
-      amount: extraRate * extraHours,
-    });
-  }
-
-  const subtotal = lines.reduce((sum, l) => sum + l.amount, 0);
-
-  return {
-    subtotal: Math.round(subtotal * 100) / 100,
-    hours,
-    tier,
-    breakdown: lines,
-  };
-}
-
-// Keywords that indicate an airport route
-const AIRPORT_KEYWORDS = [
-  "airport",
-  "مطار",
-  "terminal",
-  "ruh airport",
-  "jed airport",
-  "king khalid",
-  "king abdulaziz",
-  "prince mohammed bin abdulaziz",
-  "kaia",
-  "kkia",
-];
+// Lower + upper bound on the price the partner can enter. Ceiling is
+// generous (SAR 1,000,000) — high enough for a coaster-hire full-day
+// package, low enough to catch a clear "typed 15000000 not 15000"
+// slip. Zero and negative are rejected outright.
+const MIN_TOTAL_PRICE = 1;
+const MAX_TOTAL_PRICE = 1_000_000;
 
 // ============== HELPERS ==============
 
@@ -218,9 +83,9 @@ async function getPartnerForUser(userId: string) {
 }
 
 /**
- * Generate booking reference
- * Partner bookings: ACM-202605-001 (first 3 chars of company name + YYYYMM + sequential)
- * Direct bookings:  LXD-202605-001 (LuxDrive prefix)
+ * Booking ref generator — untouched from the pre-refactor version.
+ * Partner bookings prefix with the first 3 letters of the company
+ * (fallback "PTR"); direct bookings prefix with "LXD".
  */
 async function generateBookingRef(
   source: "PARTNER" | "DIRECT",
@@ -239,20 +104,16 @@ async function generateBookingRef(
   );
 
   let prefix: string;
-
   if (source === "PARTNER" && companyName) {
-    // Take first 3 letters of company name, uppercase, remove non-alpha
     prefix = companyName
       .replace(/[^a-zA-Z]/g, "")
       .substring(0, 3)
       .toUpperCase();
-    // Fallback if company name is too short or all special chars
     if (prefix.length < 2) prefix = "PTR";
   } else {
     prefix = "LXD";
   }
 
-  // Count existing bookings this month with the same prefix
   const existingCount = await prisma.booking.count({
     where: {
       bookingRef: { startsWith: `${prefix}-${yearMonth}-` },
@@ -261,750 +122,257 @@ async function generateBookingRef(
   });
 
   const sequentialNumber = String(existingCount + 1).padStart(3, "0");
-
   return `${prefix}-${yearMonth}-${sequentialNumber}`;
 }
 
-function isAirportRoute(
-  routeName: string,
-  pickup: string,
-  dropoff: string,
-): boolean {
-  const combined = `${routeName} ${pickup} ${dropoff}`.toLowerCase();
-  return AIRPORT_KEYWORDS.some((kw) => combined.includes(kw));
+/**
+ * Airport-route heuristic. Not a hard rule — partners enter free-text
+ * pickup/dropoff addresses, so we look for common airport tokens in
+ * either address to trigger the flight-number requirement. Kept
+ * intentionally loose to catch "RUH Airport", "KAIA T1", etc.
+ */
+function looksLikeAirport(pickup: string, dropoff: string): boolean {
+  const s = `${pickup} ${dropoff}`.toLowerCase();
+  return /\b(airport|intl|international|terminal|kaia|ruh|jed|med)\b/.test(s);
 }
 
-// ============== GET ROUTES FOR CITY & TYPE ==============
-
 /**
- * Get available routes for a city and trip type
- * Used to populate the route dropdown
+ * Split a VAT-inclusive total into base + VAT, rounded to 2dp.
+ * Used both to derive booking pricing columns AND to preview on the
+ * partner form.
  */
-export const getAvailableRoutes = asyncWrapper(
-  async (req: Request, res: Response) => {
-    const partner = await getPartnerForUser(req.user!.id);
-    requireOperational(partner.status);
-
-    const { city, tripType } = req.query;
-
-    if (!city || !tripType) {
-      throw new BadRequestError("city and tripType are required");
-    }
-
-    const validCities = ["RIYADH", "JEDDAH", "MAKKAH", "MADINAH"];
-    const validTypes = ["ONE_WAY", "HOURLY"];
-
-    if (!validCities.includes(city as string)) {
-      throw new BadRequestError(
-        `Invalid city. Must be one of: ${validCities.join(", ")}`,
-      );
-    }
-    if (!validTypes.includes(tripType as string)) {
-      throw new BadRequestError(
-        `Invalid tripType. Must be one of: ${validTypes.join(", ")}`,
-      );
-    }
-
-    // Get standard routes
-    const routes = await prisma.routeTariff.findMany({
-      where: {
-        city: city as any,
-        routeType: tripType as any,
-        isActive: true,
-      },
-      orderBy: { sortOrder: "asc" },
-    });
-
-    // For Riyadh, also get electric tariffs
-    let electricRoutes: any[] = [];
-    if (city === "RIYADH") {
-      const electricConfig = await prisma.electricFleetConfig.findFirst();
-      if (electricConfig?.isEnabled) {
-        electricRoutes = await prisma.electricTariff.findMany({
-          where: { city: "RIYADH", isActive: true },
-          orderBy: { sortOrder: "asc" },
-        });
-      }
-    }
-
-    // Format routes with vehicle prices and airport detection
-    const formattedRoutes = routes.map((r) => ({
-      id: r.id,
-      routeName: r.routeName,
-      pickupLocation: r.pickupLocation,
-      dropoffLocation: r.dropoffLocation,
-      isPerKm: r.isPerKm,
-      isAirport: isAirportRoute(
-        r.routeName,
-        r.pickupLocation,
-        r.dropoffLocation,
-      ),
-      prices: {
-        ECONOMY_SEDAN: r.economySedan ? Number(r.economySedan) : null,
-        BUSINESS_SEDAN: r.businessSedan ? Number(r.businessSedan) : null,
-        FIRST_CLASS: r.firstClass ? Number(r.firstClass) : null,
-        BUSINESS_SUV: r.businessSuv ? Number(r.businessSuv) : null,
-        HIACE: r.hiace ? Number(r.hiace) : null,
-        COASTER: r.coaster ? Number(r.coaster) : null,
-        KING_LONG: r.kingLong ? Number(r.kingLong) : null,
-      },
-    }));
-
-    // Add electric routes for Riyadh
-    const formattedElectric = electricRoutes.map((r) => ({
-      id: r.id,
-      routeName: r.routeName,
-      pickupLocation: r.pickupLocation,
-      dropoffLocation: r.dropoffLocation,
-      isPerKm: r.isPerKm,
-      isAirport: isAirportRoute(
-        r.routeName,
-        r.pickupLocation,
-        r.dropoffLocation,
-      ),
-      isElectric: true,
-      prices: {
-        ELECTRIC: r.price ? Number(r.price) : null,
-      },
-    }));
-
-    res.json({
-      success: true,
-      data: {
-        city,
-        tripType,
-        routes: formattedRoutes,
-        electricRoutes: formattedElectric,
-        electricAvailable: city === "RIYADH" && electricRoutes.length > 0,
-      },
-    });
-  },
-);
-
-// ============== GET VEHICLE OPTIONS FOR A ROUTE ==============
-
-/**
- * Get available vehicle classes and prices for a selected route
- * Returns passenger limits per vehicle
- */
-export const getVehicleOptions = asyncWrapper(
-  async (req: Request, res: Response) => {
-    const partner = await getPartnerForUser(req.user!.id);
-    requireOperational(partner.status);
-
-    const { routeId, isElectric, hours } = req.query;
-
-    if (!routeId) throw new BadRequestError("routeId is required");
-
-    if (isElectric === "true") {
-      const route = await prisma.electricTariff.findUnique({
-        where: { id: routeId as string },
-      });
-      if (!route) throw new NotFoundError("Electric route");
-
-      res.json({
-        success: true,
-        data: {
-          routeName: route.routeName,
-          vehicles: [
-            {
-              vehicleClass: "ELECTRIC",
-              label: "Electric",
-              modelExample: "Lucid Air or Similar",
-              price: route.price ? Number(route.price) : null,
-              maxPassengers: VEHICLE_MAX_PASSENGERS.ELECTRIC,
-              available: route.price !== null,
-            },
-          ],
-        },
-      });
-      return;
-    }
-
-    const route = await prisma.routeTariff.findUnique({
-      where: { id: routeId as string },
-    });
-    if (!route) throw new NotFoundError("Route");
-
-    // Check peak pricing
-    const peakConfig = await prisma.peakPricingConfig.findFirst({
-      where: { isEnabled: true },
-    });
-    const peakMultiplier =
-      peakConfig && (!peakConfig.expiresAt || peakConfig.expiresAt > new Date())
-        ? Number(peakConfig.multiplier)
-        : 1.0;
-
-    // `modelExample` mirrors the marketed vehicle model displayed on the
-    // landing page fleet-showcase — surfaced here so the partner picking
-    // a class in book-ride sees the same "which cars actually run" hint
-    // ("Business Sedan (Mercedes E-Class / BMW 5 Series or Similar)")
-    // that customers see. If landing copy shifts, update both sites.
-    const vehicleClasses = [
-      {
-        key: "ECONOMY_SEDAN",
-        label: "Economy Sedan",
-        modelExample: "Ford Taurus / Lexus or Similar",
-        column: "economySedan",
-      },
-      {
-        key: "BUSINESS_SEDAN",
-        label: "Business Sedan",
-        modelExample: "Mercedes E-Class / BMW 5 Series or Similar",
-        column: "businessSedan",
-      },
-      {
-        key: "FIRST_CLASS",
-        label: "First Class",
-        modelExample: "BMW 7 Series / Mercedes S-Class or Similar",
-        column: "firstClass",
-      },
-      {
-        key: "BUSINESS_SUV",
-        label: "Business SUV",
-        modelExample: "GMC Yukon / Chevrolet Tahoe or Similar",
-        column: "businessSuv",
-      },
-      {
-        key: "HIACE",
-        label: "Hiace (10-Seater)",
-        modelExample: "Toyota Hiace or Similar",
-        column: "hiace",
-      },
-      {
-        key: "COASTER",
-        label: "Coaster (23-Seater)",
-        modelExample: "Toyota Coaster or Similar",
-        column: "coaster",
-      },
-      {
-        key: "KING_LONG",
-        label: "King Long (49-Seater)",
-        modelExample: "King Long XMQ / Higer or Similar",
-        column: "kingLong",
-      },
-    ];
-
-    // ============== HOURLY BRANCH ==============
-    // For HOURLY routes, the per-vehicle price comes from the bracket
-    // calculator across all three tier rows for the city (NOT the single
-    // routeId column). The `hours` query param drives the calc.
-    //
-    // If hours isn't provided yet, fall back to returning the
-    // single-row column prices as a rough preview, AND mark each
-    // vehicle as `pendingHours: true` so the frontend knows the prices
-    // are placeholders. This keeps the picker usable while the partner
-    // hasn't yet chosen hours (e.g. UI lets them browse vehicles
-    // first).
-    if (route.routeType === "HOURLY") {
-      const parsedHours = hours == null ? NaN : Number(hours);
-      const hoursValid = Number.isFinite(parsedHours) && parsedHours > 0;
-
-      const vehiclesHourly = await Promise.all(
-        vehicleClasses.map(async (vc) => {
-          if (!hoursValid) {
-            return {
-              vehicleClass: vc.key,
-              label: vc.label,
-              modelExample: vc.modelExample,
-              basePrice: null as number | null,
-              price: null as number | null,
-              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
-              available: false,
-              pendingHours: true,
-              unavailableReason: "Select hours to see price",
-              isPeakActive: peakMultiplier > 1.0,
-              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-            };
-          }
-          try {
-            const quote = await calculateHourlyPrice(
-              route.city,
-              vc.key,
-              parsedHours,
-            );
-            const afterPeak = quote.subtotal * peakMultiplier;
-            return {
-              vehicleClass: vc.key,
-              label: vc.label,
-              modelExample: vc.modelExample,
-              basePrice: quote.subtotal,
-              price: Math.round(afterPeak * 100) / 100,
-              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
-              available: true,
-              pendingHours: false,
-              unavailableReason: null,
-              isPeakActive: peakMultiplier > 1.0,
-              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-            };
-          } catch (err: any) {
-            // Calculator rejected this vehicle class — usually a
-            // missing tier price. Surface the calculator's exact
-            // reason so the partner (and admin via support tickets)
-            // sees what to configure.
-            return {
-              vehicleClass: vc.key,
-              label: vc.label,
-              modelExample: vc.modelExample,
-              basePrice: null,
-              price: null,
-              maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
-              available: false,
-              pendingHours: false,
-              unavailableReason: err?.message || "Not available",
-              isPeakActive: peakMultiplier > 1.0,
-              peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-            };
-          }
-        }),
-      );
-
-      res.json({
-        success: true,
-        data: {
-          routeName: route.routeName,
-          isPerKm: false,
-          isHourly: true,
-          hours: hoursValid ? parsedHours : null,
-          vehicles: vehiclesHourly.filter((v) => v.available),
-          allVehicles: vehiclesHourly,
-          peakActive: peakMultiplier > 1.0,
-          peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-        },
-      });
-      return;
-    }
-
-    // ============== ONE_WAY BRANCH (original logic) ==============
-    // Filter out ELECTRIC for non-Riyadh (it's handled separately)
-    const vehicles = vehicleClasses.map((vc) => {
-      const basePrice = (route as any)[vc.column];
-      const price = basePrice ? Number(basePrice) * peakMultiplier : null;
-      return {
-        vehicleClass: vc.key,
-        label: vc.label,
-        modelExample: vc.modelExample,
-        basePrice: basePrice ? Number(basePrice) : null,
-        price,
-        maxPassengers: VEHICLE_MAX_PASSENGERS[vc.key],
-        available: basePrice !== null,
-        isPeakActive: peakMultiplier > 1.0,
-        peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-      };
-    });
-
-    res.json({
-      success: true,
-      data: {
-        routeName: route.routeName,
-        isPerKm: route.isPerKm,
-        vehicles: vehicles.filter((v) => v.available),
-        allVehicles: vehicles,
-        peakActive: peakMultiplier > 1.0,
-        peakMultiplier: peakMultiplier > 1.0 ? peakMultiplier : null,
-      },
-    });
-  },
-);
-
-// ============== PRICE BREAKDOWN ==============
-
-/**
- * Calculate price breakdown before final booking
- * Returns: base price, peak surcharge (if any), VAT, total
- */
-export const getPriceBreakdown = asyncWrapper(
-  async (req: Request, res: Response) => {
-    const partner = await getPartnerForUser(req.user!.id);
-    requireOperational(partner.status);
-
-    const { routeId, vehicleClass, isElectric, hours } = req.body;
-
-    if (!routeId || !vehicleClass) {
-      throw new BadRequestError("routeId and vehicleClass are required");
-    }
-
-    let basePrice: number;
-    let hourlyQuote: HourlyQuote | null = null;
-
-    if (isElectric) {
-      const route = await prisma.electricTariff.findUnique({
-        where: { id: routeId },
-      });
-      if (!route || !route.price)
-        throw new BadRequestError("Price not set for this electric route");
-      basePrice = Number(route.price);
-    } else {
-      const route = await prisma.routeTariff.findUnique({
-        where: { id: routeId },
-      });
-      if (!route) throw new NotFoundError("Route");
-
-      if (route.routeType === "HOURLY") {
-        // HOURLY uses bracket pricing across all three tier rows for the
-        // city, NOT the single row picked by the partner. The picked row
-        // just signals intent — the calculator decides which tier(s) apply
-        // based on hours.
-        const parsedHours = Number(hours);
-        if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
-          throw new BadRequestError(
-            "hours is required and must be a positive number for hourly bookings",
-          );
-        }
-        hourlyQuote = await calculateHourlyPrice(
-          route.city,
-          vehicleClass,
-          parsedHours,
-        );
-        basePrice = hourlyQuote.subtotal;
-      } else {
-        // ONE_WAY — existing single-row lookup.
-        const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
-        if (!column) throw new BadRequestError("Invalid vehicle class");
-
-        const routePrice = (route as any)[column];
-        if (!routePrice)
-          throw new BadRequestError(
-            `Price not set for ${vehicleClass} on this route`,
-          );
-        basePrice = Number(routePrice);
-      }
-    }
-
-    // Check peak pricing
-    const peakConfig = await prisma.peakPricingConfig.findFirst({
-      where: { isEnabled: true },
-    });
-    const peakMultiplier =
-      peakConfig && (!peakConfig.expiresAt || peakConfig.expiresAt > new Date())
-        ? Number(peakConfig.multiplier)
-        : 1.0;
-
-    const priceAfterPeak = basePrice * peakMultiplier;
-    const peakSurcharge = priceAfterPeak - basePrice;
-    // Admin tariff prices are VAT-inclusive, so extract VAT from the total
-    const baseFareExVat = priceAfterPeak / (1 + VAT_RATE);
-    const vatAmount = priceAfterPeak - baseFareExVat;
-    const totalPrice = priceAfterPeak; // Total stays the same as the tariff price
-
-    res.json({
-      success: true,
-      data: {
-        basePrice: Math.round(baseFareExVat * 100) / 100,
-        peakMultiplier,
-        peakSurcharge: Math.round(peakSurcharge * 100) / 100,
-        subtotal: Math.round(baseFareExVat * 100) / 100,
-        vatRate: VAT_RATE,
-        vatAmount: Math.round(vatAmount * 100) / 100,
-        totalPrice: Math.round(totalPrice * 100) / 100,
-        // Present only for hourly bookings. Frontend renders this as
-        // line items above the VAT/total summary so partners see how
-        // the bracket logic resolved their hours selection.
-        hourly: hourlyQuote
-          ? {
-              hours: hourlyQuote.hours,
-              tier: hourlyQuote.tier,
-              breakdown: hourlyQuote.breakdown.map((l) => ({
-                label: l.label,
-                hours: l.hours,
-                rate: Math.round(l.rate * 100) / 100,
-                amount: Math.round(l.amount * 100) / 100,
-              })),
-              subtotalBeforePeak: hourlyQuote.subtotal,
-            }
-          : null,
-      },
-    });
-  },
-);
+function splitVatInclusive(total: number): {
+  basePrice: number;
+  vatAmount: number;
+  totalPrice: number;
+} {
+  const base = Math.round((total / (1 + VAT_RATE)) * 100) / 100;
+  const vat = Math.round((total - base) * 100) / 100;
+  const totalRounded = Math.round(total * 100) / 100;
+  return { basePrice: base, vatAmount: vat, totalPrice: totalRounded };
+}
 
 // ============== CREATE BOOKING ==============
 
 /**
- * Create a new booking (ONE_WAY or HOURLY)
- * Validates everything, calculates price, creates with PENDING status
+ * POST /api/v1/partner/book-ride
+ *
+ * Body shape:
+ *   guestName, guestPhone, guestEmail? — customer info
+ *   tripType — "ONE_WAY" | "HOURLY"
+ *   city — City.code (e.g. RIYADH)
+ *   vehicleClass — VehicleClass enum
+ *   pickupAddress, dropoffAddress, pickupLat/Lng?, dropoffLat/Lng?
+ *   tripDate (ISO), tripTime (HH:MM)
+ *   hours? — required for HOURLY
+ *   passengers?, luggage?, childSeat?
+ *   flightNumber?, terminalNo?, terminalLocation? — if airport
+ *   totalPrice — the ONLY money field the partner supplies
+ *                (VAT-inclusive; base + VAT computed here)
+ *   notes?
+ *
+ * Business rules enforced server-side:
+ *   • City exists and is active
+ *   • Vehicle class allowed in city (ELECTRIC needs city.electricEnabled,
+ *     ULTRA_LUXURY needs city.ultraLuxuryEnabled)
+ *   • Passenger count within class cap
+ *   • Trip date not in the past
+ *   • Total price within sanity bounds
+ *   • Flight number required when pickup/dropoff mentions "airport"
  */
 export const createBooking = asyncWrapper(
   async (req: Request, res: Response) => {
     const partner = await getPartnerForUser(req.user!.id);
+    requireOperational(partner.status);
     await requireApprovedAndDocsValid(partner);
 
     const {
-      // Customer info
       guestName,
       guestPhone,
       guestEmail,
-      // Trip details
-      city,
       tripType,
-      routeId,
-      isElectric,
-      // Locations (from Google Maps autocomplete)
+      city,
+      vehicleClass,
       pickupAddress,
       pickupLat,
       pickupLng,
       dropoffAddress,
       dropoffLat,
       dropoffLng,
-      // Airport fields (conditional)
+      tripDate,
+      tripTime,
+      hours: hoursFromBody,
+      passengers,
       flightNumber,
       terminalNo,
       terminalLocation,
-      // Schedule
-      tripDate,
-      tripTime,
-      // Vehicle
-      vehicleClass,
-      passengers,
-      // Hours — required for HOURLY, ignored for ONE_WAY
-      hours: hoursFromBody,
-      // Optional
+      totalPrice: totalPriceFromBody,
       notes,
-    } = req.body;
+    } = req.body ?? {};
 
-    // ============ VALIDATION ============
-
-    // Required fields
+    // ---------- Required-field validation ----------
     if (!guestName?.trim()) throw new BadRequestError("Guest name is required");
     if (!guestPhone?.trim())
-      throw new BadRequestError("Guest phone number is required");
+      throw new BadRequestError("Guest phone is required");
+    if (!["ONE_WAY", "HOURLY"].includes(tripType)) {
+      throw new BadRequestError("tripType must be ONE_WAY or HOURLY");
+    }
     if (!city) throw new BadRequestError("City is required");
-    if (!tripType) throw new BadRequestError("Trip type is required");
-    if (!routeId) throw new BadRequestError("Route is required");
+    if (!vehicleClass) throw new BadRequestError("Vehicle class is required");
     if (!pickupAddress?.trim())
       throw new BadRequestError("Pickup address is required");
-    if (!dropoffAddress?.trim() && tripType === "ONE_WAY")
-      throw new BadRequestError("Dropoff address is required");
+    if (tripType === "ONE_WAY" && !dropoffAddress?.trim()) {
+      throw new BadRequestError(
+        "Drop-off address is required for one-way bookings",
+      );
+    }
     if (!tripDate) throw new BadRequestError("Trip date is required");
     if (!tripTime?.trim()) throw new BadRequestError("Trip time is required");
-    if (!vehicleClass) throw new BadRequestError("Vehicle class is required");
 
-    // City validation
-    const validCities = ["RIYADH", "JEDDAH", "MAKKAH", "MADINAH"];
-    if (!validCities.includes(city)) {
+    // ---------- City validity ----------
+    const cityRow = await prisma.city.findUnique({ where: { code: city } });
+    if (!cityRow) throw new BadRequestError(`Unknown city "${city}".`);
+    if (!cityRow.isActive) {
       throw new BadRequestError(
-        `Invalid city. Must be one of: ${validCities.join(", ")}`,
+        `${cityRow.name} is not currently available for booking.`,
       );
     }
 
-    // Trip type validation
-    if (!["ONE_WAY", "HOURLY"].includes(tripType)) {
-      throw new BadRequestError("Trip type must be ONE_WAY or HOURLY");
+    // ---------- Vehicle-class validity for city ----------
+    if (!(vehicleClass in VEHICLE_MAX_PASSENGERS)) {
+      throw new BadRequestError(`Unknown vehicle class "${vehicleClass}".`);
     }
-
-    // Vehicle class validation
-    const allVehicleClasses = [
-      "ECONOMY_SEDAN",
-      "BUSINESS_SEDAN",
-      "FIRST_CLASS",
-      "BUSINESS_SUV",
-      "ELECTRIC",
-      "HIACE",
-      "COASTER",
-      "KING_LONG",
-    ];
-    if (!allVehicleClasses.includes(vehicleClass)) {
+    if (vehicleClass === "ELECTRIC" && !cityRow.electricEnabled) {
       throw new BadRequestError(
-        `Invalid vehicle class. Must be one of: ${allVehicleClasses.join(", ")}`,
+        `Electric vehicles are not available in ${cityRow.name}.`,
+      );
+    }
+    if (vehicleClass === "ULTRA_LUXURY" && !cityRow.ultraLuxuryEnabled) {
+      throw new BadRequestError(
+        `Ultra Luxury vehicles are not available in ${cityRow.name}.`,
       );
     }
 
-    // Electric is only available in Riyadh
-    if (vehicleClass === "ELECTRIC" && city !== "RIYADH") {
-      throw new BadRequestError(
-        "Electric vehicles are only available in Riyadh",
-      );
-    }
-
-    // Passenger validation
+    // ---------- Passenger count ----------
     const maxPassengers = VEHICLE_MAX_PASSENGERS[vehicleClass];
-    const requestedPassengers = passengers || maxPassengers;
+    const requestedPassengers = Number(passengers) || maxPassengers;
+    if (requestedPassengers < 1) {
+      throw new BadRequestError("At least 1 passenger is required.");
+    }
     if (requestedPassengers > maxPassengers) {
+      // Human-friendly label — the raw enum value like ULTRA_LUXURY
+      // doesn't read well in an error toast to a partner.
+      const label = VEHICLE_CLASS_LABELS[vehicleClass] || vehicleClass;
       throw new BadRequestError(
-        `Maximum ${maxPassengers} passengers allowed for ${vehicleClass}. You requested ${requestedPassengers}.`,
+        `Too many passengers for ${label}. This vehicle class seats ${maxPassengers} passenger${maxPassengers === 1 ? "" : "s"} — you selected ${requestedPassengers}. Please reduce the passenger count or pick a larger vehicle class.`,
       );
     }
-    if (requestedPassengers < 1) {
-      throw new BadRequestError("At least 1 passenger is required");
+
+    // ---------- Hours (HOURLY only) ----------
+    let hours: number | null = null;
+    let hourlyDuration: string | null = null;
+    if (tripType === "HOURLY") {
+      const parsed = Number(hoursFromBody);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new BadRequestError(
+          "hours is required and must be a positive number for hourly bookings.",
+        );
+      }
+      hours = parsed;
+      hourlyDuration = `${parsed} hour${parsed === 1 ? "" : "s"}`;
     }
 
-    // Date validation — must be today or future
+    // ---------- Trip date not in the past ----------
     const tripDateObj = new Date(tripDate);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     if (tripDateObj < today) {
-      throw new BadRequestError("Trip date cannot be in the past");
+      throw new BadRequestError("Trip date cannot be in the past.");
     }
 
-    // ============ ROUTE & PRICE LOOKUP ============
-
-    let basePrice: number;
-    let routeName: string;
-    let hours: number | null = null;
-    let hourlyDuration: string | null = null;
-    let routeIsAirport = false;
-
-    if (isElectric || vehicleClass === "ELECTRIC") {
-      // Electric route
-      const route = await prisma.electricTariff.findUnique({
-        where: { id: routeId },
-      });
-      if (!route) throw new NotFoundError("Electric route not found");
-      if (!route.price)
-        throw new BadRequestError("Price not set for this electric route");
-      if (!route.isActive)
-        throw new BadRequestError("This route is currently inactive");
-
-      basePrice = Number(route.price);
-      routeName = route.routeName;
-      routeIsAirport = isAirportRoute(
-        route.routeName,
-        route.pickupLocation,
-        route.dropoffLocation,
+    // ---------- Total price ----------
+    const totalPriceNum = Number(totalPriceFromBody);
+    if (!Number.isFinite(totalPriceNum)) {
+      throw new BadRequestError("Total price is required.");
+    }
+    if (totalPriceNum < MIN_TOTAL_PRICE || totalPriceNum > MAX_TOTAL_PRICE) {
+      throw new BadRequestError(
+        `Total price must be between SAR ${MIN_TOTAL_PRICE} and SAR ${MAX_TOTAL_PRICE}.`,
       );
-    } else {
-      // Standard route
-      const route = await prisma.routeTariff.findUnique({
-        where: { id: routeId },
-      });
-      if (!route) throw new NotFoundError("Route not found");
-      if (!route.isActive)
-        throw new BadRequestError("This route is currently inactive");
+    }
+    const { basePrice, vatAmount, totalPrice } =
+      splitVatInclusive(totalPriceNum);
 
-      if (route.routeType === "HOURLY") {
-        // HOURLY pricing comes from the bracket calculator, not the
-        // single tier row picked in the form. The selected row just
-        // signals "this is an hourly booking" — the calculator decides
-        // which tier(s) apply based on hours.
-        const parsedHours = Number(hoursFromBody);
-        if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
-          throw new BadRequestError(
-            "hours is required and must be a positive number for hourly bookings",
-          );
-        }
-        const quote = await calculateHourlyPrice(
-          route.city,
-          vehicleClass,
-          parsedHours,
-        );
-        basePrice = quote.subtotal;
-        hours = parsedHours;
-        // Human-readable summary stored on the booking for invoicing
-        // and customer-facing displays. Reflects what was actually
-        // computed (which tier(s) applied).
-        if (quote.tier === "PER_HOUR") {
-          hourlyDuration = `${parsedHours} hour${parsedHours === 1 ? "" : "s"} (per-hour rate)`;
-        } else if (quote.tier === "DAY_RATE") {
-          hourlyDuration = `${parsedHours} hour${parsedHours === 1 ? "" : "s"} (day rate)`;
-        } else {
-          const extra = parsedHours - HOURLY_DAY_RATE_MAX;
-          hourlyDuration = `${parsedHours} hours (day rate + ${extra} extra hour${extra === 1 ? "" : "s"})`;
-        }
-        routeName = route.routeName;
-        routeIsAirport = false; // hourly never airport
-      } else {
-        // ONE_WAY — single-row lookup.
-        const column = VEHICLE_TO_TARIFF_COLUMN[vehicleClass];
-        if (!column)
-          throw new BadRequestError("Invalid vehicle class for standard route");
-
-        const routePrice = (route as any)[column];
-        if (!routePrice) {
-          throw new BadRequestError(
-            `${vehicleClass} is not available on this route (price not set by admin)`,
-          );
-        }
-
-        basePrice = Number(routePrice);
-        routeName = route.routeName;
-        routeIsAirport = isAirportRoute(
-          route.routeName,
-          route.pickupLocation,
-          route.dropoffLocation,
-        );
-      }
+    // ---------- Airport heuristic → flight number required ----------
+    const isAirport = looksLikeAirport(
+      pickupAddress,
+      dropoffAddress || pickupAddress,
+    );
+    if (isAirport && !flightNumber?.trim()) {
+      throw new BadRequestError(
+        "Flight number is required for airport bookings.",
+      );
     }
 
-    // Airport route validation: flight number is required for airport routes
-    if (routeIsAirport && !flightNumber?.trim()) {
-      throw new BadRequestError("Flight number is required for airport routes");
-    }
-
-    // ============ PEAK PRICING ============
-
-    const peakConfig = await prisma.peakPricingConfig.findFirst({
-      where: { isEnabled: true },
-    });
-    const peakMultiplier =
-      peakConfig && (!peakConfig.expiresAt || peakConfig.expiresAt > new Date())
-        ? Number(peakConfig.multiplier)
-        : 1.0;
-
-    // ============ CALCULATE FINAL PRICE ============
-
-    const priceAfterPeak = basePrice * peakMultiplier;
-    // Admin tariff prices are VAT-inclusive — extract VAT from total
-    const baseFareExVat =
-      Math.round((priceAfterPeak / (1 + VAT_RATE)) * 100) / 100;
-    const vatAmount = Math.round((priceAfterPeak - baseFareExVat) * 100) / 100;
-    const totalPrice = Math.round(priceAfterPeak * 100) / 100;
-
-    // ============ CREATE BOOKING ============
-
+    // ---------- Create booking ----------
     const booking = await prisma.booking.create({
       data: {
         bookingRef: await generateBookingRef("PARTNER", partner.companyName),
-        // Opaque, non-guessable token for the public customer trip
-        // card at /trip/{token}. We use crypto.randomUUID() (built
-        // into Node 14.17+, no extra deps) — 128 bits of entropy is
-        // more than enough to make brute-force enumeration of valid
-        // tokens infeasible. Stays on the row permanently so old
-        // confirmation links remain useful for a while, but the
-        // public endpoint refuses to render once trip_date + 30
-        // days is in the past.
+        // Opaque token for the public /trip/{token} card. 128 bits of
+        // entropy — non-guessable even by a determined enumerator.
         shareToken: crypto.randomUUID(),
-        // Partner link
+
         partnerId: partner.id,
         source: "PARTNER",
-        // Customer info
+
+        // Customer
         guestName: guestName.trim(),
         guestPhone: guestPhone.trim(),
         guestEmail: guestEmail?.trim() || null,
-        // Trip details
+
+        // Trip
         tripType: tripType as any,
-        city: city as any,
-        route: routeName,
-        routeTariffId: routeId,
+        city: cityRow.code,
+        // `route` is now optional / cosmetic — under partner-priced
+        // bookings there is no admin-defined route to reference.
+        // Kept nullable on the model; leaving null here.
+        route: null,
         hours,
         hourlyDuration,
+
         // Locations
         pickupAddress: pickupAddress.trim(),
         pickupLat: pickupLat || null,
         pickupLng: pickupLng || null,
-        dropoffAddress: dropoffAddress?.trim() || pickupAddress.trim(),
+        dropoffAddress: (dropoffAddress || pickupAddress).trim(),
         dropoffLat: dropoffLat || null,
         dropoffLng: dropoffLng || null,
-        // Airport fields
-        flightNumber: routeIsAirport ? flightNumber?.trim() || null : null,
-        terminalNo: routeIsAirport ? terminalNo?.trim() || null : null,
-        terminalLocation: routeIsAirport
-          ? terminalLocation?.trim() || null
-          : null,
+
+        // Airport (only when heuristic matched)
+        flightNumber: isAirport ? flightNumber?.trim() || null : null,
+        terminalNo: isAirport ? terminalNo?.trim() || null : null,
+        terminalLocation: isAirport ? terminalLocation?.trim() || null : null,
+
         // Schedule
         tripDate: tripDateObj,
         tripTime: tripTime.trim(),
+
         // Vehicle
         vehicleClass: vehicleClass as any,
         passengers: requestedPassengers,
-        // Pricing
-        basePrice: baseFareExVat,
-        peakMultiplier,
+
+        // Pricing — partner-set, VAT-inclusive split. Peak multiplier
+        // hard-coded to 1.00 for partner bookings (peak is a future
+        // customer/B2C concept).
+        basePrice,
+        peakMultiplier: 1.0,
         vatAmount,
         totalPrice,
-        // Status — sent to admin for vendor assignment
+
         status: "PENDING",
         notes: notes?.trim() || null,
-        // Admin notification
+
+        // Admin attention flags — untouched from prior behavior.
         isReadByAdmin: false,
         needsAttention: true,
         attentionReason: "New partner booking — needs vendor assignment",
@@ -1012,8 +380,7 @@ export const createBooking = asyncWrapper(
       },
     });
 
-    // Create notification for admin
-    // Find admin users to notify
+    // ---------- Admin notifications ----------
     const adminUsers = await prisma.user.findMany({
       where: { role: "ADMIN", isActive: true },
       select: { id: true },
@@ -1024,7 +391,7 @@ export const createBooking = asyncWrapper(
         data: adminUsers.map((admin) => ({
           userId: admin.id,
           title: "New Partner Booking",
-          message: `${partner.companyName} booked a ${vehicleClass} ride for ${guestName} on ${tripDateObj.toLocaleDateString()} — ${routeName}`,
+          message: `${partner.companyName} booked a ${vehicleClass} ride for ${guestName} on ${tripDateObj.toLocaleDateString()} in ${cityRow.name}`,
           type: "PARTNER_BOOKING_CREATED",
           data: {
             bookingId: booking.id,
@@ -1033,9 +400,28 @@ export const createBooking = asyncWrapper(
           },
         })),
       });
+
+      // Fire-and-forget admin email. Failure never blocks the booking
+      // flow — the lib logs internally. See renderAdminShell in
+      // src/lib/email.ts for the layout.
+      sendBookingCreatedAdminEmail({
+        bookingRef: booking.bookingRef,
+        guestName: booking.guestName,
+        guestPhone: booking.guestPhone,
+        partnerCompanyName: partner.companyName,
+        vehicleClass,
+        passengers: booking.passengers,
+        pickupAddress: booking.pickupAddress,
+        dropoffAddress: booking.dropoffAddress,
+        tripDate: booking.tripDate,
+        tripTime: booking.tripTime,
+        totalPrice: Number(booking.totalPrice),
+      }).catch((err) => {
+        console.error("[email] sendBookingCreatedAdminEmail failed:", err);
+      });
     }
 
-    // Log audit
+    // ---------- Audit ----------
     await prisma.auditLog.create({
       data: {
         userId: req.user!.id,
@@ -1046,66 +432,31 @@ export const createBooking = asyncWrapper(
           bookingRef: booking.bookingRef,
           partnerCompany: partner.companyName,
           guestName,
-          city,
+          city: cityRow.code,
           tripType,
-          route: routeName,
           vehicleClass,
           totalPrice,
         },
       },
     });
 
-    // Fire-and-forget admin notification. A failed email must NEVER
-    // block the booking from being created — we log and swallow so the
-    // partner still gets their 201 even if Resend / DNS / whatever
-    // hiccups. See src/lib/email.ts renderAdminShell for the layout.
-    sendBookingCreatedAdminEmail({
-      bookingRef: booking.bookingRef,
-      guestName: booking.guestName,
-      guestPhone: booking.guestPhone,
-      partnerCompanyName: partner.companyName,
-      vehicleClass,
-      passengers: booking.passengers,
-      pickupAddress: booking.pickupAddress,
-      dropoffAddress: booking.dropoffAddress,
-      tripDate: booking.tripDate,
-      tripTime: booking.tripTime,
-      totalPrice: Number(booking.totalPrice),
-    }).catch((err) => {
-      console.error("[email] sendBookingCreatedAdminEmail failed:", err);
-    });
-
-    res.status(201).json({
+    res.json({
       success: true,
-      message:
-        "Booking created successfully. It has been sent to admin for vendor assignment.",
       data: {
         id: booking.id,
         bookingRef: booking.bookingRef,
         status: booking.status,
-        statusLabel: "Sent to Admin",
-        guestName: booking.guestName,
-        route: booking.route,
-        tripDate: booking.tripDate,
-        tripTime: booking.tripTime,
-        vehicleClass: booking.vehicleClass,
-        passengers: booking.passengers,
-        pricing: {
-          basePrice: Number(booking.basePrice),
-          peakMultiplier: Number(booking.peakMultiplier),
-          vatAmount: Number(booking.vatAmount),
-          totalPrice: Number(booking.totalPrice),
-        },
-        createdAt: booking.createdAt,
+        totalPrice,
       },
     });
   },
 );
 
-// ============== GET SINGLE BOOKING DETAIL ==============
+// ============== GET BOOKING DETAIL ==============
 
 /**
- * Get full details of a single booking (for partner's own bookings only)
+ * GET /api/v1/partner/book-ride/:bookingId
+ * Partner's own booking detail view.
  */
 export const getBookingDetail = asyncWrapper(
   async (req: Request, res: Response) => {
@@ -1114,14 +465,9 @@ export const getBookingDetail = asyncWrapper(
     const { bookingId } = req.params;
 
     const booking = await prisma.booking.findFirst({
-      where: {
-        id: bookingId,
-        partnerId: partner.id,
-      },
+      where: { id: bookingId, partnerId: partner.id },
       include: {
-        vendor: {
-          select: { companyName: true },
-        },
+        vendor: { select: { companyName: true } },
         driver: {
           select: {
             firstName: true,
@@ -1145,14 +491,8 @@ export const getBookingDetail = asyncWrapper(
 
     if (!booking) throw new NotFoundError("Booking");
 
-    // Status labels for the partner. Keys MUST match the BookingStatus
-    // enum on the Prisma schema — earlier this map had stale placeholder
-    // keys (AWAITING_VENDOR, VENDOR_REJECTED, ALL_VENDORS_REJECTED,
-    // UNSERVICEABLE) that no booking ever carries, so they were dead
-    // and made the file look like states existed that don't.
-    // Partner-facing wording deliberately masks the
-    // PENDING / ASSIGNMENT_OFFERED / ASSIGNMENT_RE_OFFERED triplet into
-    // a single "Awaiting Driver/Vehicle Assignment" step — partners
+    // Partner-facing wording masks the PENDING / ASSIGNMENT_OFFERED /
+    // ASSIGNMENT_RE_OFFERED triplet as one "awaiting" state — partners
     // don't see the internal vendor-offer cycle.
     const statusLabels: Record<string, string> = {
       PENDING: "Awaiting Driver/Vehicle Assignment",
@@ -1180,6 +520,7 @@ export const getBookingDetail = asyncWrapper(
         city: booking.city,
         route: booking.route,
         hours: booking.hours,
+        hourlyDuration: booking.hourlyDuration,
         pickupAddress: booking.pickupAddress,
         dropoffAddress: booking.dropoffAddress,
         tripDate: booking.tripDate,
@@ -1191,19 +532,20 @@ export const getBookingDetail = asyncWrapper(
         // Vehicle
         vehicleClass: booking.vehicleClass,
         passengers: booking.passengers,
-        // Pricing
+        // Pricing — partner set the total; base + VAT are the split
+        // stored at booking-create time. peakMultiplier is retained
+        // in the API shape for compat, but is always 1.00 for
+        // partner bookings post-refactor.
         pricing: {
           basePrice: Number(booking.basePrice),
           peakMultiplier: Number(booking.peakMultiplier),
           vatAmount: Number(booking.vatAmount),
           totalPrice: Number(booking.totalPrice),
         },
-        // Assignment (visible once assigned)
         vendor: booking.vendor,
         driver: booking.driver,
         vehicle: booking.vehicle,
         notes: booking.notes,
-        // Timestamps
         createdAt: booking.createdAt,
         confirmedAt: booking.confirmedAt,
         completedAt: booking.completedAt,
@@ -1215,33 +557,22 @@ export const getBookingDetail = asyncWrapper(
 // ============== CANCEL BOOKING ==============
 
 /**
- * Partner can cancel a booking while it's still in the "awaiting
- * assignment" phase: before admin offers it to a vendor (PENDING) or
- * while admin has offered/re-offered it to a vendor that hasn't yet
- * accepted (ASSIGNMENT_OFFERED, ASSIGNMENT_RE_OFFERED). Once a vendor
- * confirms (CONFIRMED) the booking is locked from partner-side
- * cancellation and goes through the regular cancellation flow with
- * admin involvement.
+ * PATCH /api/v1/partner/book-ride/:bookingId/cancel
+ * Partner can cancel while awaiting assignment; once a vendor confirms,
+ * cancellation goes through the regular admin-involved flow.
  */
 export const cancelBooking = asyncWrapper(
   async (req: Request, res: Response) => {
     const partner = await getPartnerForUser(req.user!.id);
     requireOperational(partner.status);
     const { bookingId } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body ?? {};
 
     const booking = await prisma.booking.findFirst({
-      where: {
-        id: bookingId,
-        partnerId: partner.id,
-      },
+      where: { id: bookingId, partnerId: partner.id },
     });
-
     if (!booking) throw new NotFoundError("Booking");
 
-    // Stale names "AWAITING_VENDOR" and "VENDOR_REJECTED" were used
-    // here previously — they were never on the BookingStatus enum, so
-    // partners couldn't cancel anything that progressed past PENDING.
     const cancellableStatuses = [
       "PENDING",
       "ASSIGNMENT_OFFERED",
@@ -1257,20 +588,15 @@ export const cancelBooking = asyncWrapper(
       where: { id: bookingId },
       data: {
         status: "CANCELLED",
-        // The note ends up on the booking row which is visible to the
-        // vendor through their booking detail. We deliberately use
-        // "client" (neutral — could be a direct guest or a partner)
-        // instead of "partner" so the cancellation message doesn't
-        // leak the existence of the partner channel to the vendor.
-        // Admin still sees the full partner attribution through the
-        // admin-side notification fired below.
+        // "client" (neutral) rather than "partner" — the vendor-visible
+        // note shouldn't leak the partner channel. Admin sees the full
+        // partner attribution through the admin notification below.
         notes: reason
           ? `${booking.notes ? booking.notes + " | " : ""}Cancelled by client: ${reason}`
           : booking.notes,
       },
     });
 
-    // Notify admin
     const adminUsers = await prisma.user.findMany({
       where: { role: "ADMIN", isActive: true },
       select: { id: true },
@@ -1309,3 +635,5 @@ export const cancelBooking = asyncWrapper(
     });
   },
 );
+
+// End of file — all exports are declared above.

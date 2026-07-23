@@ -199,15 +199,44 @@ interface VendorFleetProps {
 
 // ============== CONSTANTS ==============
 
+// Vehicle category picker options for the Add Vehicle wizard. Hints
+// use "or similar" phrasing because the exact model varies by vendor
+// — the category itself is what the partner books against, not a
+// specific make/model. Ordering matches the partner Book Ride picker.
 const VEHICLE_CATEGORIES = [
-  { key: "ECONOMY_SEDAN", label: "Economy Sedan" },
-  { key: "BUSINESS_SEDAN", label: "Business Sedan" },
-  { key: "FIRST_CLASS", label: "First Class" },
-  { key: "BUSINESS_SUV", label: "Business SUV" },
-  { key: "ELECTRIC", label: "Electric" },
-  { key: "HIACE", label: "Hiace" },
-  { key: "COASTER", label: "Coaster" },
-  { key: "KING_LONG", label: "King Long" },
+  {
+    key: "ECONOMY_SEDAN",
+    label: "Economy Sedan",
+    hint: "Ford Taurus or similar",
+  },
+  {
+    key: "BUSINESS_SEDAN",
+    label: "Business Sedan",
+    hint: "Mercedes E-Class, BMW 5-Series or similar",
+  },
+  {
+    key: "FIRST_CLASS",
+    label: "First Class",
+    hint: "Mercedes S-Class, BMW 7-Series or similar",
+  },
+  {
+    key: "BUSINESS_SUV",
+    label: "Business SUV",
+    hint: "GMC Yukon, Chevrolet Tahoe or similar",
+  },
+  {
+    key: "ELECTRIC",
+    label: "Electric",
+    hint: "Lucid Air or similar",
+  },
+  {
+    key: "ULTRA_LUXURY",
+    label: "Ultra Luxury",
+    hint: "Rolls-Royce, Bentley, Maybach",
+  },
+  { key: "HIACE", label: "Hiace", hint: "10-seat van" },
+  { key: "COASTER", label: "Coaster", hint: "23-seat coach" },
+  { key: "KING_LONG", label: "King Long", hint: "49-seat coach" },
 ];
 
 const CHANGE_REQUEST_FIELD_GROUPS = [
@@ -2257,6 +2286,7 @@ export default function VendorFleet({
                       {VEHICLE_CATEGORIES.map((cat) => (
                         <option key={cat.key} value={cat.key}>
                           {cat.label}
+                          {cat.hint ? ` — ${cat.hint}` : ""}
                         </option>
                       ))}
                     </select>
@@ -3411,11 +3441,6 @@ export default function VendorFleet({
                   const addressed: string[] = [];
                   const pending: string[] = [];
                   for (const key of allFlagged) {
-                    const prev = snapshot[key];
-                    if (prev === undefined) {
-                      pending.push(key);
-                      continue;
-                    }
                     // Doc/photo keys live in vehicleDetail.documents[].filePath;
                     // info field keys (make/model/year/plateNumber/...) live
                     // as direct properties on vehicleDetail. Use filePath
@@ -3428,6 +3453,12 @@ export default function VendorFleet({
                       docMatch !== undefined
                         ? docMatch.filePath
                         : (vehicleDetail as any)[key];
+                    // Missing-snapshot-key fallback — treat undefined
+                    // as empty so the vendor's fresh upload/edit still
+                    // registers as addressed on legacy vehicles whose
+                    // snapshot pre-dates a field.
+                    const prevRaw = snapshot[key];
+                    const prev = prevRaw === undefined ? "" : prevRaw;
                     if (norm(prev) !== norm(curr)) addressed.push(key);
                     else pending.push(key);
                   }
@@ -3635,13 +3666,12 @@ export default function VendorFleet({
                                       <option value="">
                                         Select category...
                                       </option>
-                                      <option value="FIRST_CLASS">
-                                        First Class
-                                      </option>
-                                      <option value="BUSINESS">Business</option>
-                                      <option value="ECONOMY">Economy</option>
-                                      <option value="LUXURY">Luxury</option>
-                                      <option value="SUV">SUV</option>
+                                      {VEHICLE_CATEGORIES.map((cat) => (
+                                        <option key={cat.key} value={cat.key}>
+                                          {cat.label}
+                                          {cat.hint ? ` — ${cat.hint}` : ""}
+                                        </option>
+                                      ))}
                                     </select>
                                   ) : (
                                     <input
@@ -3824,12 +3854,17 @@ export default function VendorFleet({
                         <div className="grid grid-cols-2 gap-3">
                           {docs.map((doc) => {
                             const isFlagged = flaggedTypes.includes(doc.type);
+                            // Missing-snapshot-key fallback — legacy
+                            // vehicles' snapshots may pre-date a
+                            // required doc type. Treat undefined as ""
+                            // so a fresh upload registers as addressed.
+                            const snapPrev = snapshot?.[doc.type];
+                            const prevNorm =
+                              snapPrev === undefined ? "" : normUrl(snapPrev);
                             const isAddressed =
                               isFlagged &&
                               !!snapshot &&
-                              snapshot[doc.type] !== undefined &&
-                              normUrl(snapshot[doc.type]) !==
-                                normUrl(doc.filePath);
+                              prevNorm !== normUrl(doc.filePath);
                             return (
                               <div
                                 key={doc.type}

@@ -202,7 +202,6 @@ interface NotificationsPanelProps {
       | "dashboard"
       | "book"
       | "bookings"
-      | "tariffs"
       | "invoices"
       | "profile"
       | "reports"

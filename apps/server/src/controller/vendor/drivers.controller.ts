@@ -54,6 +54,8 @@ const DRIVER_EDITABLE_FIELDS: Record<string, string> = {
   firstName: "First Name",
   lastName: "Last Name",
   phone: "Phone Number",
+  nationalId: "National ID / Iqama",
+  licenseNumber: "Driving Licence Number",
   PROFILE_PHOTO: "Profile Photo",
   IQAMA_NATIONAL_ID: "Iqama / National ID",
   DRIVING_LICENSE: "Driving License",
@@ -242,12 +244,40 @@ export const addDriver = asyncWrapper(async (req: Request, res: Response) => {
   const vendor = await getVendorForUser(req.user!.id);
   await requireApprovedAndDocsValid(vendor);
 
-  const { firstName, lastName, phone, photoUrl, vehicleId } = req.body;
+  const {
+    firstName,
+    lastName,
+    phone,
+    nationalId,
+    licenseNumber,
+    photoUrl,
+    vehicleId,
+  } = req.body;
 
   // Validation
   if (!firstName?.trim()) throw new BadRequestError("First name is required");
   if (!lastName?.trim()) throw new BadRequestError("Last name is required");
   if (!phone?.trim()) throw new BadRequestError("Phone number is required");
+  if (!nationalId?.trim())
+    throw new BadRequestError("National ID / Iqama number is required");
+  if (!licenseNumber?.trim())
+    throw new BadRequestError("Driving licence number is required");
+
+  // Saudi National ID / Iqama is exactly 10 digits. Strip anything the
+  // vendor might have typed (spaces, hyphens) before validating.
+  const cleanedNationalId = String(nationalId).replace(/\D/g, "");
+  if (cleanedNationalId.length !== 10) {
+    throw new BadRequestError("National ID / Iqama must be exactly 10 digits.");
+  }
+  // Licence number in KSA also follows the 10-digit format printed on
+  // the licence card. Same treatment as nationalId — strip anything
+  // that isn't a digit before validating the length.
+  const cleanedLicenseNumber = String(licenseNumber).replace(/\D/g, "");
+  if (cleanedLicenseNumber.length !== 10) {
+    throw new BadRequestError(
+      "Driving licence number must be exactly 10 digits.",
+    );
+  }
 
   // Check duplicate phone within this vendor
   const existingDriver = await prisma.driver.findFirst({
@@ -281,6 +311,8 @@ export const addDriver = asyncWrapper(async (req: Request, res: Response) => {
       firstName: firstName.trim(),
       lastName: lastName.trim(),
       phone: phone.trim(),
+      nationalId: cleanedNationalId,
+      licenseNumber: cleanedLicenseNumber,
       photoUrl: photoUrl || null,
       assignedVehicleId,
       // Vendor is still onboarding — DRAFT until they explicitly submit for review.
@@ -434,6 +466,11 @@ export const getDriverDetail = asyncWrapper(
         lastName: driver.lastName,
         name: `${driver.firstName} ${driver.lastName}`,
         phone: driver.phone,
+        // Scalar identity fields — separate from the ID / licence
+        // document uploads. Frontend renders these in the Driver
+        // Information block and lets admin comment on them individually.
+        nationalId: driver.nationalId,
+        licenseNumber: driver.licenseNumber,
         photoUrl,
         rating: driver.rating ? Number(driver.rating) : null,
         isActive: driver.isActive,
@@ -502,7 +539,7 @@ export const updateDriverInfo = asyncWrapper(
     await requireApprovedAndDocsValid(vendor);
 
     const { driverId } = req.params;
-    const { firstName, lastName, phone } = req.body;
+    const { firstName, lastName, phone, nationalId, licenseNumber } = req.body;
 
     const driver = await prisma.driver.findFirst({
       where: { id: driverId, vendorId: vendor.id },
@@ -550,6 +587,30 @@ export const updateDriverInfo = asyncWrapper(
           );
       }
       updateData.phone = phone.trim();
+    }
+
+    // National ID — 10 digit Saudi format. Only applied when the field
+    // is either free-form editable (allowed) or admin has flagged this
+    // specific field for changes.
+    if (nationalId?.trim() && isFieldAllowed("nationalId")) {
+      const cleaned = String(nationalId).replace(/\D/g, "");
+      if (cleaned.length !== 10) {
+        throw new BadRequestError(
+          "National ID / Iqama must be exactly 10 digits.",
+        );
+      }
+      updateData.nationalId = cleaned;
+    }
+
+    // Licence number — 10-digit KSA format, same as nationalId.
+    if (licenseNumber?.trim() && isFieldAllowed("licenseNumber")) {
+      const cleaned = String(licenseNumber).replace(/\D/g, "");
+      if (cleaned.length !== 10) {
+        throw new BadRequestError(
+          "Driving licence number must be exactly 10 digits.",
+        );
+      }
+      updateData.licenseNumber = cleaned;
     }
 
     if (Object.keys(updateData).length === 0) {

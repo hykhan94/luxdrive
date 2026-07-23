@@ -9,7 +9,7 @@ import { isAdmin, isStaff } from "../../middleware/auth";
 // Import route modules
 import bookingRoutes from "./booking.route";
 import pricingRoutes from "./pricing.route";
-import tariffRoutes from "./tariff.route";
+import citiesRoutes from "./cities.route";
 import paymentRoutes from "./payment.route";
 import overviewRoutes from "./overview.route";
 import alertsSettingsRoutes from "./alerts-settings.route";
@@ -42,8 +42,8 @@ router.use("/bookings", bookingRoutes);
 // ============== PRICING STRATEGY ==============
 router.use("/pricing", pricingRoutes);
 
-// ============== TARIFF MANAGEMENT ==============
-router.use("/tariffs", tariffRoutes);
+// ============== CITIES ==============
+router.use("/cities", citiesRoutes);
 
 // ============== PAYMENTS ==============
 router.use("/payments", paymentRoutes);
