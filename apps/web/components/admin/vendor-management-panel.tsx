@@ -1,5 +1,6 @@
 "use client";
 
+import DocExpiryIndicator from "@/components/ui/doc-expiry-indicator";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { adminApi } from "@/lib/api";
 import {
@@ -53,66 +54,13 @@ const statusLabels: Record<string, string> = {
   SUSPENDED: "Suspended",
 };
 
-/**
- * Doc-health chip rendered in admin vendor list rows. Red (expired)
- * wins over amber (expiring within 30d) when both apply, since
- * expired docs are more urgent and stacking chips clutters the row.
- * Tooltip lists the actual doc types so admin can see what's
- * affected without drilling in. MOU is included alongside other
- * docs — and an expired MOU additionally triggers auto-suspension
- * via lib/cron.ts.
- */
-function DocHealthChip({
-  docHealth,
-}: {
-  docHealth?: {
-    expiredCount: number;
-    expiringSoonCount: number;
-    expiredTypes: string[];
-    expiringSoonTypes: string[];
-  };
-}) {
-  if (!docHealth) return null;
-  const { expiredCount, expiringSoonCount, expiredTypes, expiringSoonTypes } =
-    docHealth;
-  if (expiredCount === 0 && expiringSoonCount === 0) return null;
-  if (expiredCount > 0) {
-    const tooltip =
-      expiredTypes.length > 0
-        ? `Expired: ${expiredTypes.join(", ")}${
-            expiringSoonCount > 0
-              ? ` · Expiring: ${expiringSoonTypes.join(", ")}`
-              : ""
-          }`
-        : "Expired documents";
-    return (
-      <span
-        title={tooltip}
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/15 text-red-400 border border-red-500/30 whitespace-nowrap"
-      >
-        <AlertCircle className="w-3 h-3" />
-        {expiredCount} expired
-      </span>
-    );
-  }
-  return (
-    <span
-      title={`Expiring soon: ${expiringSoonTypes.join(", ")}`}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 whitespace-nowrap"
-    >
-      <Clock className="w-3 h-3" />
-      {expiringSoonCount} expiring
-    </span>
-  );
-}
-
 // Map of admin-side field keys to display labels
 const DRIVER_FIELD_LABELS: Record<string, string> = {
-  photo: "Driver Photo",
+  PROFILE_PHOTO: "Driver Photo",
+  IQAMA_NATIONAL_ID: "Iqama / National ID",
+  DRIVING_LICENSE: "Driving License",
   nationalId: "National ID",
-  iqama: "Iqama",
   licenseNumber: "License Number",
-  licenseDocument: "Driving License",
   phone: "Phone Number",
   firstName: "First Name",
   lastName: "Last Name",
@@ -281,6 +229,34 @@ function isAcceptedInRound(
     (c) =>
       c.isResolved &&
       (c.type === "ADMIN_COMMENT" || c.type === "ADMIN_REJECTION"),
+  );
+}
+
+/**
+ * Driver / Vehicle equivalent of isAcceptedInRound.
+ *
+ * DriverReviewComment and VehicleReviewComment don't carry a discriminating
+ * `type` column (unlike VendorReviewComment / PartnerReviewComment), so we
+ * use a string-marker convention on the comment body:
+ *   • "❌ Rejected: ..." → rejection
+ *   • "✅ Accepted"      → explicit Accept marker
+ *
+ * A field is treated as "accepted" when EITHER of these is true:
+ *   1. There's a resolved comment with the "✅ Accepted" marker (admin
+ *      clicked Accept via handleAcceptDriverField / handleAcceptVehicleField)
+ *   2. There WAS a rejection that has since been resolved (admin's earlier
+ *      per-field Reject flow resolves prior comments before adding the new
+ *      one — a leftover "resolved" state indicates admin's earlier decision)
+ *
+ * Any active unresolved comment overrides this — checked separately at the
+ * render site with `!hasComments && !isRejected` guards.
+ */
+function hasAcceptMarker(
+  comments: Array<{ comment: string; isResolved: boolean }> | undefined,
+): boolean {
+  if (!comments || comments.length === 0) return false;
+  return comments.some(
+    (c) => c.isResolved && c.comment?.startsWith?.("✅ Accepted"),
   );
 }
 
@@ -947,6 +923,84 @@ export default function VendorManagementPanel({
     }
   };
 
+  /**
+   * Explicitly accept a driver field / doc — mirrors handleAcceptVendorField.
+   *
+   * Two-step operation:
+   *   1. Resolve any lingering unresolved comments on this field (usually
+   *      a rejection the vendor has since addressed).
+   *   2. Create a NEW resolved comment carrying the "✅ Accepted" marker —
+   *      persistent audit trail + signal the frontend uses to render the
+   *      green ACCEPTED badge and hide the Accept/Reject buttons.
+   *
+   * Without step 2, clicking Accept on a REPLACED tile with no unresolved
+   * comments would be a no-op (nothing to resolve, no state change).
+   */
+  const handleAcceptDriverField = async (
+    fieldName: string,
+    unresolvedComments: Array<{ id: string }>,
+  ) => {
+    if (!selectedDriver || !selectedVendor) return;
+    setActionLoading("accept-" + fieldName);
+    try {
+      for (const c of unresolvedComments) {
+        await adminApi.resolveDriverReviewComment(
+          selectedVendor.id,
+          selectedDriver.id,
+          c.id,
+        );
+      }
+      await adminApi.addDriverReviewComment(
+        selectedVendor.id,
+        selectedDriver.id,
+        {
+          fieldName,
+          comment: "✅ Accepted",
+          resolveOnCreate: true,
+        },
+      );
+      showNotification("success", "Accepted");
+      fetchDriverDetail(selectedVendor.id, selectedDriver.id);
+    } catch (err: any) {
+      showNotification("error", err.message || "Failed to accept");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /** Vehicle counterpart of handleAcceptDriverField — same two-step. */
+  const handleAcceptVehicleField = async (
+    fieldName: string,
+    unresolvedComments: Array<{ id: string }>,
+  ) => {
+    if (!selectedVehicle || !selectedVendor) return;
+    setActionLoading("accept-" + fieldName);
+    try {
+      for (const c of unresolvedComments) {
+        await adminApi.resolveVehicleReviewComment(
+          selectedVendor.id,
+          selectedVehicle.id,
+          c.id,
+        );
+      }
+      await adminApi.addVehicleReviewComment(
+        selectedVendor.id,
+        selectedVehicle.id,
+        {
+          fieldName,
+          comment: "✅ Accepted",
+          resolveOnCreate: true,
+        },
+      );
+      showNotification("success", "Accepted");
+      fetchVehicleDetail(selectedVendor.id, selectedVehicle.id);
+    } catch (err: any) {
+      showNotification("error", err.message || "Failed to accept");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleRejectField = async (
     kind: "driver" | "vehicle",
     fieldName: string,
@@ -1512,9 +1566,8 @@ export default function VendorManagementPanel({
     snapshot: any,
     currentValue: any,
   ) => {
-    const unresolved = (comments[fieldName] || []).filter(
-      (c: any) => !c.isResolved,
-    );
+    const allComments = comments[fieldName] || [];
+    const unresolved = allComments.filter((c: any) => !c.isResolved);
     const hasComments = unresolved.length > 0;
     const isRejected = unresolved.some((c: any) =>
       c.comment?.startsWith?.("❌ Rejected:"),
@@ -1540,12 +1593,15 @@ export default function VendorManagementPanel({
     const hasChanged =
       snapshotIsPopulated && prev !== undefined && prev !== currentValue;
     const isAddressed = isRejected && hasChanged;
-    // Green "Accepted" — vendor changed the value and admin has
-    // resolved any unresolved comments on it (either explicitly via
-    // Accept, or implicitly if the change never had comments). Used
-    // to render an "✓ Accepted" badge instead of Accept/Reject buttons
-    // so admin sees at a glance that this field's cycle is closed.
-    const isAccepted = hasChanged && !hasComments && !isRejected;
+    // Green "Accepted" — persistent marker written by handleAcceptDriverField
+    // / handleAcceptVehicleField (a resolved "✅ Accepted" comment). Unlike
+    // the derived "hasChanged && !hasComments && !isRejected" heuristic
+    // this survives the vendor's resubmit-clears-comments flow because
+    // it's an explicit audit-trail entry, not an inferred state.
+    //
+    // Guard against active rejections — if admin re-rejected after
+    // accepting, the marker is stale; the tile flips back to REJECTED.
+    const isAccepted = !isRejected && hasAcceptMarker(allComments);
     return {
       unresolved,
       hasComments,
@@ -2335,7 +2391,10 @@ export default function VendorManagementPanel({
                                       bank request
                                     </span>
                                   )}
-                                  <DocHealthChip docHealth={v.docHealth} />
+                                  <DocExpiryIndicator
+                                    expiringDocs={v.docHealth?.expiringDocs}
+                                    expiredDocs={v.docHealth?.expiredDocs}
+                                  />
                                 </div>
                               )}
                             </div>
@@ -2468,7 +2527,10 @@ export default function VendorManagementPanel({
                         >
                           {statusLabels[v.status] || v.status}
                         </span>
-                        <DocHealthChip docHealth={v.docHealth} />
+                        <DocExpiryIndicator
+                          expiringDocs={v.docHealth?.expiringDocs}
+                          expiredDocs={v.docHealth?.expiredDocs}
+                        />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-center py-3 border-t border-b border-neutral-700">
@@ -2953,6 +3015,10 @@ export default function VendorManagementPanel({
                                     </div>
                                   </div>
                                   <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    <DocExpiryIndicator
+                                      expiringDocs={ds.expiringDocs}
+                                      expiredDocs={ds.expiredDocs}
+                                    />
                                     {d.unresolvedCommentCount > 0 && (
                                       <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/20 text-amber-400 text-[10px] rounded font-medium">
                                         <AlertTriangle className="w-2.5 h-2.5" />
@@ -3116,6 +3182,10 @@ export default function VendorManagementPanel({
                                     </div>
                                   </div>
                                   <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    <DocExpiryIndicator
+                                      expiringDocs={v.expiringDocs}
+                                      expiredDocs={v.expiredDocs}
+                                    />
                                     {v.unresolvedCommentCount > 0 && (
                                       <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/20 text-amber-400 text-[10px] rounded font-medium">
                                         <AlertTriangle className="w-2.5 h-2.5" />
@@ -3526,13 +3596,12 @@ export default function VendorManagementPanel({
                                     // doc-tile pattern below.
                                     <div className="flex items-center gap-2">
                                       <button
-                                        onClick={async () => {
-                                          for (const c of state.unresolved) {
-                                            await handleResolveDriverComment(
-                                              c.id,
-                                            );
-                                          }
-                                        }}
+                                        onClick={() =>
+                                          handleAcceptDriverField(
+                                            f.key,
+                                            state.unresolved,
+                                          )
+                                        }
                                         disabled={actionLoading !== null}
                                         className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded hover:bg-green-500/30 disabled:opacity-30 flex items-center gap-1"
                                       >
@@ -3588,9 +3657,17 @@ export default function VendorManagementPanel({
                       <div className="grid grid-cols-2 gap-3">
                         {/* Driver Photo */}
                         {(() => {
-                          const photoComments = (
-                            comments["photo"] || []
-                          ).filter((c: any) => !c.isResolved);
+                          // Full comment history for this field — used to
+                          // detect the persistent "✅ Accepted" marker
+                          // (a resolved comment written by
+                          // handleAcceptDriverField). Unlike the
+                          // unresolved slice below, this survives resubmit
+                          // clears + admin's later re-review actions.
+                          const photoCommentsAll =
+                            comments["PROFILE_PHOTO"] || [];
+                          const photoComments = photoCommentsAll.filter(
+                            (c: any) => !c.isResolved,
+                          );
                           const hasPhotoComments = photoComments.length > 0;
                           const photoRejected = photoComments.some((c: any) =>
                             c.comment?.startsWith?.("❌ Rejected:"),
@@ -3608,10 +3685,9 @@ export default function VendorManagementPanel({
                             snapshot !== undefined &&
                             typeof snapshot === "object" &&
                             Object.keys(snapshot).length > 0;
-                          // Missing-snapshot-key fallback — legacy
-                          // snapshots may not carry every doc key; treat
-                          // undefined as empty so any current fileUrl
-                          // registers as a replacement.
+                          // Docs need explicit snapshot values —
+                          // missing keys mean the doc pre-existed and
+                          // shouldn't silently register as replaced.
                           const normDoc = (v: any) =>
                             v === undefined || v === null ? "" : String(v);
                           const prevPhotoUrl = snapshotIsPopulated
@@ -3622,17 +3698,18 @@ export default function VendorManagementPanel({
                             : undefined;
                           const photoReplaced =
                             snapshotIsPopulated &&
-                            (normDoc(prevPhotoUrl) !==
-                              normDoc(driver.photoPath) ||
-                              normDoc(prevProfilePhotoDocUrl) !==
-                                normDoc(profilePhotoDoc?.filePath));
+                            ((prevPhotoUrl !== undefined &&
+                              normDoc(prevPhotoUrl) !==
+                                normDoc(driver.photoPath)) ||
+                              (prevProfilePhotoDocUrl !== undefined &&
+                                normDoc(prevProfilePhotoDocUrl) !==
+                                  normDoc(profilePhotoDoc?.filePath)));
                           const photoAddressed = photoRejected && photoReplaced;
-                          // Green "Accepted" state — replacement submitted
-                          // and admin has resolved all comments on it.
+                          // Green "Accepted" state — persistent marker
+                          // written by handleAcceptDriverField. Overrides
+                          // any stale addressed/replaced inference.
                           const photoAccepted =
-                            photoReplaced &&
-                            !hasPhotoComments &&
-                            !photoRejected;
+                            !photoRejected && hasAcceptMarker(photoCommentsAll);
                           return (
                             <div
                               className={`p-3 rounded-xl border ${
@@ -3652,7 +3729,13 @@ export default function VendorManagementPanel({
                               <div className="flex items-center justify-between mb-2">
                                 <p className="text-xs font-medium text-white flex items-center gap-1.5 flex-wrap">
                                   Driver Photo
-                                  {photoReplaced && (
+                                  {photoAccepted && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                      <CheckCircle2 className="w-2 h-2" />✓
+                                      Accepted
+                                    </span>
+                                  )}
+                                  {photoReplaced && !photoAccepted && (
                                     <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                       <RefreshCw className="w-2 h-2" />
                                       Replaced
@@ -3718,7 +3801,7 @@ export default function VendorManagementPanel({
                                 !photoAccepted &&
                                 (!photoRejected || photoReplaced) && (
                                   <div className="mt-2">
-                                    {rejectingField === "photo" ? (
+                                    {rejectingField === "PROFILE_PHOTO" ? (
                                       <div className="flex gap-1.5">
                                         <input
                                           type="text"
@@ -3738,7 +3821,7 @@ export default function VendorManagementPanel({
                                             )
                                               handleRejectField(
                                                 "driver",
-                                                "photo",
+                                                "PROFILE_PHOTO",
                                                 photoComments.map(
                                                   (c: any) => c.id,
                                                 ),
@@ -3753,7 +3836,7 @@ export default function VendorManagementPanel({
                                           onClick={() =>
                                             handleRejectField(
                                               "driver",
-                                              "photo",
+                                              "PROFILE_PHOTO",
                                               photoComments.map(
                                                 (c: any) => c.id,
                                               ),
@@ -3778,13 +3861,12 @@ export default function VendorManagementPanel({
                                       <div className="flex items-center gap-2">
                                         {photoReplaced && (
                                           <button
-                                            onClick={async () => {
-                                              for (const c of photoComments) {
-                                                await handleResolveDriverComment(
-                                                  c.id,
-                                                );
-                                              }
-                                            }}
+                                            onClick={() =>
+                                              handleAcceptDriverField(
+                                                "PROFILE_PHOTO",
+                                                photoComments,
+                                              )
+                                            }
                                             disabled={actionLoading !== null}
                                             className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded hover:bg-green-500/30 disabled:opacity-30 flex items-center gap-1"
                                           >
@@ -3799,7 +3881,7 @@ export default function VendorManagementPanel({
                                         ) : null}
                                         <button
                                           onClick={() =>
-                                            setRejectingField("photo")
+                                            setRejectingField("PROFILE_PHOTO")
                                           }
                                           disabled={!hasPhoto}
                                           className="px-2 py-0.5 bg-red-500/20 text-red-400 text-[10px] rounded hover:bg-red-500/30 disabled:opacity-30 flex items-center gap-1"
@@ -3833,9 +3915,10 @@ export default function VendorManagementPanel({
 
                         {/* ID Document */}
                         {(() => {
-                          const idComments = (
-                            comments[idFieldKey] || []
-                          ).filter((c: any) => !c.isResolved);
+                          const idCommentsAll = comments[idFieldKey] || [];
+                          const idComments = idCommentsAll.filter(
+                            (c: any) => !c.isResolved,
+                          );
                           const hasIdComments = idComments.length > 0;
                           const idRejected = idComments.some((c: any) =>
                             c.comment?.startsWith?.("❌ Rejected:"),
@@ -3856,11 +3939,12 @@ export default function VendorManagementPanel({
                             v === undefined || v === null ? "" : String(v);
                           const idReplaced =
                             idSnapshotIsPopulated &&
+                            prevIdFileUrl !== undefined &&
                             normId(prevIdFileUrl) !==
                               normId(idDocLocal?.filePath);
                           const idAddressed = idRejected && idReplaced;
                           const idAccepted =
-                            idReplaced && !hasIdComments && !idRejected;
+                            !idRejected && hasAcceptMarker(idCommentsAll);
                           return (
                             <div
                               className={`p-3 rounded-xl border ${
@@ -3880,7 +3964,13 @@ export default function VendorManagementPanel({
                               <div className="flex items-center justify-between mb-2">
                                 <p className="text-xs font-medium text-white flex items-center gap-1.5 flex-wrap">
                                   {idType}
-                                  {idReplaced && (
+                                  {idAccepted && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                      <CheckCircle2 className="w-2 h-2" />✓
+                                      Accepted
+                                    </span>
+                                  )}
+                                  {idReplaced && !idAccepted && (
                                     <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                       <RefreshCw className="w-2 h-2" />
                                       Replaced
@@ -4035,13 +4125,12 @@ export default function VendorManagementPanel({
                                       <div className="flex items-center gap-2">
                                         {idReplaced && (
                                           <button
-                                            onClick={async () => {
-                                              for (const c of idComments) {
-                                                await handleResolveDriverComment(
-                                                  c.id,
-                                                );
-                                              }
-                                            }}
+                                            onClick={() =>
+                                              handleAcceptDriverField(
+                                                "IQAMA_NATIONAL_ID",
+                                                idComments,
+                                              )
+                                            }
                                             disabled={actionLoading !== null}
                                             className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded hover:bg-green-500/30 disabled:opacity-30 flex items-center gap-1"
                                           >
@@ -4090,9 +4179,11 @@ export default function VendorManagementPanel({
 
                         {/* Driving License */}
                         {(() => {
-                          const licComments = (
-                            comments["licenseDocument"] || []
-                          ).filter((c: any) => !c.isResolved);
+                          const licCommentsAll =
+                            comments["DRIVING_LICENSE"] || [];
+                          const licComments = licCommentsAll.filter(
+                            (c: any) => !c.isResolved,
+                          );
                           const hasLicComments = licComments.length > 0;
                           const licRejected = licComments.some((c: any) =>
                             c.comment?.startsWith?.("❌ Rejected:"),
@@ -4113,11 +4204,12 @@ export default function VendorManagementPanel({
                             v === undefined || v === null ? "" : String(v);
                           const licReplaced =
                             licSnapshotIsPopulated &&
+                            prevLicFileUrl !== undefined &&
                             normLic(prevLicFileUrl) !==
                               normLic(licDocLocal?.filePath);
                           const licAddressed = licRejected && licReplaced;
                           const licAccepted =
-                            licReplaced && !hasLicComments && !licRejected;
+                            !licRejected && hasAcceptMarker(licCommentsAll);
                           return (
                             <div
                               className={`p-3 rounded-xl border col-span-2 sm:col-span-1 ${
@@ -4137,7 +4229,13 @@ export default function VendorManagementPanel({
                               <div className="flex items-center justify-between mb-2">
                                 <p className="text-xs font-medium text-white flex items-center gap-1.5 flex-wrap">
                                   Driving License
-                                  {licReplaced && (
+                                  {licAccepted && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                      <CheckCircle2 className="w-2 h-2" />✓
+                                      Accepted
+                                    </span>
+                                  )}
+                                  {licReplaced && !licAccepted && (
                                     <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                       <RefreshCw className="w-2 h-2" />
                                       Replaced
@@ -4239,7 +4337,7 @@ export default function VendorManagementPanel({
                                 !licAccepted &&
                                 (!licRejected || licReplaced) && (
                                   <div className="mt-2">
-                                    {rejectingField === "licenseDocument" ? (
+                                    {rejectingField === "DRIVING_LICENSE" ? (
                                       <div className="flex gap-1.5">
                                         <input
                                           type="text"
@@ -4259,7 +4357,7 @@ export default function VendorManagementPanel({
                                             )
                                               handleRejectField(
                                                 "driver",
-                                                "licenseDocument",
+                                                "DRIVING_LICENSE",
                                                 licComments.map(
                                                   (c: any) => c.id,
                                                 ),
@@ -4274,7 +4372,7 @@ export default function VendorManagementPanel({
                                           onClick={() =>
                                             handleRejectField(
                                               "driver",
-                                              "licenseDocument",
+                                              "DRIVING_LICENSE",
                                               licComments.map((c: any) => c.id),
                                             )
                                           }
@@ -4297,13 +4395,12 @@ export default function VendorManagementPanel({
                                       <div className="flex items-center gap-2">
                                         {licReplaced && (
                                           <button
-                                            onClick={async () => {
-                                              for (const c of licComments) {
-                                                await handleResolveDriverComment(
-                                                  c.id,
-                                                );
-                                              }
-                                            }}
+                                            onClick={() =>
+                                              handleAcceptDriverField(
+                                                "DRIVING_LICENSE",
+                                                licComments,
+                                              )
+                                            }
                                             disabled={actionLoading !== null}
                                             className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded hover:bg-green-500/30 disabled:opacity-30 flex items-center gap-1"
                                           >
@@ -4318,7 +4415,7 @@ export default function VendorManagementPanel({
                                         ) : null}
                                         <button
                                           onClick={() =>
-                                            setRejectingField("licenseDocument")
+                                            setRejectingField("DRIVING_LICENSE")
                                           }
                                           disabled={!hasLic}
                                           className="px-2 py-0.5 bg-red-500/20 text-red-400 text-[10px] rounded hover:bg-red-500/30 disabled:opacity-30 flex items-center gap-1"
@@ -4388,36 +4485,6 @@ export default function VendorManagementPanel({
                       const vendorHasResponded = addressedCount > 0;
                       return (
                         <div className="space-y-3">
-                          {vendorHasResponded && unresolvedCommentCount > 0 && (
-                            <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex-1">
-                                  <p className="text-sm text-white font-medium">
-                                    Vendor has addressed {addressedCount} field
-                                    {addressedCount > 1 ? "s" : ""}
-                                  </p>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    Accept individually above, or accept all at
-                                    once
-                                  </p>
-                                </div>
-                                <button
-                                  onClick={handleResolveAllDriverComments}
-                                  disabled={
-                                    actionLoading === "resolve-all-driver"
-                                  }
-                                  className="px-4 py-2.5 bg-blue-500 text-white text-sm font-semibold rounded-lg hover:bg-blue-400 disabled:opacity-50 flex items-center gap-2 transition-colors whitespace-nowrap"
-                                >
-                                  {actionLoading === "resolve-all-driver" ? (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                  ) : (
-                                    <CheckCircle2 className="w-4 h-4" />
-                                  )}
-                                  Accept All
-                                </button>
-                              </div>
-                            </div>
-                          )}
                           {!vendorHasResponded &&
                             unresolvedCommentCount > 0 && (
                               <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-xl">
@@ -4778,13 +4845,12 @@ export default function VendorManagementPanel({
                                     // pattern below.
                                     <div className="flex items-center gap-2">
                                       <button
-                                        onClick={async () => {
-                                          for (const c of state.unresolved) {
-                                            await handleResolveVehicleComment(
-                                              c.id,
-                                            );
-                                          }
-                                        }}
+                                        onClick={() =>
+                                          handleAcceptVehicleField(
+                                            f.key,
+                                            state.unresolved,
+                                          )
+                                        }
                                         disabled={actionLoading !== null}
                                         className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded hover:bg-green-500/30 disabled:opacity-30 flex items-center gap-1"
                                       >
@@ -4881,21 +4947,21 @@ export default function VendorManagementPanel({
                               };
                               const Icon = meta.icon;
                               const hasIt = !!doc.fileUrl;
-                              const typeComments = (
-                                comments[doc.type] || []
-                              ).filter((c: any) => !c.isResolved);
-                              const bucketComments = (
-                                comments[meta.bucket] || []
-                              ).filter((c: any) => !c.isResolved);
                               const seen = new Set<string>();
-                              const allComments = [
-                                ...typeComments,
-                                ...bucketComments,
+                              // Full comment history (resolved + unresolved)
+                              // — used to detect the persistent "✅ Accepted"
+                              // marker written by handleAcceptVehicleField.
+                              const allCommentsAll = [
+                                ...(comments[doc.type] || []),
+                                ...(comments[meta.bucket] || []),
                               ].filter((c: any) => {
                                 if (seen.has(c.id)) return false;
                                 seen.add(c.id);
                                 return true;
                               });
+                              const allComments = allCommentsAll.filter(
+                                (c: any) => !c.isResolved,
+                              );
                               const hasDocComments = allComments.length > 0;
                               const docRejected = allComments.some((c: any) =>
                                 c.comment?.startsWith?.("❌ Rejected:"),
@@ -4923,29 +4989,39 @@ export default function VendorManagementPanel({
                                 prevFileUrl !== undefined &&
                                 prevFileUrl !== doc.filePath;
                               const isAddressed = docRejected && fileReplaced;
+                              const isAccepted =
+                                !docRejected && hasAcceptMarker(allCommentsAll);
                               return (
                                 <div
                                   key={doc.type}
                                   className={`p-3 rounded-xl border ${
                                     !hasIt
                                       ? "bg-red-500/5 border-red-500/15"
-                                      : isAddressed
+                                      : isAccepted
                                         ? "bg-emerald-500/5 border-emerald-500/20"
-                                        : hasDocComments
-                                          ? docRejected
-                                            ? "bg-red-500/5 border-red-500/20"
-                                            : "bg-amber-500/5 border-amber-500/20"
-                                          : fileReplaced
-                                            ? "bg-blue-500/5 border-blue-500/30"
-                                            : "bg-neutral-800/50 border-neutral-800"
+                                        : isAddressed
+                                          ? "bg-emerald-500/5 border-emerald-500/20"
+                                          : hasDocComments
+                                            ? docRejected
+                                              ? "bg-red-500/5 border-red-500/20"
+                                              : "bg-amber-500/5 border-amber-500/20"
+                                            : fileReplaced
+                                              ? "bg-blue-500/5 border-blue-500/30"
+                                              : "bg-neutral-800/50 border-neutral-800"
                                   }`}
                                 >
                                   <div className="flex items-center justify-between mb-2">
                                     <p className="text-xs font-medium text-white flex items-center gap-1.5 flex-wrap">
                                       <Icon className="w-3.5 h-3.5 text-luxury-gold" />{" "}
                                       {doc.label}
+                                      {isAccepted && (
+                                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
+                                          <CheckCircle2 className="w-2 h-2" />✓
+                                          Accepted
+                                        </span>
+                                      )}
                                       {/* REPLACED badge — vendor uploaded a new file since admin's last review */}
-                                      {fileReplaced && (
+                                      {fileReplaced && !isAccepted && (
                                         <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[9px] rounded font-medium uppercase tracking-wider">
                                           <RefreshCw className="w-2 h-2" />
                                           Replaced
@@ -5045,7 +5121,8 @@ export default function VendorManagementPanel({
           re-reject the replacement if it's still wrong). Same gating
           pattern as the vendor profile review modal. */}
                                   {veh.status === "PENDING_REVIEW" &&
-                                    (!docRejected || isAddressed) && (
+                                    !isAccepted &&
+                                    (!docRejected || fileReplaced) && (
                                       <div className="mt-2">
                                         {rejectingField === doc.type ? (
                                           <div className="flex gap-1.5">
@@ -5114,18 +5191,23 @@ export default function VendorManagementPanel({
                                           </div>
                                         ) : (
                                           <div className="flex items-center gap-2">
-                                            {/* Accept = resolve the unresolved rejection
-                    comments. Only meaningful when admin needs to
-                    confirm the replacement is good. */}
-                                            {isAddressed && (
+                                            {/* Accept resolves any unresolved
+                                                comments on this doc. Shows
+                                                whenever the vendor has
+                                                uploaded a replacement, whether
+                                                or not admin previously
+                                                rejected it — matches the
+                                                driver-side pattern so admin
+                                                has a consistent way to sign
+                                                off on new uploads. */}
+                                            {fileReplaced && (
                                               <button
-                                                onClick={async () => {
-                                                  for (const c of allComments) {
-                                                    await handleResolveVehicleComment(
-                                                      c.id,
-                                                    );
-                                                  }
-                                                }}
+                                                onClick={() =>
+                                                  handleAcceptVehicleField(
+                                                    doc.type,
+                                                    allComments,
+                                                  )
+                                                }
                                                 disabled={
                                                   actionLoading !== null
                                                 }
@@ -5158,7 +5240,12 @@ export default function VendorManagementPanel({
           and "vendor uploaded a replacement, please review"
           (emerald) based on whether the doc was replaced since
           the rejection. */}
-                                  {isAddressed ? (
+                                  {isAccepted ? (
+                                    <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      Accepted
+                                    </div>
+                                  ) : isAddressed ? (
                                     <div className="mt-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                                       <CheckCircle2 className="w-3 h-3" />
                                       Vendor uploaded a new file — review the
@@ -5201,36 +5288,6 @@ export default function VendorManagementPanel({
                       const vendorHasResponded = addressedCount > 0;
                       return (
                         <div className="space-y-3">
-                          {vendorHasResponded && unresolvedCommentCount > 0 && (
-                            <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex-1">
-                                  <p className="text-sm text-white font-medium">
-                                    Vendor has addressed {addressedCount} field
-                                    {addressedCount > 1 ? "s" : ""}
-                                  </p>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    Accept individually above, or accept all at
-                                    once
-                                  </p>
-                                </div>
-                                <button
-                                  onClick={handleResolveAllVehicleComments}
-                                  disabled={
-                                    actionLoading === "resolve-all-vehicle"
-                                  }
-                                  className="px-4 py-2.5 bg-blue-500 text-white text-sm font-semibold rounded-lg hover:bg-blue-400 disabled:opacity-50 flex items-center gap-2 transition-colors whitespace-nowrap"
-                                >
-                                  {actionLoading === "resolve-all-vehicle" ? (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                  ) : (
-                                    <CheckCircle2 className="w-4 h-4" />
-                                  )}
-                                  Accept All
-                                </button>
-                              </div>
-                            </div>
-                          )}
                           {!vendorHasResponded &&
                             unresolvedCommentCount > 0 && (
                               <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-xl">

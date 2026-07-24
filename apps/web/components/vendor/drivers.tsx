@@ -100,6 +100,11 @@ interface DriverDocument {
   expiryDate: string | null;
   isExpired: boolean;
   requiresExpiry: boolean;
+  // Backend-computed signal: true if this document was uploaded
+  // AFTER the most recent APPROVED review request. Used to detect
+  // vendor-actioned replacements even when the editSnapshot lacks
+  // a pre-approval baseline for this doc type (legacy drivers).
+  wasReplacedInReviewCycle?: boolean;
   uploadedAt: string | null;
 }
 
@@ -1809,6 +1814,14 @@ export default function VendorDrivers({
   };
 
   // After camera modal closes with verified photo in detail context, trigger upload
+  // Post-verification auto-upload for detail context. Fires when
+  // either flow ends up in the "verified & ready" state:
+  //   • Camera flow: modal closes after user confirms → showCameraModal
+  //     flips to false → effect fires
+  //   • Upload flow: no modal, verification transitions straight to
+  //     "passed" → effect fires as soon as verifiedPhotoFile is set
+  // The !showCameraModal guard prevents firing during camera flow
+  // BEFORE the user confirms (modal still open with confirm/retake UI).
   useEffect(() => {
     if (
       !showCameraModal &&
@@ -1820,7 +1833,7 @@ export default function VendorDrivers({
       handleDetailPhotoUpload();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showCameraModal]);
+  }, [showCameraModal, verificationState, verifiedPhotoFile]);
 
   // ============== RENDER ==============
 
@@ -3267,18 +3280,29 @@ export default function VendorDrivers({
                     const docMatch = driverDetail.documents.find(
                       (d) => d.type === key,
                     );
-                    const curr =
-                      docMatch !== undefined
-                        ? docMatch.filePath
-                        : (driverDetail as any)[key];
-                    // Missing-snapshot-key fallback: treat as empty string
-                    // so any non-empty current value counts as addressed.
-                    // This handles legacy drivers whose snapshot was
-                    // written before nationalId / licenseNumber were
-                    // added to the snapshot builder — without this,
-                    // those fields would show pending forever even
-                    // after the vendor updates them.
+                    const isDocKey = docMatch !== undefined;
+                    const curr = isDocKey
+                      ? docMatch.filePath
+                      : (driverDetail as any)[key];
+                    // Different fallback semantics for docs vs scalar
+                    // fields when the snapshot didn't capture this key:
+                    //   • Scalar fields: treat missing as "" so any
+                    //     non-empty entry counts as addressed. Correct
+                    //     for identity fields added after old snapshots.
+                    //   • Documents: leave the pending state alone. A
+                    //     doc missing from the snapshot most likely
+                    //     pre-existed the change request — silently
+                    //     flipping it to Addressed would lie about
+                    //     work the vendor hasn't actually done.
+                    //     Backend snapshot-seeding on upload
+                    //     guarantees the doc key IS present after any
+                    //     replacement, so if it's still missing here
+                    //     the vendor genuinely hasn't uploaded.
                     const prevRaw = snapshot[key];
+                    if (prevRaw === undefined && isDocKey) {
+                      pending.push(key);
+                      continue;
+                    }
                     const prev = prevRaw === undefined ? "" : prevRaw;
                     if (norm(prev) !== norm(curr)) addressed.push(key);
                     else pending.push(key);
@@ -3700,20 +3724,23 @@ export default function VendorDrivers({
                     currentFileUrl: string | null | undefined,
                   ): boolean => {
                     if (!snapshot) return false;
-                    // Both sides normalised — empty vs null shouldn't
-                    // read as a change. PROFILE_PHOTO also surfaces
-                    // through a different snapshot key on some legacy
-                    // requests, but the doc.type lookup above is the
-                    // canonical path.
+                    // For DOCUMENTS, unlike scalar fields, we require an
+                    // explicit snapshot value. Documents may pre-exist
+                    // the change request (uploaded weeks or months
+                    // earlier), so a missing snapshot key doesn't mean
+                    // "was empty" — it means "we don't know the
+                    // baseline". Silently falling back to "" would
+                    // falsely mark stale pre-existing docs as Addressed.
+                    //
+                    // The backend uploadDriverDocument handler seeds
+                    // the snapshot with the PRE-upload fileUrl before
+                    // overwriting, so after any doc replacement the
+                    // diff below fires cleanly against the OLD URL —
+                    // no matter how legacy the snapshot state was.
+                    const prev = snapshot[docType];
+                    if (prev === undefined) return false;
                     const norm = (v: any) =>
                       v === undefined || v === null ? "" : String(v);
-                    // Missing-snapshot-key fallback — legacy drivers'
-                    // snapshots may pre-date a required doc type. If the
-                    // key is missing but the vendor has uploaded a file,
-                    // treat that as addressed rather than silently
-                    // leaving the tile stuck on "Action Required" forever.
-                    const prevRaw = snapshot[docType];
-                    const prev = prevRaw === undefined ? "" : prevRaw;
                     return norm(prev) !== norm(currentFileUrl);
                   };
                   return (
@@ -3829,18 +3856,40 @@ export default function VendorDrivers({
                                 {/* Upload / Replace affordance */}
                                 {(!doc.isUploaded || canReplace) &&
                                   (doc.type === "PROFILE_PHOTO" ? (
-                                    <button
-                                      type="button"
-                                      onClick={handleDetailPhotoCapture}
-                                      className="p-1.5 text-luxury-gold hover:bg-luxury-gold/10 rounded"
-                                      title={
-                                        doc.isUploaded
-                                          ? "Replace photo"
-                                          : "Capture photo"
-                                      }
-                                    >
-                                      <Camera className="w-4 h-4" />
-                                    </button>
+                                    // Two options for photo replacement:
+                                    // live camera capture and device
+                                    // upload. Both flow through the same
+                                    // Google Cloud Vision verification
+                                    // (face + formal shirt + tie check)
+                                    // so the trust bar is identical.
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={handleDetailPhotoCapture}
+                                        className="p-1.5 text-luxury-gold hover:bg-luxury-gold/10 rounded"
+                                        title={
+                                          doc.isUploaded
+                                            ? "Replace with camera"
+                                            : "Capture with camera"
+                                        }
+                                      >
+                                        <Camera className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleTriggerUpload("detail")
+                                        }
+                                        className="p-1.5 text-luxury-gold hover:bg-luxury-gold/10 rounded"
+                                        title={
+                                          doc.isUploaded
+                                            ? "Upload replacement from device"
+                                            : "Upload from device"
+                                        }
+                                      >
+                                        <Upload className="w-4 h-4" />
+                                      </button>
+                                    </>
                                   ) : (
                                     <label
                                       className="p-1.5 text-luxury-gold hover:bg-luxury-gold/10 rounded cursor-pointer"

@@ -1,5 +1,6 @@
 "use client";
 
+import DocExpiryIndicator from "@/components/ui/doc-expiry-indicator";
 import { useState, useEffect, useCallback } from "react";
 import { adminApi, ApiError } from "@/lib/api";
 import {
@@ -54,6 +55,27 @@ interface Partner {
   /** Populated only when status === "SUSPENDED"; drives the reason column in the Suspended tab. */
   suspendedAt?: string | null;
   suspensionReason?: string | null;
+  /**
+   * Per-row document health — counts + rich lists of expired and
+   * expiring-soon (≤30d) documents including the MOU. Powers the
+   * shared DocExpiryIndicator hover popover in the partner list.
+   */
+  docHealth?: {
+    expiredCount: number;
+    expiringSoonCount: number;
+    expiredTypes: string[];
+    expiringSoonTypes: string[];
+    expiredDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: string | Date;
+    }>;
+    expiringDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: string | Date;
+    }>;
+  };
 }
 
 interface PartnerDocument {
@@ -1248,11 +1270,17 @@ export default function PartnerManagementPanel({
                         </p>
                       </td>
                       <td className="px-5 py-4">
-                        <span
-                          className={`px-2.5 py-1 rounded-full text-xs font-medium border ${statusColors[p.status] || "bg-neutral-800 text-gray-400"}`}
-                        >
-                          {statusLabels[p.status] || p.status}
-                        </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-xs font-medium border ${statusColors[p.status] || "bg-neutral-800 text-gray-400"}`}
+                          >
+                            {statusLabels[p.status] || p.status}
+                          </span>
+                          <DocExpiryIndicator
+                            expiringDocs={(p as any).docHealth?.expiringDocs}
+                            expiredDocs={(p as any).docHealth?.expiredDocs}
+                          />
+                        </div>
                       </td>
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-2">
@@ -1338,11 +1366,17 @@ export default function PartnerManagementPanel({
                         </p>
                       </div>
                     </div>
-                    <span
-                      className={`px-2 py-1 rounded-full text-xs font-medium border ${statusColors[p.status] || ""}`}
-                    >
-                      {statusLabels[p.status] || p.status}
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <DocExpiryIndicator
+                        expiringDocs={(p as any).docHealth?.expiringDocs}
+                        expiredDocs={(p as any).docHealth?.expiredDocs}
+                      />
+                      <span
+                        className={`px-2 py-1 rounded-full text-xs font-medium border ${statusColors[p.status] || ""}`}
+                      >
+                        {statusLabels[p.status] || p.status}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex items-center justify-between pt-3 border-t border-neutral-700">
                     <span className="text-xs text-gray-400">

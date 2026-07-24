@@ -394,6 +394,19 @@ export const getDriverDetail = asyncWrapper(
 
     const now = new Date();
 
+    // Look up the most recent APPROVED review request. Used as a
+    // fallback signal for legacy drivers whose editSnapshot doesn't
+    // carry per-doc filePaths: any document with createdAt > this
+    // timestamp was uploaded during the current review cycle and
+    // should register as "addressed" even if the snapshot can't
+    // baseline the pre-approval state.
+    const lastApprovedRequest = await prisma.driverReviewRequest.findFirst({
+      where: { driverId: driver.id, status: "APPROVED" },
+      orderBy: { reviewedAt: "desc" },
+      select: { reviewedAt: true },
+    });
+    const cycleStartedAt = lastApprovedRequest?.reviewedAt || null;
+
     // Build document map with signed URLs
     const uploadedDocsMap = new Map(driver.documents.map((d) => [d.type, d]));
 
@@ -404,6 +417,14 @@ export const getDriverDetail = asyncWrapper(
           ? new Date(doc.expiryDate) < now
           : false;
         const requiresExpiry = DRIVER_DOCS_WITH_EXPIRY.includes(type);
+        // Was this doc uploaded during the current review cycle?
+        // Compares the doc's createdAt against the timestamp of the
+        // most recent APPROVED review request. If uploaded after
+        // approval, the vendor genuinely acted on the request — even
+        // when the snapshot lacks the pre-approval baseline for the
+        // frontend's diff logic.
+        const wasReplacedInReviewCycle =
+          !!doc && !!cycleStartedAt && doc.createdAt > cycleStartedAt;
         return {
           type,
           label: DRIVER_DOCUMENT_LABELS[type],
@@ -420,6 +441,7 @@ export const getDriverDetail = asyncWrapper(
           isExpired,
           requiresExpiry,
           uploadedAt: doc?.createdAt || null,
+          wasReplacedInReviewCycle,
         };
       }),
     );
@@ -709,35 +731,43 @@ export const uploadDriverDocument = asyncWrapper(
     });
 
     // ============== EDIT SNAPSHOT FOR ADMIN CHANGE-MARKERS ==============
-    // The admin review UI renders "REPLACED" / "CHANGED" / "ADDRESSED"
-    // badges by diffing driver.editSnapshot against the current driver
-    // state and document filePaths. For that diff to work during a
-    // vendor-initiated renewal (vendor replaces an expired
-    // IQAMA_NATIONAL_ID / DRIVING_LICENSE on an APPROVED driver without
-    // admin first requesting changes), we need to seed the snapshot
-    // ourselves with the OLD doc URL — before the upsert overwrites it.
+    // The admin review UI and the vendor's "Addressed" UI both render
+    // by diffing driver.editSnapshot against the current driver state
+    // and document filePaths. For that diff to work, the snapshot must
+    // hold the PRE-upload fileUrl for every doc type the vendor might
+    // touch. Otherwise the upsert clobbers the URL and we lose the
+    // baseline forever.
     //
-    // Lifecycle:
-    //   - APPROVED driver, snapshot empty, expiry-doc upload    → take
-    //     a full baseline snapshot now (all fields + all doc URLs),
-    //     overriding THIS doc type with its pre-upsert URL.
-    //   - APPROVED driver, snapshot already populated mid-cycle → keep
-    //     the original baseline untouched; the new upsert will diff
-    //     against it. (Only add THIS doc type if it wasn't tracked
-    //     before — defensive against schema drift.)
-    //   - Other statuses (DRAFT/PENDING_REVIEW/CHANGES_REQUESTED) → do
-    //     nothing. DRAFT/PENDING_REVIEW have no "previous" state;
-    //     CHANGES_REQUESTED already had its snapshot taken by the
-    //     admin's "Request Changes" flow.
+    // Two statuses need seeding:
     //
-    // Profile photos aren't trust-bearing so we don't seed for them —
-    // but if a snapshot is already populated (mid-cycle), we still
-    // don't touch it on those uploads either.
+    // 1. APPROVED (vendor-initiated renewal — no admin ask):
+    //    - Snapshot empty → capture a full baseline of everything now,
+    //      overriding THIS doc type with its pre-upsert URL.
+    //    - Snapshot mid-cycle → keep the baseline; only patch THIS type
+    //      if it wasn't tracked before (defensive schema-drift guard).
+    //
+    // 2. CHANGES_REQUESTED (admin already asked for changes):
+    //    - Snapshot should have been written by requestDriverChanges or
+    //      approveDriverChangeRequest — but legacy runs (before those
+    //      builders included doc filePaths) left doc keys missing.
+    //    - So we defensively patch: if the current snapshot lacks this
+    //      doc type, seed it with the OLD fileUrl before the upsert.
+    //      Never overwrite existing snapshot values — the admin's
+    //      baseline always wins.
+    //
+    // DRAFT/PENDING_REVIEW → no baseline to preserve.
+    //
+    // Profile photos aren't trust-bearing so we don't seed for them
+    // on APPROVED renewals — but on CHANGES_REQUESTED we still patch
+    // the snapshot if it's missing PROFILE_PHOTO, since admin may have
+    // rejected the photo and needs the diff to work.
     let snapshotToWrite: Record<string, any> | null = null;
-    if (
-      DRIVER_DOCS_WITH_EXPIRY.includes(type) &&
-      driver.status === "APPROVED"
-    ) {
+    const needsSeeding =
+      (DRIVER_DOCS_WITH_EXPIRY.includes(type) &&
+        driver.status === "APPROVED") ||
+      driver.status === "CHANGES_REQUESTED";
+
+    if (needsSeeding) {
       const currentSnap =
         (driver.editSnapshot as Record<string, any> | null) || null;
       const isEmpty =
@@ -745,7 +775,7 @@ export const uploadDriverDocument = asyncWrapper(
         typeof currentSnap !== "object" ||
         Object.keys(currentSnap).length === 0;
 
-      if (isEmpty) {
+      if (isEmpty && driver.status === "APPROVED") {
         // First doc in the renewal cycle — capture a full baseline.
         // Pull current docs and override THIS type with the OLD URL
         // (existingDoc.fileUrl, captured above).
@@ -768,13 +798,27 @@ export const uploadDriverDocument = asyncWrapper(
           photoUrl: driver.photoUrl ?? null,
           ...docSnap,
         };
-      } else if (!(type in currentSnap)) {
-        snapshotToWrite = {
+      } else if (!isEmpty && !(type in currentSnap!)) {
+        // Snapshot exists but this doc type wasn't captured (legacy
+        // approvals, or a doc type that was added mid-cycle). Patch
+        // it with the OLD fileUrl before the upsert wipes it out.
+        //
+        // Special-case PROFILE_PHOTO: it writes to both DriverDocument
+        // AND driver.photoUrl scalar column, and the admin's diff
+        // checks BOTH snapshot.photoUrl AND snapshot.PROFILE_PHOTO
+        // (either side firing = "Replaced"). Seed the scalar side
+        // too when missing, so the diff is symmetric.
+        const patch: Record<string, any> = {
           ...currentSnap,
           [type]: existingDoc?.fileUrl ?? null,
         };
+        if (type === "PROFILE_PHOTO" && !("photoUrl" in currentSnap!)) {
+          patch.photoUrl = driver.photoUrl ?? null;
+        }
+        snapshotToWrite = patch;
       }
-      // else: preserve the existing baseline.
+      // else: doc type already tracked in snapshot — preserve the
+      // admin's baseline. Diff will work naturally after the upsert.
     }
 
     // Upsert document
@@ -1131,6 +1175,32 @@ export const submitDriverForReview = asyncWrapper(
       await prisma.driver.update({
         where: { id: driverId },
         data: { status: "PENDING_REVIEW" },
+      });
+    }
+
+    // ============== RESOLVE STALE REVIEW COMMENTS + REQUESTS ==============
+    // Coming out of CHANGES_REQUESTED, the vendor is claiming to have
+    // addressed every item admin previously flagged. Two data sources
+    // drive the vendor's "flagged" UI, and both must be cleared:
+    //
+    //   1. DriverReviewRequest rows (batch change requests from admin)
+    //   2. DriverReviewComment rows (per-field rejections)
+    //
+    // Any items admin still finds unsatisfactory will be re-created in
+    // the next round, so no information is lost — admin's next review
+    // is the source of truth for what's flagged.
+    if (driver.status === "CHANGES_REQUESTED") {
+      await prisma.driverReviewComment.updateMany({
+        where: { driverId, isResolved: false },
+        data: { isResolved: true, resolvedAt: new Date() },
+      });
+      await prisma.driverReviewRequest.updateMany({
+        where: {
+          driverId,
+          isResolved: false,
+          requestType: "ADMIN_INITIATED",
+        },
+        data: { isResolved: true, resolvedAt: new Date() },
       });
     }
 

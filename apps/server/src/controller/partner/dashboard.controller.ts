@@ -313,23 +313,63 @@ export const getDashboardSummary = asyncWrapper(
     const expiredDocs = expiredDocCount + (mouExpired ? 1 : 0);
     const expiringDocs = expiringDocCount + (mouExpiringSoon ? 1 : 0);
 
+    // Rich per-document lists for the DocExpiryIndicator popover on
+    // the dashboard. Same shape used by the vendor dashboard, admin
+    // portal, and the profile-panel status header — one component,
+    // one contract.
+    const PARTNER_DOC_LABELS: Record<string, string> = {
+      CR_CERTIFICATE: "Commercial Registration",
+      VAT_CERTIFICATE: "VAT Certificate",
+      NATIONAL_ADDRESS: "National Address",
+      BANK_LETTER: "Bank Letter",
+    };
+    const partnerDocsWithDates = await prisma.partnerDocument.findMany({
+      where: {
+        partnerId: partner.id,
+        expiryDate: { not: null, lte: thirtyDaysFromNow },
+      },
+      select: { type: true, expiryDate: true },
+    });
+    type ExpiryItem = { type: string; label: string; expiryDate: Date };
+    const expiringDocsList: ExpiryItem[] = [];
+    const expiredDocsList: ExpiryItem[] = [];
+    for (const d of partnerDocsWithDates) {
+      if (!d.expiryDate) continue;
+      const item: ExpiryItem = {
+        type: d.type,
+        label: PARTNER_DOC_LABELS[d.type] || d.type,
+        expiryDate: d.expiryDate,
+      };
+      if (d.expiryDate < now) expiredDocsList.push(item);
+      else expiringDocsList.push(item);
+    }
+    if (partnerWithMou?.mouExpiryDate) {
+      const mouItem: ExpiryItem = {
+        type: "MOU",
+        label: "Memorandum of Understanding",
+        expiryDate: new Date(partnerWithMou.mouExpiryDate),
+      };
+      if (mouExpired) expiredDocsList.push(mouItem);
+      else if (mouExpiringSoon) expiringDocsList.push(mouItem);
+    }
+    expiringDocsList.sort(
+      (a, b) => a.expiryDate.getTime() - b.expiryDate.getTime(),
+    );
+    expiredDocsList.sort(
+      (a, b) => b.expiryDate.getTime() - a.expiryDate.getTime(),
+    );
+
     res.json({
       success: true,
       data: {
         activeBookings,
-        // Renamed from `monthlyRides` to make the metric's basis
-        // explicit in the API. `current` = COMPLETED rides this
-        // month. Trend now carries both series so the frontend can
-        // render a dual-line chart (completed vs created).
         ridesCompleted: {
           current: currentMonthRides,
           percentChange,
-          trend: monthlyRideCounts, // [{ month, completed, created }, ...]
+          trend: monthlyRideCounts,
         },
-        // Companion metric: cancellation rate for this month.
-        // Separate tile so partners see quality alongside volume.
         cancellationRate: {
-          rate: cancellationRate, // 0-100 integer percent
+          rate: cancellationRate,
           cancelled: cancelledThisMonth,
           createdInMonth: createdThisMonth,
         },
@@ -346,15 +386,14 @@ export const getDashboardSummary = asyncWrapper(
         },
         upcomingTrips,
         compliance: {
-          // Headline aggregates — UI picks the bigger number to drive
-          // the red/amber color.
           expiredDocs,
           expiringDocs,
-          // Per-category breakdown for the body of the tile.
           expiredProfileDocs: expiredDocCount,
           expiringProfileDocs: expiringDocCount,
           mouExpired,
           mouExpiringSoon,
+          expiringDocsList,
+          expiredDocsList,
         },
       },
     });

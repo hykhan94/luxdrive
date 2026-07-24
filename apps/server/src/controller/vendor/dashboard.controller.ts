@@ -260,6 +260,113 @@ export const getDashboardSummary = asyncWrapper(
       where: { vendorId: vendor.id, status: "PENDING" },
     });
 
+    // Aggregate the actual expiring/expired document rows across all
+    // sources — company profile docs (including MOU), drivers, and
+    // vehicles. Frontend feeds these into the shared DocExpiryIndicator
+    // popover on the dashboard so the vendor sees at a glance which
+    // specific documents need renewal.
+    const DRIVER_DOC_LABELS: Record<string, string> = {
+      IQAMA_NATIONAL_ID: "Iqama / National ID",
+      DRIVING_LICENSE: "Driving License",
+    };
+    const VEHICLE_DOC_LABELS: Record<string, string> = {
+      INSURANCE: "Insurance",
+      ISTIMARA: "Istimara / Registration",
+    };
+    const COMPANY_DOC_LABELS: Record<string, string> = {
+      CR_CERTIFICATE: "Commercial Registration",
+      VAT_CERTIFICATE: "VAT Certificate",
+      NATIONAL_ADDRESS: "National Address",
+      BANK_LETTER: "Bank Letter",
+    };
+
+    const [companyDocs, driverDocRows, vehicleDocRows] = await Promise.all([
+      prisma.vendorDocument.findMany({
+        where: {
+          vendorId: vendor.id,
+          expiryDate: { not: null },
+        },
+        select: { type: true, expiryDate: true },
+      }),
+      prisma.driverDocument.findMany({
+        where: {
+          driver: { vendorId: vendor.id, isActive: true },
+          expiryDate: { not: null, lte: thirtyDaysFromNow },
+        },
+        select: {
+          type: true,
+          expiryDate: true,
+          driver: { select: { firstName: true, lastName: true } },
+        },
+      }),
+      prisma.vehicleDocument.findMany({
+        where: {
+          vehicle: { vendorId: vendor.id, isActive: true },
+          expiryDate: { not: null, lte: thirtyDaysFromNow },
+        },
+        select: {
+          type: true,
+          expiryDate: true,
+          vehicle: { select: { make: true, model: true, plateNumber: true } },
+        },
+      }),
+    ]);
+
+    type ExpiryItem = { type: string; label: string; expiryDate: Date };
+    const expiringItems: ExpiryItem[] = [];
+    const expiredItems: ExpiryItem[] = [];
+
+    const classify = (item: ExpiryItem) => {
+      if (item.expiryDate < now) expiredItems.push(item);
+      else if (item.expiryDate <= thirtyDaysFromNow) expiringItems.push(item);
+    };
+
+    // Company profile docs — labels prefixed with "Company · " so the
+    // vendor can tell them apart from driver/vehicle docs at a glance.
+    for (const d of companyDocs) {
+      if (!d.expiryDate) continue;
+      const label = COMPANY_DOC_LABELS[d.type] || d.type;
+      classify({
+        type: `COMPANY_${d.type}`,
+        label: `Company · ${label}`,
+        expiryDate: d.expiryDate,
+      });
+    }
+    if ((vendor as any).mouExpiryDate) {
+      classify({
+        type: "COMPANY_MOU",
+        label: "Company · MOU",
+        expiryDate: (vendor as any).mouExpiryDate,
+      });
+    }
+    // Driver + vehicle docs — labels include the entity for context.
+    for (const d of driverDocRows) {
+      if (!d.expiryDate) continue;
+      const docLabel = DRIVER_DOC_LABELS[d.type] || d.type;
+      const name = `${d.driver.firstName} ${d.driver.lastName}`;
+      classify({
+        type: `DRIVER_${d.type}_${name}`,
+        label: `${name} · ${docLabel}`,
+        expiryDate: d.expiryDate,
+      });
+    }
+    for (const v of vehicleDocRows) {
+      if (!v.expiryDate) continue;
+      const docLabel = VEHICLE_DOC_LABELS[v.type] || v.type;
+      const name = `${v.vehicle.make} ${v.vehicle.model} (${v.vehicle.plateNumber})`;
+      classify({
+        type: `VEHICLE_${v.type}_${v.vehicle.plateNumber}`,
+        label: `${name} · ${docLabel}`,
+        expiryDate: v.expiryDate,
+      });
+    }
+    expiringItems.sort(
+      (a, b) => a.expiryDate.getTime() - b.expiryDate.getTime(),
+    );
+    expiredItems.sort(
+      (a, b) => b.expiryDate.getTime() - a.expiryDate.getTime(),
+    );
+
     res.json({
       success: true,
       data: {
@@ -295,6 +402,9 @@ export const getDashboardSummary = asyncWrapper(
           expiredDocs: expiredDriverDocs + expiredVehicleDocs,
           expiredDriverDocs,
           expiredVehicleDocs,
+          // Rich per-document lists for the DocExpiryIndicator popover.
+          expiringDocsList: expiringItems.slice(0, 20),
+          expiredDocsList: expiredItems.slice(0, 20),
         },
       },
     });

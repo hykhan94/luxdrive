@@ -1,5 +1,7 @@
 "use client";
 
+import DocExpiryIndicator from "@/components/ui/doc-expiry-indicator";
+
 // ============================================
 // components/partner/profile/profile-panel.tsx
 // Partner Portal — Company Profile & Team
@@ -802,9 +804,28 @@ export default function ProfilePanel({
               </p>
             </div>
             {profile.status === "APPROVED" && (
-              <span className="px-3 py-1 bg-green-500/20 text-green-400 text-xs font-medium rounded-full border border-green-500/30">
-                Verified
-              </span>
+              <>
+                <DocExpiryIndicator
+                  expiringDocs={expiringItems
+                    .filter((i) => i.urgency !== "expired")
+                    .map((i) => ({
+                      type: i.label,
+                      label: i.label,
+                      expiryDate: i.expiryDate,
+                    }))}
+                  expiredDocs={expiringItems
+                    .filter((i) => i.urgency === "expired")
+                    .map((i) => ({
+                      type: i.label,
+                      label: i.label,
+                      expiryDate: i.expiryDate,
+                    }))}
+                  footnote="Update these documents before expiry to avoid suspension."
+                />
+                <span className="px-3 py-1 bg-green-500/20 text-green-400 text-xs font-medium rounded-full border border-green-500/30">
+                  Verified
+                </span>
+              </>
             )}
           </div>
         )}

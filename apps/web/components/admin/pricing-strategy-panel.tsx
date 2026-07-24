@@ -42,6 +42,11 @@ const vehicleTypes = [
     name: "First Class",
     model: "BMW 7 series / Mercedes Benz S Class or Similar",
   },
+  {
+    id: "ULTRA_LUXURY",
+    name: "Ultra Luxury",
+    model: "Rolls-Royce / Bentley / Maybach",
+  },
   { id: "ELECTRIC", name: "Electric", model: "Lucid Air or Similar" },
 ];
 

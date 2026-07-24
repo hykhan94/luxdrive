@@ -3449,15 +3449,20 @@ export default function VendorFleet({
                     const docMatch = vehicleDetail.documents?.find(
                       (d: any) => d.type === key,
                     );
-                    const curr =
-                      docMatch !== undefined
-                        ? docMatch.filePath
-                        : (vehicleDetail as any)[key];
-                    // Missing-snapshot-key fallback — treat undefined
-                    // as empty so the vendor's fresh upload/edit still
-                    // registers as addressed on legacy vehicles whose
-                    // snapshot pre-dates a field.
+                    const isDocKey = docMatch !== undefined;
+                    const curr = isDocKey
+                      ? docMatch.filePath
+                      : (vehicleDetail as any)[key];
+                    // Doc keys need an explicit snapshot value — a
+                    // missing key means the doc likely pre-existed and
+                    // shouldn't auto-flip to Addressed. Scalar fields
+                    // fall back to "" so newly-added info fields still
+                    // register as addressed on legacy snapshots.
                     const prevRaw = snapshot[key];
+                    if (prevRaw === undefined && isDocKey) {
+                      pending.push(key);
+                      continue;
+                    }
                     const prev = prevRaw === undefined ? "" : prevRaw;
                     if (norm(prev) !== norm(curr)) addressed.push(key);
                     else pending.push(key);
@@ -3854,17 +3859,16 @@ export default function VendorFleet({
                         <div className="grid grid-cols-2 gap-3">
                           {docs.map((doc) => {
                             const isFlagged = flaggedTypes.includes(doc.type);
-                            // Missing-snapshot-key fallback — legacy
-                            // vehicles' snapshots may pre-date a
-                            // required doc type. Treat undefined as ""
-                            // so a fresh upload registers as addressed.
+                            // Doc keys need an explicit snapshot value
+                            // — missing key means the doc likely
+                            // pre-existed the request. Silently falling
+                            // back to "" would lie about work not done.
                             const snapPrev = snapshot?.[doc.type];
-                            const prevNorm =
-                              snapPrev === undefined ? "" : normUrl(snapPrev);
                             const isAddressed =
                               isFlagged &&
                               !!snapshot &&
-                              prevNorm !== normUrl(doc.filePath);
+                              snapPrev !== undefined &&
+                              normUrl(snapPrev) !== normUrl(doc.filePath);
                             return (
                               <div
                                 key={doc.type}

@@ -88,7 +88,18 @@ export const approveDriverChangeRequest = asyncWrapper(
     const request = await prisma.driverReviewRequest.findUnique({
       where: { id },
       include: {
-        driver: { include: { vendor: true } },
+        driver: {
+          include: {
+            vendor: true,
+            // Pull all current documents so we can baseline their
+            // filePaths into the snapshot. Without this, the vendor's
+            // frontend diff can't tell which docs pre-existed vs. which
+            // ones the vendor actually replaced during this cycle —
+            // and stale docs would falsely appear as "Addressed" the
+            // moment the change request is approved.
+            documents: true,
+          },
+        },
       },
     });
 
@@ -105,9 +116,21 @@ export const approveDriverChangeRequest = asyncWrapper(
     const fields = request.fields as string[];
 
     // 1. Snapshot the driver's current state (so admin can see diff later).
-    // Includes all scalar fields the vendor might edit — firstName /
-    // lastName / phone / nationalId / licenseNumber — so the vendor's
-    // "Addressed" pill lights up correctly once each field is corrected.
+    // Two layers:
+    //   (a) Scalar fields — firstName / lastName / phone / nationalId /
+    //       licenseNumber — so the vendor's "Addressed" pill lights up
+    //       correctly once each field is corrected.
+    //   (b) Document filePaths keyed by their doc.type — PROFILE_PHOTO,
+    //       IQAMA_NATIONAL_ID, DRIVING_LICENSE. Without this baseline
+    //       the frontend can't tell a pre-existing doc from a newly-
+    //       replaced one, and the missing-key fallback would falsely
+    //       flip stale docs to "Addressed" the moment the request was
+    //       approved. Matches the admin-initiated requestDriverChanges
+    //       snapshot builder.
+    const driverDocSnapshot: Record<string, string | null> = {};
+    for (const d of request.driver.documents) {
+      driverDocSnapshot[d.type] = d.fileUrl;
+    }
     const snapshot = {
       photoUrl: request.driver.photoUrl,
       firstName: request.driver.firstName,
@@ -115,6 +138,7 @@ export const approveDriverChangeRequest = asyncWrapper(
       phone: request.driver.phone,
       nationalId: request.driver.nationalId,
       licenseNumber: request.driver.licenseNumber,
+      ...driverDocSnapshot,
     };
 
     // 2. Approve the change request, save snapshot, set driver to CHANGES_REQUESTED

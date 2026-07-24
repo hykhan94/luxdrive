@@ -216,15 +216,36 @@ export const getPartners = asyncWrapper(async (req: Request, res: Response) => {
     let expiringSoonCount = 0;
     const expiredTypes: string[] = [];
     const expiringSoonTypes: string[] = [];
-    const check = (label: string, expiry: Date | null) => {
+    // Rich shape for the shared DocExpiryIndicator popover.
+    const expiredDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: Date;
+    }> = [];
+    const expiringDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: Date;
+    }> = [];
+    const PARTNER_DOC_LABELS: Record<string, string> = {
+      CR_CERTIFICATE: "Commercial Registration",
+      VAT_CERTIFICATE: "VAT Certificate",
+      NATIONAL_ADDRESS: "National Address",
+      BANK_LETTER: "Bank Letter",
+      MOU: "Memorandum of Understanding",
+    };
+    const check = (type: string, expiry: Date | null) => {
       if (!expiry) return;
       const diff = expiry.getTime() - nowMs;
+      const label = PARTNER_DOC_LABELS[type] || type;
       if (diff < 0) {
         expiredCount++;
-        expiredTypes.push(label);
+        expiredTypes.push(type);
+        expiredDocs.push({ type, label, expiryDate: expiry });
       } else if (diff <= THIRTY_DAYS_MS) {
         expiringSoonCount++;
-        expiringSoonTypes.push(label);
+        expiringSoonTypes.push(type);
+        expiringDocs.push({ type, label, expiryDate: expiry });
       }
     };
     docs.forEach((d) => check(d.type, d.expiryDate));
@@ -234,6 +255,8 @@ export const getPartners = asyncWrapper(async (req: Request, res: Response) => {
       expiringSoonCount,
       expiredTypes,
       expiringSoonTypes,
+      expiredDocs,
+      expiringDocs,
     };
   };
 

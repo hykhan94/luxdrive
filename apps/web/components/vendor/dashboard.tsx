@@ -3,6 +3,7 @@
 // ============================================
 "use client";
 
+import DocExpiryIndicator from "@/components/ui/doc-expiry-indicator";
 import { useState, useEffect, useCallback } from "react";
 import { vendorApi } from "@/lib/api";
 import {
@@ -61,6 +62,19 @@ interface DashboardSummary {
     expiringDocs: number;
     expiringDriverDocs: number;
     expiringVehicleDocs: number;
+    expiredDocs?: number;
+    expiredDriverDocs?: number;
+    expiredVehicleDocs?: number;
+    expiringDocsList?: Array<{
+      type: string;
+      label: string;
+      expiryDate: string | Date;
+    }>;
+    expiredDocsList?: Array<{
+      type: string;
+      label: string;
+      expiryDate: string | Date;
+    }>;
   };
 }
 
@@ -481,6 +495,64 @@ export default function VendorDashboard({
 
   return (
     <div className="space-y-6">
+      {/* Document Compliance Alert — surfaces expiring / expired docs
+          across the vendor's company profile, drivers, and vehicles.
+          Hover the pill for a full breakdown of which specific
+          documents need renewal. Mirrors the pill in the profile
+          header + admin portal for consistency. */}
+      {((summary.compliance?.expiringDocsList?.length ?? 0) > 0 ||
+        (summary.compliance?.expiredDocsList?.length ?? 0) > 0) && (
+        <div
+          className={`rounded-xl p-4 border ${
+            (summary.compliance?.expiredDocsList?.length ?? 0) > 0
+              ? "bg-red-500/10 border-red-500/30"
+              : "bg-yellow-500/10 border-yellow-500/30"
+          }`}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div
+                className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                  (summary.compliance?.expiredDocsList?.length ?? 0) > 0
+                    ? "bg-red-500/20"
+                    : "bg-yellow-500/20"
+                }`}
+              >
+                <AlertCircle
+                  className={`w-5 h-5 ${
+                    (summary.compliance?.expiredDocsList?.length ?? 0) > 0
+                      ? "text-red-400"
+                      : "text-yellow-400"
+                  }`}
+                />
+              </div>
+              <div>
+                <p className="text-white font-medium">
+                  {(summary.compliance?.expiredDocsList?.length ?? 0) > 0
+                    ? "Documents Expired"
+                    : "Documents Expiring Soon"}
+                </p>
+                <p
+                  className={`text-sm ${
+                    (summary.compliance?.expiredDocsList?.length ?? 0) > 0
+                      ? "text-red-400"
+                      : "text-yellow-400"
+                  }`}
+                >
+                  Hover the pill for the full list — renew before expiry to
+                  avoid suspension.
+                </p>
+              </div>
+            </div>
+            <DocExpiryIndicator
+              expiringDocs={summary.compliance?.expiringDocsList}
+              expiredDocs={summary.compliance?.expiredDocsList}
+              footnote="Update these documents before expiry to avoid suspension."
+            />
+          </div>
+        </div>
+      )}
+
       {/* New Booking Requests Alert */}
       {summary.newBookingRequests > 0 && (
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">

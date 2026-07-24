@@ -731,32 +731,43 @@ export const uploadVehicleDocument = asyncWrapper(
     });
 
     // ============== EDIT SNAPSHOT FOR ADMIN CHANGE-MARKERS ==============
-    // The admin review UI renders "REPLACED" / "CHANGED" / "ADDRESSED"
-    // badges by diffing vehicle.editSnapshot against the current
-    // vehicle state and document filePaths. For that diff to work
-    // during a vendor-initiated renewal (vendor replaces an expired
-    // INSURANCE/ISTIMARA on an APPROVED vehicle without admin first
-    // requesting changes), we need to seed the snapshot ourselves with
-    // the OLD doc URL — before the upsert overwrites it.
+    // The admin review UI and vendor's "Addressed" UI both render by
+    // diffing vehicle.editSnapshot against the current vehicle state
+    // and document filePaths. For that diff to work, the snapshot must
+    // hold the PRE-upload fileUrl for every doc type the vendor might
+    // touch. Otherwise the upsert clobbers the URL and we lose the
+    // baseline forever.
     //
-    // Lifecycle:
-    //   - APPROVED vehicle, snapshot empty, expiry-doc upload    → take
-    //     a full baseline snapshot now (all fields + all doc URLs),
-    //     overriding THIS doc type with its pre-upsert URL.
-    //   - APPROVED vehicle, snapshot already populated mid-cycle → keep
-    //     the original baseline untouched; the new upsert will diff
-    //     against it. (Only add THIS doc type if it wasn't tracked
-    //     before — defensive against schema drift.)
-    //   - Other statuses (DRAFT/PENDING_REVIEW/CHANGES_REQUESTED) → do
-    //     nothing. DRAFT/PENDING_REVIEW have no "previous" state;
-    //     CHANGES_REQUESTED already had its snapshot taken by the
-    //     admin's "Request Changes" flow.
+    // Two statuses need seeding:
     //
-    // Photos/plates/odometer aren't trust-bearing so we don't seed for
-    // them — but if a snapshot is already populated (mid-cycle), we
-    // still don't touch it on those uploads either.
+    // 1. APPROVED (vendor-initiated renewal — no admin ask):
+    //    - Only seeds for expiry docs (INSURANCE / ISTIMARA). Photos
+    //      and plates aren't trust-bearing on renewals.
+    //    - Snapshot empty → capture a full baseline of everything now,
+    //      overriding THIS doc type with its pre-upsert URL.
+    //    - Snapshot mid-cycle → keep the baseline; only patch THIS type
+    //      if it wasn't tracked before (defensive schema-drift guard).
+    //
+    // 2. CHANGES_REQUESTED (admin already asked for changes, OR
+    //    approved a vendor-initiated change request):
+    //    - Fires for ANY doc type (photos, plates, odometer, expiry
+    //      docs) — admin may have rejected any of them.
+    //    - Snapshot should have been written by requestVehicleChanges
+    //      or approveVehicleChangeRequest — but legacy runs (before
+    //      those builders included doc filePaths) left doc keys
+    //      missing.
+    //    - So we defensively patch: if the current snapshot lacks this
+    //      doc type, seed it with the OLD fileUrl before the upsert.
+    //      Never overwrite existing snapshot values — the admin's
+    //      baseline always wins.
+    //
+    // DRAFT / PENDING_REVIEW → no baseline to preserve.
     let snapshotToWrite: Record<string, any> | null = null;
-    if (DOCUMENTS_WITH_EXPIRY.includes(type) && vehicle.status === "APPROVED") {
+    const needsSeeding =
+      (DOCUMENTS_WITH_EXPIRY.includes(type) && vehicle.status === "APPROVED") ||
+      vehicle.status === "CHANGES_REQUESTED";
+
+    if (needsSeeding) {
       const currentSnap =
         (vehicle.editSnapshot as Record<string, any> | null) || null;
       const isEmpty =
@@ -764,7 +775,7 @@ export const uploadVehicleDocument = asyncWrapper(
         typeof currentSnap !== "object" ||
         Object.keys(currentSnap).length === 0;
 
-      if (isEmpty) {
+      if (isEmpty && vehicle.status === "APPROVED") {
         // First doc in the renewal cycle — capture a full baseline.
         // Pull current docs and override THIS type with the OLD URL
         // (existingDoc.fileUrl, captured above).
@@ -788,9 +799,11 @@ export const uploadVehicleDocument = asyncWrapper(
           category: vehicle.category,
           ...docSnap,
         };
-      } else if (!(type in currentSnap)) {
-        // Snapshot exists but this doc type isn't tracked yet — add
-        // it without disturbing the rest of the baseline.
+      } else if (!isEmpty && !(type in currentSnap!)) {
+        // Snapshot exists but this doc type isn't tracked yet — patch
+        // it with the OLD fileUrl before the upsert wipes it out.
+        // Handles legacy CHANGES_REQUESTED runs where the admin's
+        // snapshot builder didn't capture per-doc filePaths.
         snapshotToWrite = {
           ...currentSnap,
           [type]: existingDoc?.fileUrl ?? null,
@@ -1257,6 +1270,37 @@ export const submitVehicleForReview = asyncWrapper(
       await prisma.vehicle.update({
         where: { id: vehicleId },
         data: { status: "PENDING_REVIEW" },
+      });
+    }
+
+    // ============== RESOLVE STALE REVIEW COMMENTS + REQUESTS ==============
+    // Coming out of CHANGES_REQUESTED, the vendor is claiming to have
+    // addressed every item admin previously flagged. Two data sources
+    // drive the vendor's "flagged" UI, and both must be cleared:
+    //
+    //   1. VehicleReviewRequest rows (batch change requests from
+    //      admin — the amber "Changes Requested" chips at the top of
+    //      the sidebar showing "Car Registration / Istimara — 26d")
+    //   2. VehicleReviewComment rows (per-field rejections — the
+    //      "Admin Review Comments" block showing individual field
+    //      rejection reasons)
+    //
+    // Any items admin still finds unsatisfactory will be re-created in
+    // the next round via addVehicleReviewComment or a fresh
+    // requestChanges call, so no information is lost — admin's next
+    // review is the source of truth for what's flagged.
+    if (vehicle.status === "CHANGES_REQUESTED") {
+      await prisma.vehicleReviewComment.updateMany({
+        where: { vehicleId, isResolved: false },
+        data: { isResolved: true, resolvedAt: new Date() },
+      });
+      await prisma.vehicleReviewRequest.updateMany({
+        where: {
+          vehicleId,
+          isResolved: false,
+          requestType: "ADMIN_INITIATED",
+        },
+        data: { isResolved: true, resolvedAt: new Date() },
       });
     }
 

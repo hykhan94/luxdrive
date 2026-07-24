@@ -419,7 +419,7 @@ export const adminApi = {
   addDriverReviewComment: (
     vendorId: string,
     driverId: string,
-    body: { fieldName: string; comment: string },
+    body: { fieldName: string; comment: string; resolveOnCreate?: boolean },
   ) =>
     api.post(
       `${ADMIN_BASE}/vendors/${vendorId}/drivers/${driverId}/review/comment`,
@@ -457,7 +457,7 @@ export const adminApi = {
   addVehicleReviewComment: (
     vendorId: string,
     vehicleId: string,
-    body: { fieldName: string; comment: string },
+    body: { fieldName: string; comment: string; resolveOnCreate?: boolean },
   ) =>
     api.post(
       `${ADMIN_BASE}/vendors/${vendorId}/vehicles/${vehicleId}/review/comment`,

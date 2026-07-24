@@ -400,15 +400,37 @@ export const getVendors = asyncWrapper(async (req: Request, res: Response) => {
     let expiringSoonCount = 0;
     const expiredTypes: string[] = [];
     const expiringSoonTypes: string[] = [];
-    const check = (label: string, expiry: Date | null) => {
+    // Rich shape for the shared DocExpiryIndicator popover — mirrors
+    // what the driver / vehicle lists return.
+    const expiredDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: Date;
+    }> = [];
+    const expiringDocs: Array<{
+      type: string;
+      label: string;
+      expiryDate: Date;
+    }> = [];
+    const VENDOR_DOC_LABELS: Record<string, string> = {
+      CR_CERTIFICATE: "Commercial Registration",
+      VAT_CERTIFICATE: "VAT Certificate",
+      NATIONAL_ADDRESS: "National Address",
+      BANK_LETTER: "Bank Letter",
+      MOU: "Memorandum of Understanding",
+    };
+    const check = (type: string, expiry: Date | null) => {
       if (!expiry) return;
       const diff = expiry.getTime() - nowMs;
+      const label = VENDOR_DOC_LABELS[type] || type;
       if (diff < 0) {
         expiredCount++;
-        expiredTypes.push(label);
+        expiredTypes.push(type);
+        expiredDocs.push({ type, label, expiryDate: expiry });
       } else if (diff <= THIRTY_DAYS_MS) {
         expiringSoonCount++;
-        expiringSoonTypes.push(label);
+        expiringSoonTypes.push(type);
+        expiringDocs.push({ type, label, expiryDate: expiry });
       }
     };
     docs.forEach((d) => check(d.type, d.expiryDate));
@@ -418,6 +440,8 @@ export const getVendors = asyncWrapper(async (req: Request, res: Response) => {
       expiringSoonCount,
       expiredTypes,
       expiringSoonTypes,
+      expiredDocs,
+      expiringDocs,
     };
   };
 
@@ -1530,7 +1554,16 @@ const VALID_DRIVER_FIELDS = [
 export const addDriverReviewComment = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id, driverId } = req.params;
-    const { fieldName, comment } = req.body;
+    const { fieldName, comment, resolveOnCreate } = req.body as {
+      fieldName?: string;
+      comment?: string;
+      // Set true when admin uses the "Accept" affordance — creates the
+      // comment already resolved (isResolved=true, resolvedAt=now) so
+      // it serves as a persistent audit-trail marker without cluttering
+      // the vendor's "unresolved" UI. Mirrors the vendor/partner
+      // profile Accept pattern.
+      resolveOnCreate?: boolean;
+    };
 
     if (!fieldName || !comment) {
       throw new BadRequestError("fieldName and comment are required");
@@ -1553,6 +1586,9 @@ export const addDriverReviewComment = asyncWrapper(
         fieldName,
         comment,
         createdBy: req.user!.id,
+        ...(resolveOnCreate
+          ? { isResolved: true, resolvedAt: new Date() }
+          : {}),
       },
     });
 
@@ -1693,7 +1729,15 @@ const VALID_VEHICLE_FIELDS = [
 export const addVehicleReviewComment = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id, vehicleId } = req.params;
-    const { fieldName, comment } = req.body;
+    const { fieldName, comment, resolveOnCreate } = req.body as {
+      fieldName?: string;
+      comment?: string;
+      // Set true when admin uses the "Accept" affordance — creates the
+      // comment already resolved so it serves as a persistent audit-
+      // trail marker without cluttering the vendor's "unresolved" UI.
+      // Mirrors the vendor/partner profile Accept pattern.
+      resolveOnCreate?: boolean;
+    };
 
     if (!fieldName || !comment) {
       throw new BadRequestError("fieldName and comment are required");
@@ -1716,6 +1760,9 @@ export const addVehicleReviewComment = asyncWrapper(
         fieldName,
         comment,
         createdBy: req.user!.id,
+        ...(resolveOnCreate
+          ? { isResolved: true, resolvedAt: new Date() }
+          : {}),
       },
     });
 
@@ -2501,6 +2548,19 @@ export const getVendorDrivers = asyncWrapper(
             hasProfilePhoto,
             expiringCount: expiringDocs.length,
             expiredCount: expiredDocs.length,
+            // Detailed lists for the hover popover — mirrors what the
+            // vendor portal's driver list returns so both surfaces can
+            // render the same DocExpiryIndicator without any adapter.
+            expiringDocs: expiringDocs.map((d) => ({
+              type: d.type,
+              label: DRIVER_DOCUMENT_LABELS[d.type] || d.type,
+              expiryDate: d.expiryDate,
+            })),
+            expiredDocs: expiredDocs.map((d) => ({
+              type: d.type,
+              label: DRIVER_DOCUMENT_LABELS[d.type] || d.type,
+              expiryDate: d.expiryDate,
+            })),
             uploadedCount: docTypes.length,
             requiredCount: 3, // PROFILE_PHOTO + IQAMA_NATIONAL_ID + DRIVING_LICENSE
           },
@@ -2596,9 +2656,31 @@ export const getVendorDriverDetail = asyncWrapper(
     // Sign the driver's photoUrl too
     const signedPhotoUrl = await getReadUrl(driver.photoUrl);
 
+    // Round-scoping — mirror the vendor profile pattern:
+    //   • Unresolved comments always count (they're active in this round).
+    //   • Resolved comments only count if they were resolved AFTER the
+    //     most recent review action on this driver (admin's requestChanges
+    //     or approve of a vendor-initiated change request). Everything
+    //     resolved before that timestamp is stale history from a prior
+    //     round and shouldn't drive the current tile state (badges,
+    //     colours, ACCEPTED markers).
+    // Without this, "✅ Accepted" markers from an earlier round persist
+    // into the next round and every doc/field shows accepted even when
+    // vendor has newly re-submitted for review.
+    const lastReviewRequest = await prisma.driverReviewRequest.findFirst({
+      where: { driverId, reviewedAt: { not: null } },
+      orderBy: { reviewedAt: "desc" },
+      select: { reviewedAt: true },
+    });
+    const lastReviewAt = lastReviewRequest?.reviewedAt?.getTime() ?? 0;
+
     // Group review comments by field for partner-style display
     const commentsByField: Record<string, any[]> = {};
     driver.reviewComments.forEach((c) => {
+      const inCurrentRound =
+        !c.isResolved ||
+        (c.resolvedAt && c.resolvedAt.getTime() > lastReviewAt);
+      if (!inCurrentRound) return;
       if (!commentsByField[c.fieldName]) commentsByField[c.fieldName] = [];
       commentsByField[c.fieldName].push({
         id: c.id,
@@ -2961,6 +3043,8 @@ export const getVendorVehicles = asyncWrapper(
       prisma.vehicle.count({ where }),
     ]);
 
+    const now = new Date();
+
     // Photo types to surface inline (in display order)
     const PHOTO_TYPE_PRIORITY = [
       "PHOTO_FRONT",
@@ -2974,6 +3058,19 @@ export const getVendorVehicles = asyncWrapper(
     const formattedVehicles = await Promise.all(
       vehicles.map(async (vehicle) => {
         const docTypes = vehicle.documents.map((d) => d.type);
+
+        // Expiring / expired documents — same 60-day window as driver
+        // and vendor lists, so the shared DocExpiryIndicator has one
+        // consistent semantics across surfaces.
+        const expiringDocs = vehicle.documents.filter(
+          (d) =>
+            d.expiryDate &&
+            d.expiryDate > now &&
+            d.expiryDate <= new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000),
+        );
+        const expiredDocs = vehicle.documents.filter(
+          (d) => d.expiryDate && d.expiryDate < now,
+        );
 
         // Build document status columns based on actual VehicleDocumentType enum values
         const docStatus = {
@@ -3024,6 +3121,16 @@ export const getVendorVehicles = asyncWrapper(
             : null,
           documentStatus: docStatus,
           documentCount: docTypes.length,
+          expiringDocs: expiringDocs.map((d) => ({
+            type: d.type,
+            label: VEHICLE_DOCUMENT_LABELS[d.type] || d.type,
+            expiryDate: d.expiryDate,
+          })),
+          expiredDocs: expiredDocs.map((d) => ({
+            type: d.type,
+            label: VEHICLE_DOCUMENT_LABELS[d.type] || d.type,
+            expiryDate: d.expiryDate,
+          })),
           unresolvedCommentCount: vehicle._count.reviewComments,
           thumbnails,
           createdAt: vehicle.createdAt,
@@ -3115,9 +3222,27 @@ export const getVendorVehicleDetail = asyncWrapper(
       .map((d) => d.label);
     const allDocumentsUploaded = missingDocuments.length === 0;
 
+    // Round-scoping — mirror the vendor profile pattern:
+    //   • Unresolved comments always count (active in this round).
+    //   • Resolved comments only count if resolved AFTER the most recent
+    //     review action on this vehicle (admin's requestChanges or
+    //     approve of a vendor-initiated change request). Older resolved
+    //     comments are stale history from a prior round and mustn't
+    //     drive current tile state (badges, colours, ACCEPTED markers).
+    const lastReviewRequest = await prisma.vehicleReviewRequest.findFirst({
+      where: { vehicleId, reviewedAt: { not: null } },
+      orderBy: { reviewedAt: "desc" },
+      select: { reviewedAt: true },
+    });
+    const lastReviewAt = lastReviewRequest?.reviewedAt?.getTime() ?? 0;
+
     // Group review comments by field
     const commentsByField: Record<string, any[]> = {};
     vehicle.reviewComments.forEach((c) => {
+      const inCurrentRound =
+        !c.isResolved ||
+        (c.resolvedAt && c.resolvedAt.getTime() > lastReviewAt);
+      if (!inCurrentRound) return;
       if (!commentsByField[c.fieldName]) commentsByField[c.fieldName] = [];
       commentsByField[c.fieldName].push({
         id: c.id,

@@ -87,7 +87,18 @@ export const approveVehicleChangeRequest = asyncWrapper(
     const request = await prisma.vehicleReviewRequest.findUnique({
       where: { id },
       include: {
-        vehicle: { include: { vendor: true } },
+        vehicle: {
+          include: {
+            vendor: true,
+            // Pull all current documents so we can baseline their
+            // filePaths into the snapshot. Without this, the vendor's
+            // frontend diff can't tell which docs pre-existed vs. which
+            // ones the vendor actually replaced during this cycle —
+            // and stale docs would falsely appear as "Addressed" the
+            // moment the change request is approved.
+            documents: true,
+          },
+        },
       },
     });
 
@@ -103,7 +114,19 @@ export const approveVehicleChangeRequest = asyncWrapper(
 
     const fields = request.documents as string[];
 
-    // Snapshot vehicle's current editable state
+    // Snapshot vehicle's current editable state. Two layers:
+    //   (a) Scalar fields — make / model / year / plate / color /
+    //       category / mileage — so the vendor's "Addressed" pill
+    //       lights up once each field is corrected.
+    //   (b) Document filePaths keyed by doc.type — every current doc.
+    //       Without this baseline, the frontend can't tell a
+    //       pre-existing doc from a newly-replaced one; the missing-key
+    //       fallback would falsely flip stale docs to "Addressed" the
+    //       moment the request was approved.
+    const vehicleDocSnapshot: Record<string, string | null> = {};
+    for (const d of request.vehicle.documents) {
+      vehicleDocSnapshot[d.type] = d.fileUrl;
+    }
     const snapshot = {
       make: request.vehicle.make,
       model: request.vehicle.model,
@@ -112,6 +135,7 @@ export const approveVehicleChangeRequest = asyncWrapper(
       color: request.vehicle.color,
       category: request.vehicle.category,
       mileage: request.vehicle.mileage,
+      ...vehicleDocSnapshot,
     };
 
     await prisma.$transaction([
