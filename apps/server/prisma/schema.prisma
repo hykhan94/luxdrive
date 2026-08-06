@@ -42,8 +42,14 @@ enum LoyaltyTier {
 }
 
 enum BookingStatus {
-  // Booking created (e.g. partner submitted a ride request) but admin
-  // hasn't yet offered it to a vendor.
+  // Partner submitted a booking but admin hasn't set the partner-facing
+  // price yet. Partner sees "Awaiting pricing"; admin sees it in the
+  // pricing queue. No price or vendor offer exists at this stage — admin
+  // prices it (-> PENDING) before any vendor can be offered the job.
+  AWAITING_PRICING
+
+  // Admin has set the partner price. Booking is now ready to be offered
+  // to a vendor, but admin hasn't picked one yet.
   PENDING
 
   // Admin has entered a vendor payout amount and offered the booking
@@ -93,6 +99,37 @@ enum VehicleClass {
   HIACE
   COASTER
   KING_LONG
+}
+
+// Who initiated a booking modification. Partners are gated by the
+// configurable lead time; admins are not (they may change anything, any
+// time — see BookingPolicyConfig and the modify controllers).
+enum BookingChangeActor {
+  PARTNER
+  ADMIN
+  VENDOR // vendor swapped the assigned driver/vehicle on a confirmed trip
+}
+
+// A vendor's response to a change on a booking they were already
+// offered / had confirmed. This single field on BookingModification is
+// the source of truth for the "does this change need vendor sign-off?"
+// branch. NOT_REQUIRED = booking was unassigned at change time.
+enum VendorChangeDecision {
+  NOT_REQUIRED
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+// Lifecycle of an ad-hoc temporary vehicle/driver a vendor supplies to
+// cover a booking. Requires admin approval (PENDING_APPROVAL → ACTIVE)
+// before it can be assigned; ARCHIVED once its booking completes, with
+// single-use reactivation back to ACTIVE.
+enum TemporaryAssetStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  ARCHIVED
+  REJECTED
 }
 
 enum VendorStatus {
@@ -412,12 +449,13 @@ model Partner {
   documents      PartnerDocument[]      @relation("PartnerDocs")
 
   // Relations
-  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bookings              Booking[]
-  invoices              Invoice[]
-  teamMembers           PartnerTeamMember[]
-  partnerInvoices       PartnerInvoice[]
-  partnerChangeRequests PartnerChangeRequest[]
+  user                    User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings                Booking[]
+  invoices                Invoice[]
+  teamMembers             PartnerTeamMember[]
+  partnerInvoices         PartnerInvoice[]
+  partnerChangeRequests   PartnerChangeRequest[]
+  bookingDeletionRequests BookingDeletionRequest[]
 
   // Add indexes
   @@index([status])
@@ -573,6 +611,8 @@ model Vendor {
   vendorDocuments       VendorDocument[]
   profileReviewRequests VendorProfileReviewRequest[] // NEW — vendor-initiated change requests
   assignmentOffers      BookingAssignmentOffer[] // Booking offers admin sent this vendor (audit trail)
+  temporaryVehicles     TemporaryVehicle[]
+  temporaryDrivers      TemporaryDriver[]
 
   @@index([status])
   @@index([invitationToken])
@@ -600,7 +640,11 @@ model VendorPayout {
   bookingCount   Int
   generationType InvoiceGenerationType // WEEKLY, MONTHLY
 
-  status VendorPayoutStatus @default(PENDING)
+  status           VendorPayoutStatus @default(PENDING)
+  // Unseen-action flag for the vendor. Default false (a fresh payout is
+  // unseen); reset to false again when admin marks PAID + uploads the
+  // receipt; set true when the vendor opens the payout.
+  isViewedByVendor Boolean            @default(false)
 
   // Admin uploads the bank-transfer receipt when marking PAID.
   // Vendor can view but not modify — pure transparency artifact.
@@ -956,6 +1000,16 @@ model Booking {
   driverId   String?
   driver     Driver?  @relation(fields: [driverId], references: [id])
 
+  // Temporary (ad-hoc) assignment — a one-off vehicle/driver the vendor
+  // supplies to cover this booking (a class change they can't meet from
+  // their approved fleet, or an eleventh-hour breakdown). Sits beside
+  // the permanent FKs; the assignment resolver reads
+  // `vehicleId ?? temporaryVehicleId` / `driverId ?? temporaryDriverId`.
+  temporaryVehicleId String?
+  temporaryVehicle   TemporaryVehicle? @relation(fields: [temporaryVehicleId], references: [id])
+  temporaryDriverId  String?
+  temporaryDriver    TemporaryDriver?  @relation(fields: [temporaryDriverId], references: [id])
+
   // Source
   source     BookingSource @default(DIRECT)
   guestName  String?
@@ -990,16 +1044,29 @@ model Booking {
   hourlyDuration String?
 
   // Vehicle
-  vehicleClass VehicleClass
-  passengers   Int          @default(1)
-  luggage      Int          @default(0)
-  childSeat    Boolean      @default(false)
+  vehicleClass            VehicleClass
+  // Admin-authorized category upgrade. When the vendor runs out of the
+  // booked class, admin (after agreeing terms on a call) authorizes one
+  // or more additional classes the vendor may assign from for THIS
+  // booking. Empty = no upgrade authorized; only the booked class is
+  // allowed. Any price change is applied to totalPrice separately and
+  // recorded as a BookingModification.
+  upgradeAllowedClasses   VehicleClass[] @default([])
+  // Price/payout admin agreed for an upgrade, held until the vendor
+  // actually assigns an upgraded vehicle — only then is it applied to
+  // totalPrice/vendorPayoutAmount and surfaced to the partner. Null = no
+  // price change agreed.
+  upgradeAuthorizedPrice  Decimal?       @db.Decimal(10, 2)
+  upgradeAuthorizedPayout Decimal?       @db.Decimal(10, 2)
+  passengers              Int            @default(1)
+  luggage                 Int            @default(0)
+  childSeat               Boolean        @default(false)
 
   // Pricing
-  basePrice      Decimal @db.Decimal(10, 2)
-  peakMultiplier Decimal @default(1.00) @db.Decimal(3, 2)
-  vatAmount      Decimal @db.Decimal(10, 2)
-  totalPrice     Decimal @db.Decimal(10, 2)
+  basePrice      Decimal? @db.Decimal(10, 2)
+  peakMultiplier Decimal  @default(1.00) @db.Decimal(3, 2)
+  vatAmount      Decimal? @db.Decimal(10, 2)
+  totalPrice     Decimal? @db.Decimal(10, 2)
 
   // Status
   status        BookingStatus @default(PENDING)
@@ -1028,9 +1095,40 @@ model Booking {
 
   // Admin Notification Tracking
   isReadByAdmin   Boolean   @default(false)
+  // Per-portal "seen" flags powering the unseen-update glow in the list
+  // views. Default true (a fresh booking is "seen" by its own partner, and
+  // has no vendor yet). Set false when a relevant update lands for that
+  // party (partner: priced / confirmed / cancelled / modified · vendor: new
+  // offer / re-offer / modified) and back to true when they open the detail.
+  isReadByPartner Boolean   @default(true)
+  isReadByVendor  Boolean   @default(true)
   needsAttention  Boolean   @default(false)
   attentionReason String?
   attentionAt     DateTime?
+
+  // Modification tracking — a partner/admin edit to a live booking.
+  // `modifications` is the full before/after history; the denormalized
+  // fields drive cheap list-view badges without a join.
+  // `modificationVendorSeenAt` clears the vendor "trip changed" badge.
+  modifiedAt               DateTime?
+  modificationCount        Int                   @default(0)
+  modificationVendorSeenAt DateTime?
+  modifications            BookingModification[]
+
+  // Soft delete — partner requests, admin approves; the row is retained
+  // (invoice/payout integrity, audit trail) but hidden from every read
+  // path via the Prisma client extension in lib/prisma.ts.
+  deletionRequests BookingDeletionRequest[]
+  deletedAt        DateTime?
+  deletedBy        String?
+  deletionReason   String?
+
+  // Cancellation — who cancelled and why. Covers partner self-cancel,
+  // vendor cancel (change unacceptable → status returns to PENDING), and
+  // admin cancel-anytime.
+  cancelledAt        DateTime?
+  cancelledBy        String?
+  cancellationReason String?
 
   //Invoice
   partnerInvoiceId String?
@@ -1053,6 +1151,10 @@ model Booking {
   @@index([bookingRef])
   @@index([isReadByAdmin])
   @@index([needsAttention])
+  @@index([deletedAt])
+  @@index([modifiedAt])
+  @@index([temporaryVehicleId])
+  @@index([temporaryDriverId])
   @@map("bookings")
 }
 
@@ -1287,6 +1389,10 @@ model PartnerInvoice {
   // Viewing — used for sidebar badge counting on partner side so
   // unviewed invoices flash a notification dot.
   isViewedByPartner Boolean   @default(false)
+  // Unseen-action flag for the admin. Default true (admin issued it);
+  // reset to false when the partner uploads payment proof; set true when
+  // the admin opens / acts on the invoice.
+  isViewedByAdmin   Boolean   @default(true)
   viewedByPartnerAt DateTime?
 
   // Single source of truth for payment progression. The previous
@@ -1459,6 +1565,13 @@ enum OfferStatus {
   // the same vendor at a higher price (PRICE_TOO_LOW) or moves to
   // the next eligible vendor (other reasons).
   REJECTED
+
+  // Offer voided because the booking changed in a way that invalidates
+  // the vendor match (vehicle class / city changed). NOT a vendor
+  // rejection — the vendor is NOT excluded from future offers on this
+  // booking, and the booking returns to PENDING for reassignment to a
+  // vendor eligible for the new class/city.
+  CANCELLED
 }
 
 enum OfferRejectionReason {
@@ -1524,4 +1637,151 @@ model WhatsAppTemplate {
   updatedBy String? // Admin user ID who last updated
 
   @@map("whatsapp_templates")
+}
+
+// ============================================================
+// Booking modification, deletion & lifecycle governance
+// (partner/admin/vendor booking-change feature)
+// ============================================================
+
+// One row per partner/admin edit to a live booking. Holds the
+// before/after diff (rendered identically on all three portals) and,
+// for assigned bookings, the vendor's re-consent decision — the single
+// source of truth for the "does this change need vendor sign-off?"
+// branch of the modification lifecycle.
+model BookingModification {
+  id        String  @id @default(cuid())
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  actor       BookingChangeActor
+  actorUserId String?
+
+  // Array of { field, label, from, to } describing exactly what changed.
+  changedFields Json
+  reason        String?
+
+  // Vendor re-consent. NOT_REQUIRED when the booking was unassigned at
+  // change time; PENDING while awaiting the vendor; ACCEPTED keeps the
+  // booking with this vendor; REJECTED (with reason) returns it to
+  // PENDING for admin to re-assign manually.
+  vendorDecision       VendorChangeDecision @default(NOT_REQUIRED)
+  vendorDecisionReason String?
+  vendorDecidedAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([vendorDecision])
+  @@map("booking_modifications")
+}
+
+// Partner-initiated soft-deletion request. Mirrors PartnerChangeRequest's
+// string-status convention (PENDING/APPROVED/REJECTED). Admin approval
+// flips Booking.deletedAt; the booking row is never physically removed.
+model BookingDeletionRequest {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  partnerId String?
+  partner   Partner? @relation(fields: [partnerId], references: [id])
+
+  reason String
+  status String @default("PENDING") // PENDING, APPROVED, REJECTED
+
+  adminNote  String?
+  reviewedBy String?
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([bookingId])
+  @@index([status])
+  @@map("booking_deletion_requests")
+}
+
+// Singleton policy row (see PeakPricingConfig / MarginConfig style).
+// Admin-tunable minimum lead times, separate per role and per action.
+// The 12h defaults preserve the original hardcoded change window.
+model BookingPolicyConfig {
+  id                       String   @id @default(cuid())
+  partnerChangeCutoffHours Int      @default(12)
+  vendorChangeCutoffHours  Int      @default(12)
+  partnerCancelCutoffHours Int      @default(12)
+  vendorCancelCutoffHours  Int      @default(12)
+  updatedAt                DateTime @default(now()) @updatedAt
+  updatedBy                String?
+
+  @@map("booking_policy_config")
+}
+
+// Temporary (ad-hoc) vehicle a vendor supplies to cover a single
+// booking. Kept separate from Vehicle (Option B) so the fleet review
+// workflow, analytics, and admin queues stay untouched — the only place
+// that knows temp assets exist is the assignment resolver. Requires
+// admin approval before it can be assigned.
+model TemporaryVehicle {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Model picked from src/data/vehicle-catalog.json; class governs which
+  // bookings it can cover.
+  model        String
+  vehicleClass VehicleClass
+
+  frontPhotoUrl String
+  backPhotoUrl  String
+
+  status          TemporaryAssetStatus @default(PENDING_APPROVAL)
+  singleUse       Boolean              @default(false)
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectionReason String?
+
+  // Incremented when a booking this vehicle served completes — powers
+  // the vendor/admin "temporary assets used" counter.
+  completedBookingCount Int @default(0)
+
+  bookings   Booking[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  archivedAt DateTime?
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("temporary_vehicles")
+}
+
+// Temporary (ad-hoc) driver a vendor supplies to cover a single booking.
+// photoVerified reuses the shirt-and-tie Cloud Vision check. Requires
+// admin approval before it can be assigned.
+model TemporaryDriver {
+  id       String @id @default(cuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  name   String
+  mobile String
+
+  photoUrl      String
+  photoVerified Boolean @default(false)
+
+  status          TemporaryAssetStatus @default(PENDING_APPROVAL)
+  singleUse       Boolean              @default(false)
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectionReason String?
+
+  completedBookingCount Int @default(0)
+
+  bookings   Booking[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  archivedAt DateTime?
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("temporary_drivers")
 }

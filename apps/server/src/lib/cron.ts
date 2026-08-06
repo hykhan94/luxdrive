@@ -4,27 +4,27 @@ import {
   runPartnerMouCheck,
   runVendorMouCheck,
   runPartnerOverdueSuspension,
-  runPartnerMonthlyInvoiceGeneration,
-  runVendorMonthlyPayoutGeneration,
+  runPartnerDailyInvoiceGeneration,
+  runVendorDailyPayoutGeneration,
   runVendorProfileDocCheck,
   runPartnerProfileDocCheck,
 } from "./cron-jobs";
 
 const KSA_TZ = "Asia/Riyadh";
 
-// ============== MONTHLY INVOICE GENERATION ==============
-// Runs on the 1st of every month at 2:00 AM KSA
+// ============== DAILY INVOICE GENERATION ==============
+// Runs every day at 2:00 AM KSA
 cron.schedule(
-  "0 2 1 * *",
+  "0 2 * * *",
   async () => {
-    console.log("[CRON] Starting monthly invoice generation...");
+    console.log("[CRON] Starting daily invoice generation...");
     try {
-      const result = await runPartnerMonthlyInvoiceGeneration();
+      const result = await runPartnerDailyInvoiceGeneration();
       console.log(
-        `[CRON] Monthly invoices done: ${result.created} created, ${result.skipped} skipped out of ${result.totalPartners} partners`,
+        `[CRON] Daily invoices done: ${result.created} created, ${result.skipped} skipped out of ${result.totalPartners} partners`,
       );
     } catch (error) {
-      console.error("[CRON] Monthly invoice generation failed:", error);
+      console.error("[CRON] Daily invoice generation failed:", error);
     }
   },
   { timezone: KSA_TZ },
@@ -394,11 +394,11 @@ cron.schedule(
 // lives in lib/cron-jobs.ts so admin's "Run Now" endpoint and any
 // test/backfill harness can call the exact same logic.
 cron.schedule(
-  "0 3 1 * *",
+  "0 3 * * *",
   async () => {
-    console.log("[CRON] Starting vendor monthly payout generation...");
+    console.log("[CRON] Starting vendor daily payout generation...");
     try {
-      const result = await runVendorMonthlyPayoutGeneration();
+      const result = await runVendorDailyPayoutGeneration();
       console.log(
         `[CRON] Vendor payouts done: ${result.created} created, ${result.skipped} skipped out of ${result.totalVendors} vendors`,
       );
@@ -410,7 +410,7 @@ cron.schedule(
 );
 
 // ============== PARTNER OVERDUE SUSPENSION ==============
-// Runs on the 6th of every month at 09:00 AM KSA.
+// Runs every day at 09:00 AM KSA.
 //
 // Schedule rationale:
 //   - 1st of month: partner invoices generated (existing job earlier
@@ -431,7 +431,7 @@ cron.schedule(
 // no-op stub at this position — same time slot, opposite side of the
 // payment direction.
 cron.schedule(
-  "0 9 6 * *",
+  "0 9 * * *",
   async () => {
     console.log("[CRON] Running partner overdue suspension check...");
     try {

@@ -30,6 +30,7 @@ import {
   ShieldAlert,
   AlertCircle,
 } from "lucide-react";
+import { Timer } from "lucide-react";
 import VendorDashboardContent from "@/components/vendor/dashboard";
 import VendorBookingsContent from "@/components/vendor/bookings";
 import VendorFleetContent from "@/components/vendor/fleet";
@@ -38,6 +39,7 @@ import VendorReportsPanel from "@/components/vendor/reports";
 import VendorNotificationsPanel from "@/components/vendor/notifications";
 import VendorEarningsPanel from "@/components/vendor/earnings";
 import VendorProfilePanel from "@/components/vendor/profile";
+import VendorTemporaryAssets from "@/components/vendor/temporary-assets";
 
 import { proxiedImageUrl } from "@/lib/image-url";
 // ============== TYPES ==============
@@ -47,6 +49,7 @@ type TabType =
   | "bookings"
   | "fleet"
   | "drivers"
+  | "temp-assets"
   | "earnings"
   | "reports"
   | "notifications"
@@ -75,7 +78,11 @@ interface SidebarBadges {
     expiryDate: string;
   }>;
   breakdown: {
-    bookings: { newRequests: number; unreadNotifications: number };
+    bookings: {
+      newRequests: number;
+      pendingChanges: number;
+      unreadNotifications: number;
+    };
     fleet: {
       pendingVehicleReviews: number;
       vehiclesChangesRequested: number;
@@ -130,6 +137,12 @@ const sidebarItems: Array<{
     icon: Users,
     badgeKey: "drivers",
     minStatus: "submitted",
+  },
+  {
+    id: "temp-assets",
+    label: "Temporary Assets",
+    icon: Timer,
+    minStatus: "approved",
   },
   {
     id: "earnings",
@@ -203,6 +216,7 @@ function VendorDashboardInner() {
       "bookings",
       "fleet",
       "drivers",
+      "temp-assets",
       "earnings",
       "reports",
       "notifications",
@@ -227,7 +241,7 @@ function VendorDashboardInner() {
     logoUrl: null,
     expiredRequiredDocs: [],
     breakdown: {
-      bookings: { newRequests: 0, unreadNotifications: 0 },
+      bookings: { newRequests: 0, pendingChanges: 0, unreadNotifications: 0 },
       fleet: {
         pendingVehicleReviews: 0,
         vehiclesChangesRequested: 0,
@@ -345,6 +359,17 @@ function VendorDashboardInner() {
     setActiveTab(t);
     if (subTab) setBookingSubTab(subTab as typeof bookingSubTab);
     setMobileMenuOpen(false);
+
+    // Opening the bookings section acknowledges the booking notifications
+    // (assignments, changes/updates) so the sidebar count clears. Pending
+    // offers and changes-to-review stay counted — they're actionable, not
+    // just informational.
+    if (t === "bookings") {
+      vendorApi
+        .markAllNotificationsAsRead("bookings")
+        .then(() => refreshBadges())
+        .catch(() => {});
+    }
   };
 
   const handleCalendarDateClick = (dateStr: string) => {
@@ -821,6 +846,8 @@ function VendorDashboardInner() {
                     expiredRequiredDocs={badges.expiredRequiredDocs}
                   />
                 )}
+
+                {activeTab === "temp-assets" && <VendorTemporaryAssets />}
 
                 {activeTab === "earnings" && (
                   <VendorEarningsPanel refreshBadges={refreshBadges} />

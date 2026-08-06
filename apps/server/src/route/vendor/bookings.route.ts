@@ -13,6 +13,10 @@ import {
   getAssignmentOptions,
   acceptBooking,
   rejectBooking,
+  reassignBooking,
+  acceptBookingModification,
+  rejectBookingModification,
+  cancelBooking,
   startTrip,
   completeTrip,
   exportBookingsCsv,
@@ -38,6 +42,16 @@ router.post("/:bookingId/accept", acceptBooking);
 
 // Reject/decline booking
 router.post("/:bookingId/reject", rejectBooking);
+
+// Reassign driver/vehicle on a confirmed booking
+router.post("/:bookingId/reassign", reassignBooking);
+
+// Accept / reject a change on a confirmed booking
+router.post("/:bookingId/modification/accept", acceptBookingModification);
+router.post("/:bookingId/modification/reject", rejectBookingModification);
+
+// Vendor cancels a confirmed booking (returns it to admin as PENDING)
+router.post("/:bookingId/cancel", cancelBooking);
 
 // Start trip (CONFIRMED → IN_PROGRESS)
 router.patch("/:bookingId/start", startTrip);

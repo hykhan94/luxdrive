@@ -8,6 +8,10 @@ import { useEffect, useState, useCallback } from "react";
 import { partnerApi } from "@/lib/api";
 import { useNotification } from "@/lib/notification-context";
 import {
+  BookingActivityRow,
+  derivePartnerActivity,
+} from "@/components/shared/booking-activity-row";
+import {
   AlertCircle,
   Car,
   CalendarDays,
@@ -55,11 +59,14 @@ interface DashboardSummary {
   };
   totalPayable: {
     amount: number;
-    hasOverdue: boolean;
-    overdueAmount: number;
-    overdueMonth: string;
-    currentAmount: number;
-    currentMonth: string;
+    unpaidMonths: number;
+    breakdown: Array<{
+      id: string;
+      amount: number;
+      period: string;
+      status: string;
+      dueDate: string;
+    }>;
   };
   upcomingTrips: number;
   compliance?: {
@@ -719,6 +726,16 @@ export default function DashboardPanel({
   if (!summary) return null;
 
   const { ridesCompleted, cancellationRate, totalPayable } = summary;
+
+  // Outstanding split derived from the invoice breakdown the backend
+  // returns (status OVERDUE vs not-yet-due). Framed by payment state,
+  // not by calendar month, so it reads correctly for daily invoices.
+  const payableBreakdown = totalPayable.breakdown ?? [];
+  const payableOverdueAmount = payableBreakdown
+    .filter((b) => b.status === "OVERDUE")
+    .reduce((sum, b) => sum + b.amount, 0);
+  const payableHasOverdue = payableOverdueAmount > 0;
+  const payableCurrentAmount = totalPayable.amount - payableOverdueAmount;
   {
     console.log(contractStats);
   }
@@ -949,7 +966,7 @@ export default function DashboardPanel({
               </div>
               <span className="text-sm text-gray-400">Total Payable</span>
             </div>
-            {totalPayable.hasOverdue && (
+            {payableHasOverdue && (
               <span className="px-2 py-1 text-xs font-medium bg-red-500/20 text-red-400 rounded border border-red-500/30">
                 Overdue
               </span>
@@ -958,13 +975,13 @@ export default function DashboardPanel({
           <p className="text-3xl font-bold text-white">
             SAR <AnimatedCounter value={totalPayable.amount} />
           </p>
-          {totalPayable.hasOverdue ? (
+          {payableHasOverdue ? (
             <p className="text-xs text-red-400 mt-2">
-              Includes overdue from {totalPayable.overdueMonth}
+              Includes overdue amounts
             </p>
           ) : (
             <p className="text-xs text-gray-500 mt-2">
-              Current month (as of today)
+              Outstanding (as of today)
             </p>
           )}
           <div className="flex items-center gap-3 mt-3">
@@ -974,7 +991,7 @@ export default function DashboardPanel({
             >
               View Details
             </button>
-            {totalPayable.hasOverdue && (
+            {payableHasOverdue && (
               <button
                 onClick={() =>
                   showNotification(
@@ -989,24 +1006,20 @@ export default function DashboardPanel({
             )}
           </div>
           {/* Desktop tooltip for breakdown */}
-          {totalPayable.hasOverdue && (
+          {payableHasOverdue && (
             <div className="hidden lg:block absolute top-full left-0 mt-2 w-full p-3 bg-neutral-800 border border-neutral-700 rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-20">
               <p className="text-xs text-gray-400 mb-2">Amount Breakdown</p>
               <div className="space-y-1.5">
                 <div className="flex justify-between text-sm">
-                  <span className="text-gray-300">
-                    {totalPayable.overdueMonth} (Overdue)
-                  </span>
+                  <span className="text-gray-300">Overdue</span>
                   <span className="text-red-400">
-                    SAR {totalPayable.overdueAmount.toLocaleString()}
+                    SAR {payableOverdueAmount.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-gray-300">
-                    {totalPayable.currentMonth}
-                  </span>
+                  <span className="text-gray-300">Not yet due</span>
                   <span className="text-white">
-                    SAR {totalPayable.currentAmount.toLocaleString()}
+                    SAR {payableCurrentAmount.toLocaleString()}
                   </span>
                 </div>
                 <div className="border-t border-neutral-700 pt-1.5 mt-1.5 flex justify-between text-sm font-medium">
@@ -1073,64 +1086,34 @@ export default function DashboardPanel({
           </div>
 
           <div className="space-y-3">
-            {recentBookings.map((booking) => (
-              <div
-                key={booking.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-neutral-800/50 rounded-lg gap-2 sm:gap-4"
-              >
-                <div className="flex items-center gap-3 sm:gap-4">
-                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-luxury-gold/10 flex items-center justify-center flex-shrink-0">
-                    <Car className="w-4 h-4 sm:w-5 sm:h-5 text-luxury-gold" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-white truncate">
-                      {booking.guestName}
-                    </p>
-                    {/* Trip-type signal row.
-                        - ONE_WAY: just the type badge + full route
-                          (pickup → dropoff) — same as before but now
-                          colour-coded so the eye picks up trip mix at
-                          a glance.
-                        - HOURLY:  type badge with hours + city badge,
-                          then pickup only (no fake arrow / empty
-                          dropoff — the previous render showed " → "
-                          for hourly bookings).
-                        Badges sit ABOVE the location line so the row
-                        stays scannable even when the address wraps. */}
-                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5 mb-0.5">
-                      <MiniTripTypeBadge
-                        tripType={booking.tripType}
-                        hours={booking.hours}
-                        hourlyDuration={booking.hourlyDuration}
-                      />
-                      {booking.tripType === "HOURLY" && (
-                        <MiniCityBadge city={booking.city} />
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-400 flex items-center gap-1">
-                      <MapPin className="w-3 h-3 flex-shrink-0" />
-                      <span className="truncate">
-                        {booking.tripType === "HOURLY"
-                          ? booking.pickupAddress
-                          : booking.route ||
-                            `${booking.pickupAddress} → ${booking.dropoffAddress}`}
-                      </span>
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between sm:block sm:text-right pl-12 sm:pl-0">
-                  <p className="text-xs text-gray-400">
-                    {formatTripDate(booking.tripDate)}{" "}
-                    {formatTripTime(booking.tripTime)}
-                  </p>
-                  <span
-                    className={`inline-block mt-0 sm:mt-1 px-2 py-0.5 text-xs rounded border ${getStatusColor(booking.status)}`}
-                  >
-                    {getStatusLabel(booking.status)}
-                  </span>
-                </div>
-              </div>
-            ))}
+            {recentBookings.map((booking) => {
+              const a = derivePartnerActivity(booking);
+              const vehicle = (booking.vehicleClass || "")
+                .toLowerCase()
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (c: string) => c.toUpperCase());
+              const sub =
+                booking.tripType === "HOURLY"
+                  ? [booking.city, booking.pickupAddress, vehicle]
+                      .filter(Boolean)
+                      .join(" · ")
+                  : [
+                      booking.route ||
+                        `${booking.pickupAddress} → ${booking.dropoffAddress}`,
+                      vehicle,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
+              return (
+                <BookingActivityRow
+                  key={booking.id}
+                  name={booking.guestName}
+                  subline={sub}
+                  onClick={() => onTabChange("bookings")}
+                  {...a}
+                />
+              );
+            })}
 
             {recentBookings.length === 0 && (
               <Empty className="py-8 border border-dashed border-neutral-700 rounded-lg">

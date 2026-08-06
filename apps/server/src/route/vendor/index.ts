@@ -9,6 +9,7 @@ import driversRoutes from "./drivers.route";
 import earningsRoutes from "./earnings.route";
 import profileRoutes from "./profile.route";
 import analyticsRoutes from "./analytics.route";
+import temporaryAssetsRoutes from "./temporary-assets.route";
 
 const router = Router();
 
@@ -41,5 +42,8 @@ router.use("/profile", profileRoutes);
 
 // After the profile route
 router.use("/analytics", analyticsRoutes);
+
+// ============== TEMPORARY (AD-HOC) VEHICLES & DRIVERS ==============
+router.use("/temporary-assets", temporaryAssetsRoutes);
 
 export default router;

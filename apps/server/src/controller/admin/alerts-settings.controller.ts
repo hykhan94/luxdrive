@@ -360,7 +360,7 @@ export const getAvailableVendorsForAlert = asyncWrapper(
             },
           },
         },
-        _count: { select: { bookings: true } },
+        _count: { select: { bookings: { where: { deletedAt: null } } } },
       },
       orderBy: { rating: "desc" },
     });

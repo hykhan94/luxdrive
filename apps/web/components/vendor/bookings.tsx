@@ -6,6 +6,16 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { vendorApi, ApiError } from "@/lib/api";
 import { proxiedImageUrl } from "@/lib/image-url";
+import VendorBookingChange from "./booking-change";
+import {
+  CustomerCard,
+  DriverCard,
+  VehicleCard,
+} from "@/components/shared/assignment-cards";
+import {
+  ModificationTimeline,
+  type BookingModificationEntry,
+} from "@/components/shared/modification-timeline";
 import {
   type BookingShareInput,
   buildCalendarUrl,
@@ -25,12 +35,18 @@ import {
   Phone,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  ArrowUpDown,
   X,
   ArrowRight,
   Loader2,
+  PlayCircle,
   CheckCircle,
   XCircle,
   AlertCircle,
+  History,
+  ArrowUpCircle,
   AlertTriangle,
   ShieldAlert,
   Wrench,
@@ -40,14 +56,11 @@ import {
   Eye,
   Star,
 } from "lucide-react";
-import {
-  Empty,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-  EmptyDescription,
-} from "@/components/ui/empty";
 import { useNotification } from "@/lib/notification-context";
+import {
+  BookingActivityRow,
+  deriveVendorActivity,
+} from "@/components/shared/booking-activity-row";
 
 // ============== TYPES ==============
 
@@ -83,6 +96,11 @@ interface Booking {
   // price. Use this — not isOfferState — to decide whether to show
   // Accept / Reject controls and the "New Request" tab.
   isActionable?: boolean;
+  // A partner/admin change to this booking is waiting for the vendor to
+  // accept or reject — surfaced as a "review needed" flag on the row.
+  hasPendingChange?: boolean;
+  modificationCount?: number;
+  upgradeAllowedClasses?: string[];
   // Booking source attribution (PARTNER/DIRECT origin, partner
   // company name, "Partner: X" label) is intentionally NOT included
   // in the vendor-facing API response — see vendor/bookings.controller
@@ -95,9 +113,15 @@ interface Booking {
 }
 
 interface BookingDetailData {
+  modifications?: BookingModificationEntry[];
   id: string;
   bookingRef: string;
   status: string;
+  pendingModification?: {
+    changedFields: any[];
+    reason: string | null;
+    actor: string;
+  } | null;
   statusLabel: string;
   isActionable?: boolean;
   timeline: Array<{
@@ -691,83 +715,6 @@ function DriverAvatar({ photoUrl }: { photoUrl: string | null }) {
   );
 }
 
-// 64px gold-bordered driver photo for the booking detail's
-// chauffeur card. Distinct from DriverAvatar above (which is the
-// 48px utility version used in row-level UI). This one ships with
-// shadow + thicker border to read as a portrait, not a thumbnail —
-// matches the partner portal's DriverPhoto exactly so the same
-// booking presents the same way across portals. Mid-fetch fallback
-// is the User icon rather than a spinner, since GCS signed URLs
-// typically resolve before the user notices.
-function DriverPhotoLarge({
-  photoUrl,
-  name,
-}: {
-  photoUrl: string | null;
-  name: string;
-}) {
-  const [failed, setFailed] = useState(false);
-  // proxiedImageUrl: null → null, GCS signed URL → proxy URL,
-  // anything else → unchanged. Resize hint of 64 saves bandwidth
-  // for an avatar that renders at exactly that size.
-  const url = !failed ? proxiedImageUrl(photoUrl, 64) : null;
-
-  return (
-    <div className="w-16 h-16 rounded-full border-2 border-luxury-gold/40 bg-luxury-gold/10 shadow-lg shadow-luxury-gold/10 overflow-hidden flex-shrink-0 flex items-center justify-center">
-      {url ? (
-        <img
-          src={url}
-          alt={name}
-          className="w-full h-full object-cover"
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        <User className="w-8 h-8 text-luxury-gold" />
-      )}
-    </div>
-  );
-}
-
-// Map vehicle color names to CSS values. Three-tier lookup so user
-// data quality doesn't break the visual:
-//   1. Exact match on the lowercased name ("pearl white" → #f7f4ec)
-//   2. Substring keyword match — catches typos and compound names
-//      ("super whitee" → contains "white" → uses white's value,
-//      "midnight black metallic" → contains "black")
-//   3. Neutral gray fallback so the swatch is always visible,
-//      never an invisible/transparent empty circle
-// Same table the partner portal uses; could be hoisted into a
-// shared lib later if a third portal needs it.
-function vehicleColorToCss(name: string): string {
-  const map: Record<string, string> = {
-    white: "#f5f5f5",
-    "pearl white": "#f7f4ec",
-    black: "#1a1a1a",
-    "obsidian black": "#0a0a0a",
-    silver: "#c5c5c5",
-    "metallic silver": "#b8b8b8",
-    gray: "#808080",
-    grey: "#808080",
-    "space gray": "#5a5a5a",
-    red: "#b91c1c",
-    "ruby red": "#9b1c1c",
-    blue: "#1d4ed8",
-    "navy blue": "#1e3a8a",
-    navy: "#1e3a8a",
-    gold: "#c9a961",
-    champagne: "#e3d19c",
-    beige: "#d9c5a0",
-    brown: "#78350f",
-    green: "#15803d",
-  };
-  const lower = (name || "").toLowerCase().trim();
-  if (map[lower]) return map[lower];
-  for (const [key, value] of Object.entries(map)) {
-    if (lower.includes(key)) return value;
-  }
-  return "#737373";
-}
-
 // ============== BOOKING MAP ==============
 //
 // Google Static Map showing the trip's location(s). Vendor copy of
@@ -1105,6 +1052,7 @@ export default function VendorBookings({
   const [tabCounts, setTabCounts] = useState<Record<string, number>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [dateFrom, setDateFrom] = useState(initialDateFilter || "");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc" | null>(null);
   const [dateTo, setDateTo] = useState(initialDateFilter || "");
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
@@ -1113,6 +1061,20 @@ export default function VendorBookings({
   const [selectedBooking, setSelectedBooking] =
     useState<BookingDetailData | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  // Lets the row's "Modified" pill jump straight to the change history.
+  const changesRef = useRef<HTMLDivElement | null>(null);
+  const [scrollToChanges, setScrollToChanges] = useState(false);
+  useEffect(() => {
+    if (!selectedBooking || !scrollToChanges) return;
+    const t = setTimeout(() => {
+      changesRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      setScrollToChanges(false);
+    }, 150);
+    return () => clearTimeout(t);
+  }, [selectedBooking, scrollToChanges]);
 
   // Accept/assign modal
   const [showAssignModal, setShowAssignModal] = useState(false);
@@ -1129,6 +1091,13 @@ export default function VendorBookings({
     useState<AssignmentOption | null>(null);
   const [selectedDriver, setSelectedDriver] = useState("");
   const [selectedVehicle, setSelectedVehicle] = useState("");
+  // Assign modal: one list at a time (vehicle | driver) + a collapsed
+  // map, so the whole accept flow fits a 14" screen without scrolling.
+  const [assignTab, setAssignTab] = useState<"vehicle" | "driver">("vehicle");
+  const [showAssignMap, setShowAssignMap] = useState(false);
+  // Quick filters for the assign modal's vehicle/driver lists.
+  const [vehicleSearch, setVehicleSearch] = useState("");
+  const [driverSearch, setDriverSearch] = useState("");
   const [isAssigning, setIsAssigning] = useState(false);
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
 
@@ -1171,6 +1140,7 @@ export default function VendorBookings({
       if (searchQuery) params.search = searchQuery;
       if (dateFrom) params.startDate = dateFrom;
       if (dateTo) params.endDate = dateTo;
+      if (sortOrder) params.sortOrder = sortOrder;
 
       const res = await vendorApi.getBookings(params);
       if (res.success && res.data) {
@@ -1192,6 +1162,7 @@ export default function VendorBookings({
     searchQuery,
     dateFrom,
     dateTo,
+    sortOrder,
     showNotification,
   ]);
 
@@ -1283,6 +1254,10 @@ export default function VendorBookings({
     setIsLoadingOptions(true);
     setSelectedDriver("");
     setSelectedVehicle("");
+    setAssignTab("vehicle");
+    setShowAssignMap(false);
+    setVehicleSearch("");
+    setDriverSearch("");
     // Fire both requests in parallel — the assignment options drive
     // the picker (blocking), and the full detail feeds the summary
     // map (non-blocking; if it fails we just don't render the map).
@@ -1416,6 +1391,10 @@ export default function VendorBookings({
         showNotification("success", res.message || "Trip started");
         fetchBookings();
         refreshBadges();
+        if (selectedBooking?.id === bookingId) {
+          const detail = await vendorApi.getBooking(bookingId);
+          if (detail.success && detail.data) setSelectedBooking(detail.data);
+        }
       }
     } catch (err: any) {
       showNotification("error", err.message || "Failed to start trip");
@@ -1432,6 +1411,10 @@ export default function VendorBookings({
         showNotification("success", res.message || "Trip completed");
         fetchBookings();
         refreshBadges();
+        if (selectedBooking?.id === bookingId) {
+          const detail = await vendorApi.getBooking(bookingId);
+          if (detail.success && detail.data) setSelectedBooking(detail.data);
+        }
       }
     } catch (err: any) {
       showNotification("error", err.message || "Failed to complete trip");
@@ -1806,219 +1789,28 @@ export default function VendorBookings({
         </div>
       ) : (
         <>
-          {/* Mobile Cards */}
-          <div className="lg:hidden space-y-3">
-            {bookings.map((booking) => (
-              <div
-                key={booking.id}
-                className={`bg-neutral-900 border rounded-xl p-4 ${
-                  isOfferState(booking.status)
-                    ? "border-yellow-500/30"
-                    : "border-neutral-800"
-                }`}
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <p className="text-xs text-luxury-gold font-mono">
-                      {booking.bookingRef}
-                    </p>
-                    <p className="text-sm font-medium text-white mt-0.5">
-                      {booking.guestName}
-                    </p>
-                  </div>
-                  <span
-                    className={`px-2 py-1 text-xs rounded border ${getBookingStatusColor(booking)}`}
-                  >
-                    {/* Use the backend-derived statusLabel rather than
-                        formatStatus(booking.status). The backend
-                        differentiates ASSIGNMENT_OFFERED ("New Request"),
-                        ASSIGNMENT_RE_OFFERED + PENDING offer ("Revised
-                        Offer"), and ASSIGNMENT_RE_OFFERED + REJECTED
-                        offer ("Awaiting Revised Offer"). Falling back
-                        to formatStatus collapses these into a single
-                        "New Request" pill, which is what caused the
-                        "status didn't change after my rejection" bug. */}
-                    {booking.statusLabel || formatStatus(booking.status)}
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  <VehicleClassBadge vehicleClass={booking.vehicleClass} />
-                  <TripTypeBadge
-                    tripType={booking.tripType}
-                    hours={booking.hours}
-                    hourlyDuration={booking.hourlyDuration}
-                  />
-                  {booking.tripType === "HOURLY" && (
-                    <CityBadge city={booking.city} />
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2 text-xs text-gray-400 mb-2">
-                  <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span className="truncate">
-                    {booking.tripType === "HOURLY"
-                      ? booking.pickupAddress
-                      : renderRoute(booking)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs text-gray-400 mb-3">
-                  <div className="flex items-center gap-1">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span>{formatDate(booking.tripDate)}</span>
-                    <Clock className="w-3.5 h-3.5 ml-2" />
-                    <span>{booking.tripTime}</span>
-                  </div>
-                  {/* Money display — vendorPayoutAmount is the only
-                      figure the vendor sees. Renders "—" for the
-                      theoretical null case (booking pre-dating the
-                      payout column); no fallback to partner rate. */}
-                  {booking.vendorPayoutAmount != null ? (
-                    <div className="text-right">
-                      <p className="text-[10px] text-gray-500 leading-none">
-                        Your Payout
-                      </p>
-                      <span className="text-sm font-medium text-luxury-gold">
-                        SAR{" "}
-                        {Number(booking.vendorPayoutAmount).toLocaleString()}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-sm font-medium text-gray-500">—</span>
-                  )}
-                </div>
-                <div className="pt-3 border-t border-neutral-800">
-                  {renderActions(booking)}
-                </div>
+          {/* Booking list — activity-forward rows */}
+          <div className="space-y-2.5">
+            {bookings.map((booking) => {
+              const a = deriveVendorActivity(booking);
+              const vehicle = getVehicleClassConfig(booking.vehicleClass).label;
+              const sub = [booking.route, vehicle].filter(Boolean).join(" · ");
+              return (
+                <BookingActivityRow
+                  key={booking.id}
+                  name={booking.guestName || "Guest"}
+                  subline={sub}
+                  onClick={() => handleViewDetail(booking.id)}
+                  {...a}
+                />
+              );
+            })}
+            {bookings.length === 0 && (
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-900 py-14 text-center text-sm text-gray-500">
+                No bookings to show yet.
               </div>
-            ))}
+            )}
           </div>
-
-          {/* Desktop Table */}
-          <div className="hidden lg:block bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-neutral-800">
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Ref
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Customer
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Type / Class
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Route
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Date/Time
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Amount
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Status
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bookings.map((booking) => (
-                    <tr
-                      key={booking.id}
-                      className="border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50"
-                    >
-                      <td className="px-4 py-3 text-sm text-luxury-gold font-mono">
-                        {booking.bookingRef}
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-sm text-white">
-                          {booking.guestName}
-                        </p>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col gap-1">
-                          <TripTypeBadge
-                            tripType={booking.tripType}
-                            hours={booking.hours}
-                            hourlyDuration={booking.hourlyDuration}
-                          />
-                          {/* City chip only for HOURLY — one-way rows
-                              carry their city implicitly via the route
-                              cell, so a separate chip would be
-                              redundant. Matches admin overview + partner
-                              dashboard treatment. */}
-                          {booking.tripType === "HOURLY" && (
-                            <CityBadge city={booking.city} />
-                          )}
-                          <VehicleClassBadge
-                            vehicleClass={booking.vehicleClass}
-                          />
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-400 max-w-[200px] truncate">
-                        {booking.tripType === "HOURLY"
-                          ? booking.pickupAddress
-                          : renderRoute(booking)}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-400 whitespace-nowrap">
-                        {formatDate(booking.tripDate)} {booking.tripTime}
-                      </td>
-                      <td className="px-4 py-3 text-sm font-medium whitespace-nowrap">
-                        {booking.vendorPayoutAmount != null ? (
-                          <>
-                            <span className="text-luxury-gold">
-                              SAR{" "}
-                              {Number(
-                                booking.vendorPayoutAmount,
-                              ).toLocaleString()}
-                            </span>
-                            <p className="text-[10px] text-gray-500 leading-none mt-0.5">
-                              Your Payout
-                            </p>
-                          </>
-                        ) : (
-                          <span className="text-gray-500">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-block px-2 py-1 text-xs rounded border ${getBookingStatusColor(booking)}`}
-                        >
-                          {/* See list-view note above — same reasoning. */}
-                          {booking.statusLabel || formatStatus(booking.status)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">{renderActions(booking)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Empty State */}
-          {bookings.length === 0 && !isLoading && (
-            <Empty className="bg-neutral-900 border border-neutral-800 rounded-xl py-12">
-              <EmptyHeader>
-                <EmptyMedia variant="icon" className="bg-neutral-800">
-                  <Calendar className="w-5 h-5 text-gray-400" />
-                </EmptyMedia>
-                <EmptyTitle className="text-white">
-                  No Bookings Found
-                </EmptyTitle>
-                <EmptyDescription className="text-gray-400">
-                  {searchQuery || dateFrom || dateTo
-                    ? "Try adjusting your filters or search terms"
-                    : "Bookings will appear here"}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          )}
 
           {/* Pagination */}
           {pagination.total > 0 && (
@@ -2160,6 +1952,14 @@ export default function VendorBookings({
                 </button>
               </div>
             </div>
+            <VendorBookingChange
+              booking={selectedBooking}
+              onDone={() => {
+                fetchBookings();
+                refreshBadges();
+                handleViewDetail(selectedBooking!.id);
+              }}
+            />
             <div className="p-5 space-y-4">
               {/* Trip type + vehicle class badges. Small metadata pills,
                   visually secondary to the status. Kept because the
@@ -2175,6 +1975,16 @@ export default function VendorBookings({
                   vehicleClass={selectedBooking.vehicleClass}
                 />
               </div>
+
+              {selectedBooking.modifications &&
+                selectedBooking.modifications.length > 0 && (
+                  <div ref={changesRef}>
+                    <ModificationTimeline
+                      modifications={selectedBooking.modifications}
+                      defaultOpen
+                    />
+                  </div>
+                )}
 
               {selectedBooking.timeline &&
                 selectedBooking.timeline.length > 0 && (
@@ -2223,35 +2033,13 @@ export default function VendorBookings({
                   exposes it as nullable). Vendor detail intentionally
                   omits partner/origin attribution, so no Partner row
                   appears — that's admin-only. */}
-              <div className="bg-neutral-800 rounded-xl p-4">
-                <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
-                  <User className="w-4 h-4 text-luxury-gold" /> Customer
-                </h3>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between gap-4">
-                    <span className="text-gray-500 flex-shrink-0">Name</span>
-                    <span className="text-white text-right break-words">
-                      {selectedBooking.customer.name}
-                    </span>
-                  </div>
-                  {selectedBooking.customer.email && (
-                    <div className="flex justify-between gap-4">
-                      <span className="text-gray-500 flex-shrink-0">Email</span>
-                      <span className="text-white text-right break-all">
-                        {selectedBooking.customer.email}
-                      </span>
-                    </div>
-                  )}
-                  {selectedBooking.customer.phone && (
-                    <div className="flex justify-between gap-4">
-                      <span className="text-gray-500 flex-shrink-0">Phone</span>
-                      <span className="text-white text-right">
-                        {selectedBooking.customer.phone}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <CustomerCard
+                customer={{
+                  name: selectedBooking.customer.name,
+                  phone: selectedBooking.customer.phone,
+                  email: selectedBooking.customer.email,
+                }}
+              />
 
               {/* Trip details — trip-type-aware
                   ────────────────────────────────────────────────
@@ -2533,176 +2321,65 @@ export default function VendorBookings({
               {(selectedBooking.assignedDriver ||
                 selectedBooking.assignedVehicle ||
                 !isOfferState(selectedBooking.status)) && (
-                <div className="rounded-xl overflow-hidden border border-luxury-gold/30 bg-gradient-to-br from-luxury-gold/[0.03] to-transparent">
-                  {/* ----- Driver section ----- */}
-                  <div className="p-4 bg-gradient-to-r from-luxury-gold/10 to-transparent border-b border-luxury-gold/10">
-                    <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
-                      Driver
-                    </p>
-                    {selectedBooking.assignedDriver ? (
-                      <div className="flex items-start gap-4">
-                        <DriverPhotoLarge
-                          photoUrl={selectedBooking.assignedDriver.photoUrl}
-                          name={selectedBooking.assignedDriver.name}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <h4 className="text-base font-semibold text-white truncate">
-                            {selectedBooking.assignedDriver.name}
-                          </h4>
-                          {selectedBooking.assignedDriver.rating != null && (
-                            <div className="flex items-center gap-1 mt-0.5">
-                              <Star className="w-3.5 h-3.5 text-luxury-gold fill-luxury-gold" />
-                              <span className="text-xs text-luxury-gold font-medium">
-                                {Number(
-                                  selectedBooking.assignedDriver.rating,
-                                ).toFixed(1)}
-                              </span>
-                            </div>
-                          )}
+                <div className="space-y-3">
+                  <DriverCard
+                    driver={
+                      selectedBooking.assignedDriver
+                        ? {
+                            name: selectedBooking.assignedDriver.name,
+                            phone: selectedBooking.assignedDriver.phone,
+                            photoUrl: selectedBooking.assignedDriver.photoUrl,
+                            rating: selectedBooking.assignedDriver.rating,
+                          }
+                        : null
+                    }
+                    actions={
+                      selectedBooking.assignedDriver ? (
+                        <>
                           {selectedBooking.assignedDriver.phone && (
                             <a
-                              href={`tel:${selectedBooking.assignedDriver.phone}`}
-                              className="inline-flex items-center gap-1.5 mt-2 text-sm text-gray-300 hover:text-luxury-gold transition-colors"
-                            >
-                              <Phone className="w-3.5 h-3.5" />
-                              {selectedBooking.assignedDriver.phone}
-                            </a>
-                          )}
-                          {/* Quick-share row — one tap from vendor
-                              to either (a) shoot the full booking
-                              brief to the driver's WhatsApp, or
-                              (b) drop the trip onto a Google
-                              Calendar. The WhatsApp message itself
-                              embeds the calendar link too, so the
-                              driver can add it to their calendar
-                              from inside the chat without the
-                              vendor doing anything extra.
-
-                              WhatsApp button only renders when a
-                              driver phone exists (no number → no
-                              wa.me target). Calendar always
-                              renders when a driver is assigned
-                              since it's based on the booking, not
-                              the driver. */}
-                          <div className="flex flex-wrap items-center gap-2 mt-3">
-                            {selectedBooking.assignedDriver.phone && (
-                              <a
-                                href={buildWhatsAppUrl(
-                                  selectedBooking.assignedDriver.phone,
-                                  buildDriverMessage(selectedBooking),
-                                )}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[#25D366]/15 text-[#25D366] border border-[#25D366]/30 hover:bg-[#25D366]/25 transition-colors"
-                                title="Send full booking brief to driver on WhatsApp"
-                              >
-                                <WhatsAppIcon className="w-3.5 h-3.5" />
-                                WhatsApp
-                              </a>
-                            )}
-                            <a
-                              href={vendorCalendarUrl(selectedBooking)}
+                              href={buildWhatsAppUrl(
+                                selectedBooking.assignedDriver.phone,
+                                buildDriverMessage(selectedBooking),
+                              )}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-blue-500/10 text-blue-300 border border-blue-500/30 hover:bg-blue-500/20 transition-colors"
-                              title="Open Google Calendar with this booking pre-filled"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[#25D366]/15 text-[#25D366] border border-[#25D366]/30 hover:bg-[#25D366]/25 transition-colors"
+                              title="Send full booking brief to driver on WhatsApp"
                             >
-                              <Calendar className="w-3.5 h-3.5" />
-                              Add to Calendar
+                              <WhatsAppIcon className="w-3.5 h-3.5" />
+                              WhatsApp
                             </a>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-3 text-gray-400 py-2">
-                        <div className="w-12 h-12 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
-                          <User className="w-6 h-6 text-gray-500" />
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-300">
-                            Driver Not Yet Assigned
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Assign one of your drivers on acceptance
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* ----- Vehicle section ----- */}
-                  <div className="p-4">
-                    <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
-                      Vehicle
-                    </p>
-                    {selectedBooking.assignedVehicle ? (
-                      <div className="flex items-center gap-4">
-                        {/* Brand wordmark tile — make's first word
-                            in serif caps on a gold-tinted gradient.
-                            Feels closer to how luxury automotive
-                            brands present themselves than a clip-art
-                            car icon would. */}
-                        <div className="relative w-24 h-20 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-luxury-gold/20 via-luxury-gold/5 to-neutral-900 border border-luxury-gold/30 flex items-center justify-center">
-                          <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-transparent to-luxury-gold/10" />
-                          {selectedBooking.assignedVehicle.make?.trim() ? (
-                            <span
-                              className="relative font-serif text-base tracking-tight text-luxury-gold uppercase leading-none"
-                              style={{ letterSpacing: "-0.02em" }}
-                            >
-                              {selectedBooking.assignedVehicle.make
-                                .split(" ")[0]
-                                .slice(0, 8)}
-                            </span>
-                          ) : (
-                            <Car className="relative w-8 h-8 text-luxury-gold" />
                           )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <h4 className="text-base font-semibold text-white">
-                            {selectedBooking.assignedVehicle.year}{" "}
-                            {selectedBooking.assignedVehicle.make}{" "}
-                            {selectedBooking.assignedVehicle.model}
-                          </h4>
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs">
-                            {selectedBooking.assignedVehicle.color && (
-                              <>
-                                <span className="flex items-center gap-1.5 text-gray-300">
-                                  <span
-                                    className="w-2.5 h-2.5 rounded-full border border-gray-500/50 shadow-inner"
-                                    style={{
-                                      backgroundColor: vehicleColorToCss(
-                                        selectedBooking.assignedVehicle.color,
-                                      ),
-                                    }}
-                                    aria-hidden
-                                  />
-                                  {selectedBooking.assignedVehicle.color}
-                                </span>
-                                <span className="text-gray-600">•</span>
-                              </>
-                            )}
-                            <span className="font-mono tracking-wider text-luxury-gold">
-                              {selectedBooking.assignedVehicle.plateNumber}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-3 text-gray-400 py-2">
-                        <div className="w-24 h-20 rounded-lg bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
-                          <Car className="w-7 h-7 text-gray-500" />
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-300">
-                            Vehicle Not Yet Assigned
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Pick a vehicle when accepting this booking
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                          <a
+                            href={vendorCalendarUrl(selectedBooking)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-blue-500/10 text-blue-300 border border-blue-500/30 hover:bg-blue-500/20 transition-colors"
+                            title="Open Google Calendar with this booking pre-filled"
+                          >
+                            <Calendar className="w-3.5 h-3.5" />
+                            Add to Calendar
+                          </a>
+                        </>
+                      ) : undefined
+                    }
+                  />
+                  <VehicleCard
+                    vehicle={
+                      selectedBooking.assignedVehicle
+                        ? {
+                            name: `${selectedBooking.assignedVehicle.make} ${selectedBooking.assignedVehicle.model}`,
+                            plateNumber:
+                              selectedBooking.assignedVehicle.plateNumber,
+                            year: selectedBooking.assignedVehicle.year,
+                            color: selectedBooking.assignedVehicle.color,
+                            seats: selectedBooking.assignedVehicle.seats,
+                            category: selectedBooking.assignedVehicle.category,
+                          }
+                        : null
+                    }
+                  />
                 </div>
               )}
 
@@ -2726,149 +2403,195 @@ export default function VendorBookings({
                   the field they apply to. Clicking Reject expands an
                   inline form below (replacing the two buttons) without
                   navigating away from the detail context. */}
-              {(selectedBooking.isActionable !== undefined
-                ? selectedBooking.isActionable
-                : isOfferState(selectedBooking.status)) && (
-                <div className="pt-3 border-t border-neutral-800">
-                  {showRejectModal &&
-                  rejectingBooking?.id === selectedBooking.id ? (
-                    // Inline reject form. Lives in the same content
-                    // flow as the rest of the detail so scrolling and
-                    // layout behave naturally on small screens.
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-semibold text-white">
-                          Reject this booking
-                        </p>
-                        {rejectingBooking.vendorPayoutAmount != null && (
-                          <p className="text-xs text-gray-500">
-                            Offered:{" "}
-                            <span className="text-luxury-gold font-medium">
-                              SAR{" "}
-                              {Number(
-                                rejectingBooking.vendorPayoutAmount,
-                              ).toLocaleString()}
-                            </span>
+              {/* Offer response is shown ONLY while the booking is a live
+                  offer the vendor still owes a decision on. Once a driver +
+                  vehicle are assigned (booking confirmed) there is nothing
+                  to accept/reject — the guards below keep the buttons from
+                  lingering on a confirmed booking. */}
+              {isOfferState(selectedBooking.status) &&
+                (selectedBooking.isActionable ?? true) &&
+                !selectedBooking.assignedDriver &&
+                !selectedBooking.assignedVehicle && (
+                  <div className="pt-3 border-t border-neutral-800">
+                    {showRejectModal &&
+                    rejectingBooking?.id === selectedBooking.id ? (
+                      // Inline reject form. Lives in the same content
+                      // flow as the rest of the detail so scrolling and
+                      // layout behave naturally on small screens.
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm font-semibold text-white">
+                            Reject this booking
                           </p>
-                        )}
-                      </div>
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1.5">
-                          Reason for declining
-                        </label>
-                        <select
-                          value={rejectionReason}
-                          onChange={(e) =>
-                            setRejectionReason(
-                              e.target.value as RejectionReason,
-                            )
-                          }
-                          disabled={isRejecting}
-                          className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white text-sm focus:outline-none focus:border-red-500/50 disabled:opacity-50"
-                        >
-                          {REJECTION_REASONS.map((r) => (
-                            <option key={r.value} value={r.value}>
-                              {r.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                          {rejectingBooking.vendorPayoutAmount != null && (
+                            <p className="text-xs text-gray-500">
+                              Offered:{" "}
+                              <span className="text-luxury-gold font-medium">
+                                SAR{" "}
+                                {Number(
+                                  rejectingBooking.vendorPayoutAmount,
+                                ).toLocaleString()}
+                              </span>
+                            </p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1.5">
+                            Reason for declining
+                          </label>
+                          <select
+                            value={rejectionReason}
+                            onChange={(e) =>
+                              setRejectionReason(
+                                e.target.value as RejectionReason,
+                              )
+                            }
+                            disabled={isRejecting}
+                            className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white text-sm focus:outline-none focus:border-red-500/50 disabled:opacity-50"
+                          >
+                            {REJECTION_REASONS.map((r) => (
+                              <option key={r.value} value={r.value}>
+                                {r.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
 
-                      {/* PRICE_TOO_LOW branch — booking stays with this
+                        {/* PRICE_TOO_LOW branch — booking stays with this
                           vendor at attempt 1 to let admin send a
                           revised offer. Any other reason cascades. */}
-                      {rejectionReason === "PRICE_TOO_LOW" ? (
-                        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start gap-2">
-                          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <p className="text-xs text-amber-300 font-medium">
-                              If admin revises the price, you'll get a
-                              notification.
-                            </p>
-                            <p className="text-[11px] text-amber-300/70 mt-1">
-                              Admin may send you a revised offer for the same
-                              booking. If you decline again or pick a different
-                              reason, the booking goes to the next eligible
-                              vendor.
-                            </p>
+                        {rejectionReason === "PRICE_TOO_LOW" ? (
+                          <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start gap-2">
+                            <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                            <div>
+                              <p className="text-xs text-amber-300 font-medium">
+                                If admin revises the price, you'll get a
+                                notification.
+                              </p>
+                              <p className="text-[11px] text-amber-300/70 mt-1">
+                                Admin may send you a revised offer for the same
+                                booking. If you decline again or pick a
+                                different reason, the booking goes to the next
+                                eligible vendor.
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                      ) : (
-                        <p className="text-[11px] text-gray-500 leading-snug">
-                          The booking will be re-offered to the next eligible
-                          vendor in the pool. You won't receive this booking
-                          again.
-                        </p>
-                      )}
+                        ) : (
+                          <p className="text-[11px] text-gray-500 leading-snug">
+                            The booking will be re-offered to the next eligible
+                            vendor in the pool. You won't receive this booking
+                            again.
+                          </p>
+                        )}
 
-                      <div className="flex gap-3 pt-1">
+                        <div className="flex gap-3 pt-1">
+                          <button
+                            onClick={() => {
+                              setShowRejectModal(false);
+                              setRejectingBooking(null);
+                            }}
+                            disabled={isRejecting}
+                            className="flex-1 px-4 py-2.5 bg-neutral-800 text-white rounded-lg hover:bg-neutral-700 transition-colors disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleReject}
+                            disabled={isRejecting}
+                            className="flex-1 px-4 py-2.5 bg-red-500 text-white font-medium rounded-lg hover:bg-red-400 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                          >
+                            {isRejecting ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <XCircle className="w-4 h-4" />
+                            )}
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      // Default state: side-by-side action buttons.
+                      // Accept opens the slide-in Assign sidebar (which
+                      // is a separate panel because it needs a richer UI
+                      // for driver + vehicle selection); Reject expands
+                      // the inline form above. Both handlers were
+                      // written for the flat list-row Booking shape, so
+                      // we adapt selectedBooking (BookingDetailData) at
+                      // the call site rather than widening the handler
+                      // signatures.
+                      <div className="flex gap-3">
                         <button
-                          onClick={() => {
-                            setShowRejectModal(false);
-                            setRejectingBooking(null);
-                          }}
-                          disabled={isRejecting}
-                          className="flex-1 px-4 py-2.5 bg-neutral-800 text-white rounded-lg hover:bg-neutral-700 transition-colors disabled:opacity-50"
+                          onClick={() =>
+                            handleOpenReject(
+                              detailToBookingShape(selectedBooking),
+                            )
+                          }
+                          className="flex-1 px-4 py-2.5 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors text-sm font-medium flex items-center justify-center gap-2"
                         >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={handleReject}
-                          disabled={isRejecting}
-                          className="flex-1 px-4 py-2.5 bg-red-500 text-white font-medium rounded-lg hover:bg-red-400 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-                        >
-                          {isRejecting ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <XCircle className="w-4 h-4" />
-                          )}
+                          <XCircle className="w-4 h-4" />
                           Reject
                         </button>
+                        <button
+                          onClick={() =>
+                            canAcceptBookings
+                              ? handleOpenAssign(
+                                  detailToBookingShape(selectedBooking),
+                                )
+                              : showNotification("warning", acceptLockReason)
+                          }
+                          disabled={!canAcceptBookings}
+                          title={
+                            canAcceptBookings ? undefined : acceptLockReason
+                          }
+                          className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
+                            canAcceptBookings
+                              ? "bg-green-500 text-white hover:bg-green-400"
+                              : "bg-neutral-800 text-gray-500 cursor-not-allowed"
+                          }`}
+                        >
+                          <CheckCircle className="w-4 h-4" />
+                          Accept
+                        </button>
                       </div>
-                    </div>
-                  ) : (
-                    // Default state: side-by-side action buttons.
-                    // Accept opens the slide-in Assign sidebar (which
-                    // is a separate panel because it needs a richer UI
-                    // for driver + vehicle selection); Reject expands
-                    // the inline form above. Both handlers were
-                    // written for the flat list-row Booking shape, so
-                    // we adapt selectedBooking (BookingDetailData) at
-                    // the call site rather than widening the handler
-                    // signatures.
-                    <div className="flex gap-3">
-                      <button
-                        onClick={() =>
-                          handleOpenReject(
-                            detailToBookingShape(selectedBooking),
-                          )
-                        }
-                        className="flex-1 px-4 py-2.5 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                      >
-                        <XCircle className="w-4 h-4" />
-                        Reject
-                      </button>
-                      <button
-                        onClick={() =>
-                          canAcceptBookings
-                            ? handleOpenAssign(
-                                detailToBookingShape(selectedBooking),
-                              )
-                            : showNotification("warning", acceptLockReason)
-                        }
-                        disabled={!canAcceptBookings}
-                        title={canAcceptBookings ? undefined : acceptLockReason}
-                        className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
-                          canAcceptBookings
-                            ? "bg-green-500 text-white hover:bg-green-400"
-                            : "bg-neutral-800 text-gray-500 cursor-not-allowed"
-                        }`}
-                      >
-                        <CheckCircle className="w-4 h-4" />
-                        Accept
-                      </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
+                )}
+
+              {/* Trip lifecycle — once the booking is confirmed (driver +
+                  vehicle assigned) the vendor drives it forward from here.
+                  Start moves CONFIRMED -> IN_PROGRESS; Complete closes it
+                  out. Restores the actions that used to sit on the list row. */}
+              {selectedBooking.status === "CONFIRMED" && (
+                <div className="pt-3 border-t border-neutral-800">
+                  <button
+                    onClick={() => handleStartTrip(selectedBooking.id)}
+                    disabled={actionLoading === selectedBooking.id}
+                    className="w-full px-4 py-2.5 bg-blue-500/10 text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-500/20 transition-colors text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {actionLoading === selectedBooking.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <PlayCircle className="w-4 h-4" />
+                    )}
+                    Start Trip
+                  </button>
+                </div>
+              )}
+
+              {selectedBooking.status === "IN_PROGRESS" && (
+                <div className="pt-3 border-t border-neutral-800">
+                  <button
+                    onClick={() => handleCompleteTrip(selectedBooking.id)}
+                    disabled={actionLoading === selectedBooking.id}
+                    className="w-full px-4 py-2.5 bg-green-500/10 text-green-400 border border-green-500/30 rounded-lg hover:bg-green-500/20 transition-colors text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {actionLoading === selectedBooking.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CheckCircle className="w-4 h-4" />
+                    )}
+                    Complete Trip
+                  </button>
                 </div>
               )}
             </div>
@@ -2997,13 +2720,27 @@ export default function VendorBookings({
                     element. */}
                 {assigningBookingDetail && (
                   <div className="border-b border-neutral-700/60">
-                    <BookingMap
-                      tripType={assigningBookingDetail.trip.tripType}
-                      pickupLat={assigningBookingDetail.trip.pickupLat}
-                      pickupLng={assigningBookingDetail.trip.pickupLng}
-                      dropoffLat={assigningBookingDetail.trip.dropoffLat}
-                      dropoffLng={assigningBookingDetail.trip.dropoffLng}
-                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAssignMap((v) => !v)}
+                      className="w-full flex items-center justify-between px-4 py-2 text-xs text-gray-400 hover:text-white transition-colors"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5" /> Route map
+                      </span>
+                      <ChevronDown
+                        className={`w-4 h-4 transition-transform ${showAssignMap ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                    {showAssignMap && (
+                      <BookingMap
+                        tripType={assigningBookingDetail.trip.tripType}
+                        pickupLat={assigningBookingDetail.trip.pickupLat}
+                        pickupLng={assigningBookingDetail.trip.pickupLng}
+                        dropoffLat={assigningBookingDetail.trip.dropoffLat}
+                        dropoffLng={assigningBookingDetail.trip.dropoffLng}
+                      />
+                    )}
                   </div>
                 )}
 
@@ -3057,318 +2794,413 @@ export default function VendorBookings({
                 </div>
               ) : assignmentOptions && assigningBooking ? (
                 <>
-                  {(() => {
-                    const vs = getVehicleAvailabilitySummary(
-                      assignmentOptions.vehicles,
-                      assigningBooking.vehicleClass,
-                    );
-                    return (
-                      <div>
-                        <label className="block text-sm text-gray-400 mb-2">
-                          Select Vehicle *
-                        </label>
+                  {/* Segmented picker — one list at a time keeps the
+                      accept flow on a single screen; each tab shows a
+                      green check once that side is chosen. */}
+                  <div className="grid grid-cols-2 gap-2 sticky top-0 z-10 bg-neutral-900 pb-1">
+                    {(
+                      [
+                        {
+                          key: "vehicle",
+                          label: "Vehicle",
+                          done: !!selectedVehicle,
+                        },
+                        {
+                          key: "driver",
+                          label: "Driver",
+                          done: !!selectedDriver,
+                        },
+                      ] as const
+                    ).map((t, i) => (
+                      <button
+                        key={t.key}
+                        type="button"
+                        onClick={() => setAssignTab(t.key)}
+                        className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                          assignTab === t.key
+                            ? "border-luxury-gold bg-luxury-gold/10 text-luxury-gold"
+                            : "border-neutral-700 text-gray-400 hover:text-white"
+                        }`}
+                      >
+                        {t.done ? (
+                          <CheckCircle className="w-4 h-4 text-green-400" />
+                        ) : (
+                          <span
+                            className={`w-4 h-4 rounded-full border text-[10px] flex items-center justify-center ${
+                              assignTab === t.key
+                                ? "border-luxury-gold"
+                                : "border-neutral-600"
+                            }`}
+                          >
+                            {i + 1}
+                          </span>
+                        )}
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
 
-                        {vs.matching.length === 0 ? (
-                          <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-lg">
-                            <div className="flex items-start gap-3">
-                              <div className="w-9 h-9 bg-red-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
-                                <CarFront className="w-5 h-5 text-red-400" />
-                              </div>
-                              <div>
-                                <p className="text-sm text-red-400 font-medium">
-                                  No {vs.classLabel} Vehicles Registered
-                                </p>
-                                <p className="text-xs text-red-400/70 mt-1">
-                                  Your fleet does not have any{" "}
-                                  {vs.classLabel.toLowerCase()} vehicles. Add
-                                  one from the Fleet section to accept this
-                                  booking.
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        ) : vs.available.length === 0 ? (
-                          <div className="space-y-3">
-                            <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                  {assignTab === "vehicle" &&
+                    (() => {
+                      const vs = getVehicleAvailabilitySummary(
+                        assignmentOptions.vehicles,
+                        assigningBooking.vehicleClass,
+                      );
+                      return (
+                        <div>
+                          <label className="block text-sm text-gray-400 mb-2">
+                            Select Vehicle *
+                          </label>
+
+                          {vs.matching.length === 0 ? (
+                            <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-lg">
                               <div className="flex items-start gap-3">
-                                <div className="w-9 h-9 bg-amber-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
-                                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                                <div className="w-9 h-9 bg-red-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
+                                  <CarFront className="w-5 h-5 text-red-400" />
                                 </div>
                                 <div>
-                                  <p className="text-sm text-amber-400 font-medium">
-                                    All {vs.classLabel} Vehicles Unavailable
+                                  <p className="text-sm text-red-400 font-medium">
+                                    No {vs.classLabel} Vehicles Registered
                                   </p>
-                                  <p className="text-xs text-amber-400/70 mt-1">
-                                    You have {vs.matching.length}{" "}
-                                    {vs.classLabel.toLowerCase()}{" "}
-                                    {vs.matching.length === 1
-                                      ? "vehicle"
-                                      : "vehicles"}
-                                    , but{" "}
-                                    {vs.matching.length === 1
-                                      ? "it is"
-                                      : "all are"}{" "}
-                                    currently unavailable.
+                                  <p className="text-xs text-red-400/70 mt-1">
+                                    Your fleet does not have any{" "}
+                                    {vs.classLabel.toLowerCase()} vehicles. Add
+                                    one from the Fleet section to accept this
+                                    booking.
                                   </p>
                                 </div>
                               </div>
                             </div>
-
-                            <div className="space-y-2">
-                              {vs.unavailable.map((v) => (
-                                <div
-                                  key={v.id}
-                                  className="flex items-center gap-3 p-3 bg-neutral-800/50 border border-neutral-700/50 rounded-lg opacity-60"
-                                >
-                                  <div className="w-8 h-8 bg-neutral-700 rounded-lg flex items-center justify-center">
-                                    <Wrench className="w-4 h-4 text-gray-400" />
+                          ) : vs.available.length === 0 ? (
+                            <div className="space-y-3">
+                              <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-9 h-9 bg-amber-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
+                                    <AlertTriangle className="w-5 h-5 text-amber-400" />
                                   </div>
-                                  <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-gray-300 truncate">
-                                      {v.label}
+                                  <div>
+                                    <p className="text-sm text-amber-400 font-medium">
+                                      All {vs.classLabel} Vehicles Unavailable
                                     </p>
-                                    <p className="text-xs text-gray-500">
-                                      {v.plateNumber}
+                                    <p className="text-xs text-amber-400/70 mt-1">
+                                      You have {vs.matching.length}{" "}
+                                      {vs.classLabel.toLowerCase()}{" "}
+                                      {vs.matching.length === 1
+                                        ? "vehicle"
+                                        : "vehicles"}
+                                      , but{" "}
+                                      {vs.matching.length === 1
+                                        ? "it is"
+                                        : "all are"}{" "}
+                                      currently unavailable.
                                     </p>
                                   </div>
-                                  <span className="text-xs text-red-400/80 bg-red-500/10 px-2 py-1 rounded">
-                                    {v.isBusy
-                                      ? "Assigned to another trip"
-                                      : "Available"}
-                                  </span>
                                 </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="space-y-3">
-                            <div className="space-y-2">
-                              {vs.matching.map((v) => {
-                                const isSelected = selectedVehicle === v.id;
-                                return (
-                                  <button
+                              </div>
+
+                              <div className="space-y-2">
+                                {vs.unavailable.map((v) => (
+                                  <div
                                     key={v.id}
-                                    type="button"
-                                    disabled={v.isBusy}
-                                    onClick={() =>
-                                      !v.isBusy &&
-                                      setSelectedVehicle(isSelected ? "" : v.id)
-                                    }
-                                    className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-all ${
-                                      isSelected
-                                        ? "bg-luxury-gold/10 border-luxury-gold/40"
-                                        : !v.isBusy
-                                          ? "bg-neutral-800/50 border-neutral-700 hover:border-neutral-600"
-                                          : "bg-neutral-800/30 border-neutral-800 opacity-50 cursor-not-allowed"
-                                    }`}
+                                    className="flex items-center gap-3 p-3 bg-neutral-800/50 border border-neutral-700/50 rounded-lg opacity-60"
                                   >
-                                    <div
-                                      className={`w-9 h-9 rounded-lg flex items-center justify-center ${
-                                        isSelected
-                                          ? "bg-luxury-gold/20"
-                                          : "bg-neutral-700"
-                                      }`}
-                                    >
-                                      {isSelected ? (
-                                        <CheckCircle className="w-5 h-5 text-luxury-gold" />
-                                      ) : (
-                                        <Car
-                                          className={`w-5 h-5 ${!v.isBusy ? "text-gray-300" : "text-gray-500"}`}
-                                        />
-                                      )}
+                                    <div className="w-8 h-8 bg-neutral-700 rounded-lg flex items-center justify-center">
+                                      <Wrench className="w-4 h-4 text-gray-400" />
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                      <p
-                                        className={`text-sm truncate ${isSelected ? "text-white font-medium" : "text-gray-300"}`}
-                                      >
+                                      <p className="text-sm text-gray-300 truncate">
                                         {v.label}
                                       </p>
                                       <p className="text-xs text-gray-500">
                                         {v.plateNumber}
                                       </p>
                                     </div>
-                                    {!v.isBusy ? (
-                                      <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded">
-                                        Available
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded">
-                                        {"Assigned to another trip"}
-                                      </span>
-                                    )}
-                                  </button>
-                                );
-                              })}
-                            </div>
-
-                            <p className="text-xs text-gray-500">
-                              {vs.available.length} of {vs.matching.length}{" "}
-                              {vs.classLabel.toLowerCase()}{" "}
-                              {vs.matching.length === 1
-                                ? "vehicle"
-                                : "vehicles"}{" "}
-                              available
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {(() => {
-                    const ds = getDriverAvailabilitySummary(
-                      assignmentOptions.drivers,
-                    );
-                    return (
-                      <div>
-                        <label className="block text-sm text-gray-400 mb-2">
-                          Select Driver *
-                        </label>
-
-                        {assignmentOptions.drivers.length === 0 ? (
-                          <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-lg">
-                            <div className="flex items-start gap-3">
-                              <div className="w-9 h-9 bg-red-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
-                                <UserX className="w-5 h-5 text-red-400" />
-                              </div>
-                              <div>
-                                <p className="text-sm text-red-400 font-medium">
-                                  No Drivers Registered
-                                </p>
-                                <p className="text-xs text-red-400/70 mt-1">
-                                  Add drivers from the Drivers section before
-                                  accepting bookings.
-                                </p>
+                                    <span className="text-xs text-red-400/80 bg-red-500/10 px-2 py-1 rounded">
+                                      {v.isBusy
+                                        ? "Assigned to another trip"
+                                        : "Available"}
+                                    </span>
+                                  </div>
+                                ))}
                               </div>
                             </div>
-                          </div>
-                        ) : ds.available.length === 0 ? (
-                          <div className="space-y-3">
-                            <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                <input
+                                  value={vehicleSearch}
+                                  onChange={(e) =>
+                                    setVehicleSearch(e.target.value)
+                                  }
+                                  placeholder="Search model or plate…"
+                                  className="w-full pl-9 pr-3 py-2 bg-neutral-800/60 border border-neutral-700 rounded-lg text-white text-sm focus:border-luxury-gold/60 focus:outline-none"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                {vs.matching
+                                  .filter(
+                                    (v) =>
+                                      !vehicleSearch.trim() ||
+                                      `${v.label ?? ""} ${v.plateNumber ?? ""}`
+                                        .toLowerCase()
+                                        .includes(
+                                          vehicleSearch.trim().toLowerCase(),
+                                        ),
+                                  )
+                                  .map((v) => {
+                                    const isSelected = selectedVehicle === v.id;
+                                    return (
+                                      <button
+                                        key={v.id}
+                                        type="button"
+                                        disabled={v.isBusy}
+                                        onClick={() => {
+                                          if (v.isBusy) return;
+                                          const next = isSelected ? "" : v.id;
+                                          setSelectedVehicle(next);
+                                          if (next && !selectedDriver)
+                                            setAssignTab("driver");
+                                        }}
+                                        className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-all ${
+                                          isSelected
+                                            ? "bg-luxury-gold/10 border-luxury-gold/40"
+                                            : !v.isBusy
+                                              ? "bg-neutral-800/50 border-neutral-700 hover:border-neutral-600"
+                                              : "bg-neutral-800/30 border-neutral-800 opacity-50 cursor-not-allowed"
+                                        }`}
+                                      >
+                                        <div
+                                          className={`w-9 h-9 rounded-lg flex items-center justify-center ${
+                                            isSelected
+                                              ? "bg-luxury-gold/20"
+                                              : "bg-neutral-700"
+                                          }`}
+                                        >
+                                          {isSelected ? (
+                                            <CheckCircle className="w-5 h-5 text-luxury-gold" />
+                                          ) : (
+                                            <Car
+                                              className={`w-5 h-5 ${!v.isBusy ? "text-gray-300" : "text-gray-500"}`}
+                                            />
+                                          )}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <p
+                                            className={`text-sm truncate ${isSelected ? "text-white font-medium" : "text-gray-300"}`}
+                                          >
+                                            {v.label}
+                                          </p>
+                                          <p className="text-xs text-gray-500">
+                                            {v.plateNumber}
+                                          </p>
+                                        </div>
+                                        {!v.isBusy ? (
+                                          <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded">
+                                            Available
+                                          </span>
+                                        ) : (
+                                          <span className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded">
+                                            {"Assigned to another trip"}
+                                          </span>
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                              </div>
+
+                              <p className="text-xs text-gray-500">
+                                {vs.available.length} of {vs.matching.length}{" "}
+                                {vs.classLabel.toLowerCase()}{" "}
+                                {vs.matching.length === 1
+                                  ? "vehicle"
+                                  : "vehicles"}{" "}
+                                available
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                  {assignTab === "driver" &&
+                    (() => {
+                      const ds = getDriverAvailabilitySummary(
+                        assignmentOptions.drivers,
+                      );
+                      return (
+                        <div>
+                          <label className="block text-sm text-gray-400 mb-2">
+                            Select Driver *
+                          </label>
+
+                          {assignmentOptions.drivers.length === 0 ? (
+                            <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-lg">
                               <div className="flex items-start gap-3">
-                                <div className="w-9 h-9 bg-amber-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
-                                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                                <div className="w-9 h-9 bg-red-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
+                                  <UserX className="w-5 h-5 text-red-400" />
                                 </div>
                                 <div>
-                                  <p className="text-sm text-amber-400 font-medium">
-                                    All Drivers Unavailable
+                                  <p className="text-sm text-red-400 font-medium">
+                                    No Drivers Registered
                                   </p>
-                                  <p className="text-xs text-amber-400/70 mt-1">
-                                    Your {assignmentOptions.drivers.length}{" "}
-                                    {assignmentOptions.drivers.length === 1
-                                      ? "driver is"
-                                      : "drivers are"}{" "}
-                                    currently assigned to other bookings or
-                                    inactive.
+                                  <p className="text-xs text-red-400/70 mt-1">
+                                    Add drivers from the Drivers section before
+                                    accepting bookings.
                                   </p>
                                 </div>
                               </div>
                             </div>
-
-                            <div className="space-y-2">
-                              {ds.unavailable.map((d) => (
-                                <div
-                                  key={d.id}
-                                  className="flex items-center gap-3 p-3 bg-neutral-800/50 border border-neutral-700/50 rounded-lg opacity-60"
-                                >
-                                  <div className="w-8 h-8 bg-neutral-700 rounded-full flex items-center justify-center">
-                                    <User className="w-4 h-4 text-gray-400" />
+                          ) : ds.available.length === 0 ? (
+                            <div className="space-y-3">
+                              <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-9 h-9 bg-amber-500/10 rounded-lg flex items-center justify-center flex-shrink-0">
+                                    <AlertTriangle className="w-5 h-5 text-amber-400" />
                                   </div>
-                                  <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-gray-300 truncate">
-                                      {d.name}
+                                  <div>
+                                    <p className="text-sm text-amber-400 font-medium">
+                                      All Drivers Unavailable
                                     </p>
-                                    {d.rating !== null && (
-                                      <p className="text-xs text-gray-500">
-                                        {Number(d.rating).toFixed(1)}★
-                                      </p>
-                                    )}
+                                    <p className="text-xs text-amber-400/70 mt-1">
+                                      Your {assignmentOptions.drivers.length}{" "}
+                                      {assignmentOptions.drivers.length === 1
+                                        ? "driver is"
+                                        : "drivers are"}{" "}
+                                      currently assigned to other bookings or
+                                      inactive.
+                                    </p>
                                   </div>
-                                  <span className="text-xs text-red-400/80 bg-red-500/10 px-2 py-1 rounded">
-                                    {d.isBusy
-                                      ? "Assigned to another trip"
-                                      : "Available"}
-                                  </span>
                                 </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="space-y-3">
-                            <div className="space-y-2">
-                              {assignmentOptions.drivers.map((d) => {
-                                const isSelected = selectedDriver === d.id;
-                                return (
-                                  <button
+                              </div>
+
+                              <div className="space-y-2">
+                                {ds.unavailable.map((d) => (
+                                  <div
                                     key={d.id}
-                                    type="button"
-                                    disabled={d.isBusy}
-                                    onClick={() =>
-                                      !d.isBusy &&
-                                      setSelectedDriver(isSelected ? "" : d.id)
-                                    }
-                                    className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-all ${
-                                      isSelected
-                                        ? "bg-luxury-gold/10 border-luxury-gold/40"
-                                        : !d.isBusy
-                                          ? "bg-neutral-800/50 border-neutral-700 hover:border-neutral-600"
-                                          : "bg-neutral-800/30 border-neutral-800 opacity-50 cursor-not-allowed"
-                                    }`}
+                                    className="flex items-center gap-3 p-3 bg-neutral-800/50 border border-neutral-700/50 rounded-lg opacity-60"
                                   >
-                                    <div
-                                      className={`w-9 h-9 rounded-full flex items-center justify-center ${
-                                        isSelected
-                                          ? "bg-luxury-gold/20"
-                                          : "bg-neutral-700"
-                                      }`}
-                                    >
-                                      {isSelected ? (
-                                        <CheckCircle className="w-5 h-5 text-luxury-gold" />
-                                      ) : (
-                                        <User
-                                          className={`w-5 h-5 ${!d.isBusy ? "text-gray-300" : "text-gray-500"}`}
-                                        />
-                                      )}
+                                    <div className="w-8 h-8 bg-neutral-700 rounded-full flex items-center justify-center">
+                                      <User className="w-4 h-4 text-gray-400" />
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                      <p
-                                        className={`text-sm truncate ${isSelected ? "text-white font-medium" : "text-gray-300"}`}
-                                      >
+                                      <p className="text-sm text-gray-300 truncate">
                                         {d.name}
                                       </p>
-                                      <p className="text-xs text-gray-500">
-                                        {d.phone}
-                                        {d.rating !== null &&
-                                          ` · ${Number(d.rating).toFixed(1)}★`}
-                                      </p>
+                                      {d.rating !== null && (
+                                        <p className="text-xs text-gray-500">
+                                          {Number(d.rating).toFixed(1)}★
+                                        </p>
+                                      )}
                                     </div>
-                                    {!d.isBusy ? (
-                                      <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded">
-                                        Available
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded">
-                                        {"Assigned to another trip"}
-                                      </span>
-                                    )}
-                                  </button>
-                                );
-                              })}
+                                    <span className="text-xs text-red-400/80 bg-red-500/10 px-2 py-1 rounded">
+                                      {d.isBusy
+                                        ? "Assigned to another trip"
+                                        : "Available"}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                <input
+                                  value={driverSearch}
+                                  onChange={(e) =>
+                                    setDriverSearch(e.target.value)
+                                  }
+                                  placeholder="Search name or phone…"
+                                  className="w-full pl-9 pr-3 py-2 bg-neutral-800/60 border border-neutral-700 rounded-lg text-white text-sm focus:border-luxury-gold/60 focus:outline-none"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                {assignmentOptions.drivers
+                                  .filter(
+                                    (d) =>
+                                      !driverSearch.trim() ||
+                                      `${d.name ?? ""} ${d.phone ?? ""}`
+                                        .toLowerCase()
+                                        .includes(
+                                          driverSearch.trim().toLowerCase(),
+                                        ),
+                                  )
+                                  .map((d) => {
+                                    const isSelected = selectedDriver === d.id;
+                                    return (
+                                      <button
+                                        key={d.id}
+                                        type="button"
+                                        disabled={d.isBusy}
+                                        onClick={() =>
+                                          !d.isBusy &&
+                                          setSelectedDriver(
+                                            isSelected ? "" : d.id,
+                                          )
+                                        }
+                                        className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-all ${
+                                          isSelected
+                                            ? "bg-luxury-gold/10 border-luxury-gold/40"
+                                            : !d.isBusy
+                                              ? "bg-neutral-800/50 border-neutral-700 hover:border-neutral-600"
+                                              : "bg-neutral-800/30 border-neutral-800 opacity-50 cursor-not-allowed"
+                                        }`}
+                                      >
+                                        <div
+                                          className={`w-9 h-9 rounded-full flex items-center justify-center ${
+                                            isSelected
+                                              ? "bg-luxury-gold/20"
+                                              : "bg-neutral-700"
+                                          }`}
+                                        >
+                                          {isSelected ? (
+                                            <CheckCircle className="w-5 h-5 text-luxury-gold" />
+                                          ) : (
+                                            <User
+                                              className={`w-5 h-5 ${!d.isBusy ? "text-gray-300" : "text-gray-500"}`}
+                                            />
+                                          )}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <p
+                                            className={`text-sm truncate ${isSelected ? "text-white font-medium" : "text-gray-300"}`}
+                                          >
+                                            {d.name}
+                                          </p>
+                                          <p className="text-xs text-gray-500">
+                                            {d.phone}
+                                            {d.rating !== null &&
+                                              ` · ${Number(d.rating).toFixed(1)}★`}
+                                          </p>
+                                        </div>
+                                        {!d.isBusy ? (
+                                          <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded">
+                                            Available
+                                          </span>
+                                        ) : (
+                                          <span className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded">
+                                            {"Assigned to another trip"}
+                                          </span>
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                              </div>
 
-                            <p className="text-xs text-gray-500">
-                              {ds.available.length} of{" "}
-                              {assignmentOptions.drivers.length}{" "}
-                              {assignmentOptions.drivers.length === 1
-                                ? "driver"
-                                : "drivers"}{" "}
-                              available
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
+                              <p className="text-xs text-gray-500">
+                                {ds.available.length} of{" "}
+                                {assignmentOptions.drivers.length}{" "}
+                                {assignmentOptions.drivers.length === 1
+                                  ? "driver"
+                                  : "drivers"}{" "}
+                                available
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                 </>
               ) : null}
             </div>

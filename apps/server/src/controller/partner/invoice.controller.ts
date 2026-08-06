@@ -123,10 +123,14 @@ export const getMonthlyInvoices = asyncWrapper(
     const formattedInvoices = invoices.map((inv) => ({
       id: inv.id,
       invoiceNumber: inv.invoiceNumber,
-      month: new Date(inv.periodStart).toLocaleString("default", {
+      // Single-day period label — invoicing is daily. Field kept named
+      // `month` for frontend back-compat; it now holds the invoice date.
+      month: new Date(inv.periodStart).toLocaleDateString("en-GB", {
+        day: "numeric",
         month: "long",
         year: "numeric",
       }),
+      paymentTerms: "Net 7",
       periodStart: inv.periodStart,
       periodEnd: inv.periodEnd,
       bookingCount: inv.bookingCount,
@@ -409,10 +413,12 @@ export const getInvoiceDetail = asyncWrapper(
           invoiceNumber: invoice.invoiceNumber,
           isCustom: (invoice as any).isCustom,
           dateRangeLabel: (invoice as any).dateRangeLabel || null,
-          month: new Date(invoice.periodStart).toLocaleString("default", {
+          month: new Date(invoice.periodStart).toLocaleDateString("en-GB", {
+            day: "numeric",
             month: "long",
             year: "numeric",
           }),
+          paymentTerms: "Net 7",
           periodStart: invoice.periodStart,
           periodEnd: invoice.periodEnd,
           bookingCount: invoice.bookingCount,
@@ -866,7 +872,8 @@ export const downloadInvoicePdf = asyncWrapper(
     const periodLabel = (invoice as any).isCustom
       ? (invoice as any).dateRangeLabel ||
         `${new Date(invoice.periodStart).toLocaleDateString()} – ${new Date(invoice.periodEnd).toLocaleDateString()}`
-      : new Date(invoice.periodStart).toLocaleString("default", {
+      : new Date(invoice.periodStart).toLocaleDateString("en-GB", {
+          day: "numeric",
           month: "long",
           year: "numeric",
         });
@@ -1097,6 +1104,8 @@ export const uploadPaymentProof = asyncWrapper(
       where: { id },
       data: {
         status: "PROOF_UPLOADED",
+        // Admin should see a proof was submitted and needs review.
+        isViewedByAdmin: false,
         paymentProofUrl: proofUrl.trim(),
         paymentProofFileName: proofFileName?.trim() || null,
         paymentProofUploadedAt: new Date(),

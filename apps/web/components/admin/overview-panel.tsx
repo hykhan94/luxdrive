@@ -6,6 +6,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import {
+  BookingActivityRow,
+  deriveAdminActivity,
+} from "@/components/shared/booking-activity-row";
+import {
   Building2,
   Handshake,
   CalendarDays,
@@ -755,10 +759,14 @@ export default function OverviewPanel({
               <div className="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
                 <Wallet className="w-5 h-5 text-green-400" />
               </div>
-              <span className="text-sm text-gray-400">Monthly Revenue</span>
+              <span className="text-sm text-gray-400">Gross Revenue</span>
             </div>
             <p className="text-2xl font-bold text-green-400">
               SAR {Number(stats.monthlyRevenue).toLocaleString()}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              Partner billings this month — see Earnings for LuxDrive&apos;s
+              margin
             </p>
           </div>
         </div>
@@ -836,175 +844,35 @@ export default function OverviewPanel({
             </p>
           </div>
         ) : (
-          <>
-            {/* Desktop Table */}
-            <div className="overflow-x-auto hidden sm:block">
-              <table className="w-full">
-                <thead className="bg-neutral-800/50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Booking
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Customer
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Vendor
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Date
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Amount
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-800">
-                  {bookings.map((b) => (
-                    <tr
-                      key={b.id}
-                      className={`hover:bg-neutral-800/30 ${b.isUnread ? "bg-blue-500/5" : ""}`}
-                    >
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm text-luxury-gold font-mono">
-                            {b.bookingRef}
-                          </span>
-                          {b.needsAttention && (
-                            <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
-                          )}
-                          {b.isUnread && (
-                            <span className="w-2 h-2 bg-blue-400 rounded-full" />
-                          )}
-                        </div>
-                        {/* Trip-type descriptors. Both badges sit
-                            inline so the row stays one row tall
-                            regardless of trip type; on HOURLY rows
-                            the city chip joins to give locational
-                            context that one-way rows carry in their
-                            implicit route. */}
-                        <div className="flex flex-wrap items-center gap-1 mb-1">
-                          <TripTypeBadgeAdmin
-                            tripType={b.tripType}
-                            hours={b.hours}
-                            hourlyDuration={b.hourlyDuration}
-                          />
-                          {b.tripType === "HOURLY" && (
-                            <CityBadgeAdmin city={b.city} />
-                          )}
-                        </div>
-                        {/* Source — always present, never null.
-                            Either partner chip or direct-customer
-                            chip; admin sees the answer to "where
-                            did this come from" without hunting. */}
-                        <SourceBadgeAdmin partner={b.partner} />
-                      </td>
-                      <td className="px-6 py-4 text-sm text-white">
-                        {b.customer}
-                      </td>
-                      <td className="px-6 py-4 text-sm">
-                        {/* Vendor cell. When unassigned we surface
-                            amber+warning treatment because the
-                            booking is sitting in the admin's queue
-                            waiting for action — distinct from rows
-                            where a vendor is already engaged. */}
-                        {b.vendor === "Unassigned" ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-amber-500/10 text-amber-400 border-amber-500/30">
-                            <AlertCircle className="w-3 h-3" />
-                            Unassigned
-                          </span>
-                        ) : (
-                          <span className="text-gray-300">{b.vendor}</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-400">
-                        {new Date(b.date).toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                        })}
-                        {b.time && (
-                          <span className="text-gray-600 ml-1">{b.time}</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <span
-                          className={`px-2 py-0.5 text-xs rounded-full border ${getStatusStyle(b.status)}`}
-                        >
-                          {b.status.replace(/-/g, " ")}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-white font-medium">
-                        SAR {Number(b.amount).toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Mobile Cards */}
-            <div className="sm:hidden space-y-3 p-4">
-              {bookings.map((b) => (
-                <div
+          <div className="space-y-2.5 p-4">
+            {bookings.map((b) => {
+              // Overview endpoint sends status lowercase-hyphenated
+              // (e.g. "awaiting-pricing"); normalise back to the enum
+              // so the shared derive helper matches it.
+              const a = deriveAdminActivity({
+                ...b,
+                status: (b.status || "").toUpperCase().replace(/-/g, "_"),
+              });
+              const vehicle = (b.vehicleClass || "")
+                .toLowerCase()
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (c: string) => c.toUpperCase());
+              const sub = [b.partner || "Direct", vehicle]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                <BookingActivityRow
                   key={b.id}
-                  className={`bg-neutral-800 rounded-xl p-4 border ${b.isUnread ? "border-blue-500/30" : "border-neutral-700"}`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-luxury-gold text-sm font-mono">
-                        {b.bookingRef}
-                      </span>
-                      {b.needsAttention && (
-                        <AlertTriangle className="w-3 h-3 text-red-400" />
-                      )}
-                    </div>
-                    <span
-                      className={`px-2 py-0.5 text-xs rounded-full border ${getStatusStyle(b.status)}`}
-                    >
-                      {b.status.replace(/-/g, " ")}
-                    </span>
-                  </div>
-
-                  {/* Trip-type + city + source row. Wraps on narrow
-                      screens; identical badge set to desktop. */}
-                  <div className="flex flex-wrap items-center gap-1 mb-2">
-                    <TripTypeBadgeAdmin
-                      tripType={b.tripType}
-                      hours={b.hours}
-                      hourlyDuration={b.hourlyDuration}
-                    />
-                    {b.tripType === "HOURLY" && (
-                      <CityBadgeAdmin city={b.city} />
-                    )}
-                    <SourceBadgeAdmin partner={b.partner} />
-                  </div>
-
-                  <p className="text-white text-sm">{b.customer}</p>
-                  <div className="text-xs mt-0.5">
-                    {b.vendor === "Unassigned" ? (
-                      <span className="inline-flex items-center gap-1 text-amber-400">
-                        <AlertCircle className="w-3 h-3" />
-                        Vendor unassigned
-                      </span>
-                    ) : (
-                      <span className="text-gray-400">Vendor: {b.vendor}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-neutral-700">
-                    <span className="text-xs text-gray-400">
-                      {new Date(b.date).toLocaleDateString()}
-                    </span>
-                    <span className="text-sm text-white font-medium">
-                      SAR {Number(b.amount).toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
+                  name={b.customer}
+                  subline={sub}
+                  onClick={() =>
+                    onTabChange?.("bookings", { openBookingId: b.id })
+                  }
+                  {...a}
+                />
+              );
+            })}
+          </div>
         )}
 
         {/* Pagination */}

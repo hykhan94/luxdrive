@@ -26,6 +26,11 @@ import { NotFoundError, BadRequestError } from "../../utils/AppError";
 import crypto from "crypto";
 import { requireOperational, requireApprovedAndDocsValid } from "./_shared";
 import { sendBookingCreatedAdminEmail } from "../../lib/email";
+import { checkLeadTime } from "../../utils/helpers/booking-modification.helpers";
+import {
+  applyBookingModification,
+  PARTNER_MODIFIABLE_STATUSES,
+} from "../../lib/booking-modification.service";
 
 // ============== CONSTANTS ==============
 
@@ -60,16 +65,10 @@ const VEHICLE_CLASS_LABELS: Record<string, string> = {
   KING_LONG: "King Long",
 };
 
-// Saudi VAT rate — used to split the partner-entered total into base
-// + VAT so the stored breakdown lines up with the invoice / PO.
-const VAT_RATE = 0.15;
-
 // Lower + upper bound on the price the partner can enter. Ceiling is
 // generous (SAR 1,000,000) — high enough for a coaster-hire full-day
 // package, low enough to catch a clear "typed 15000000 not 15000"
 // slip. Zero and negative are rejected outright.
-const MIN_TOTAL_PRICE = 1;
-const MAX_TOTAL_PRICE = 1_000_000;
 
 // ============== HELPERS ==============
 
@@ -136,22 +135,6 @@ function looksLikeAirport(pickup: string, dropoff: string): boolean {
   return /\b(airport|intl|international|terminal|kaia|ruh|jed|med)\b/.test(s);
 }
 
-/**
- * Split a VAT-inclusive total into base + VAT, rounded to 2dp.
- * Used both to derive booking pricing columns AND to preview on the
- * partner form.
- */
-function splitVatInclusive(total: number): {
-  basePrice: number;
-  vatAmount: number;
-  totalPrice: number;
-} {
-  const base = Math.round((total / (1 + VAT_RATE)) * 100) / 100;
-  const vat = Math.round((total - base) * 100) / 100;
-  const totalRounded = Math.round(total * 100) / 100;
-  return { basePrice: base, vatAmount: vat, totalPrice: totalRounded };
-}
-
 // ============== CREATE BOOKING ==============
 
 /**
@@ -206,7 +189,6 @@ export const createBooking = asyncWrapper(
       flightNumber,
       terminalNo,
       terminalLocation,
-      totalPrice: totalPriceFromBody,
       notes,
     } = req.body ?? {};
 
@@ -290,18 +272,14 @@ export const createBooking = asyncWrapper(
       throw new BadRequestError("Trip date cannot be in the past.");
     }
 
-    // ---------- Total price ----------
-    const totalPriceNum = Number(totalPriceFromBody);
-    if (!Number.isFinite(totalPriceNum)) {
-      throw new BadRequestError("Total price is required.");
-    }
-    if (totalPriceNum < MIN_TOTAL_PRICE || totalPriceNum > MAX_TOTAL_PRICE) {
-      throw new BadRequestError(
-        `Total price must be between SAR ${MIN_TOTAL_PRICE} and SAR ${MAX_TOTAL_PRICE}.`,
-      );
-    }
-    const { basePrice, vatAmount, totalPrice } =
-      splitVatInclusive(totalPriceNum);
+    // ---------- Pricing ----------
+    // Admin-driven pricing: the partner no longer supplies a price. The
+    // booking is created unpriced (AWAITING_PRICING); an admin sets the
+    // partner-facing price afterwards (admin setBookingPrice), which fills
+    // in basePrice / vatAmount / totalPrice. Null here on purpose.
+    const basePrice: number | null = null;
+    const vatAmount: number | null = null;
+    const totalPrice: number | null = null;
 
     // ---------- Airport heuristic → flight number required ----------
     const isAirport = looksLikeAirport(
@@ -369,13 +347,13 @@ export const createBooking = asyncWrapper(
         vatAmount,
         totalPrice,
 
-        status: "PENDING",
+        status: "AWAITING_PRICING",
         notes: notes?.trim() || null,
 
         // Admin attention flags — untouched from prior behavior.
         isReadByAdmin: false,
         needsAttention: true,
-        attentionReason: "New partner booking — needs vendor assignment",
+        attentionReason: "New partner booking — needs pricing",
         attentionAt: new Date(),
       },
     });
@@ -390,9 +368,9 @@ export const createBooking = asyncWrapper(
       await prisma.notification.createMany({
         data: adminUsers.map((admin) => ({
           userId: admin.id,
-          title: "New Partner Booking",
+          title: "New Booking — Needs Pricing",
           message: `${partner.companyName} booked a ${vehicleClass} ride for ${guestName} on ${tripDateObj.toLocaleDateString()} in ${cityRow.name}`,
-          type: "PARTNER_BOOKING_CREATED",
+          type: "BOOKING_AWAITING_PRICE",
           data: {
             bookingId: booking.id,
             bookingRef: booking.bookingRef,
@@ -415,7 +393,7 @@ export const createBooking = asyncWrapper(
         dropoffAddress: booking.dropoffAddress,
         tripDate: booking.tripDate,
         tripTime: booking.tripTime,
-        totalPrice: Number(booking.totalPrice),
+        totalPrice: Number(booking.totalPrice ?? 0),
       }).catch((err) => {
         console.error("[email] sendBookingCreatedAdminEmail failed:", err);
       });
@@ -437,6 +415,17 @@ export const createBooking = asyncWrapper(
           vehicleClass,
           totalPrice,
         },
+      },
+    });
+
+    // ---------- Partner notification (received, awaiting pricing) ----------
+    await prisma.notification.create({
+      data: {
+        userId: req.user!.id,
+        title: "Booking Received",
+        message: `We've received booking ${booking.bookingRef} for ${guestName}. You'll be notified as soon as it's priced and confirmed.`,
+        type: "BOOKING_RECEIVED",
+        data: { bookingId: booking.id, bookingRef: booking.bookingRef },
       },
     });
 
@@ -540,7 +529,7 @@ export const getBookingDetail = asyncWrapper(
           basePrice: Number(booking.basePrice),
           peakMultiplier: Number(booking.peakMultiplier),
           vatAmount: Number(booking.vatAmount),
-          totalPrice: Number(booking.totalPrice),
+          totalPrice: Number(booking.totalPrice ?? 0),
         },
         vendor: booking.vendor,
         driver: booking.driver,
@@ -584,10 +573,24 @@ export const cancelBooking = asyncWrapper(
       );
     }
 
+    const lead = await checkLeadTime(
+      "partnerCancel",
+      booking.tripDate,
+      booking.tripTime,
+    );
+    if (!lead.allowed) {
+      throw new BadRequestError(
+        `Bookings can only be cancelled up to ${lead.cutoffHours} hours before the trip time.`,
+      );
+    }
+
     const updated = await prisma.booking.update({
       where: { id: bookingId },
       data: {
         status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: req.user!.id,
+        cancellationReason: reason ? String(reason) : null,
         // "client" (neutral) rather than "partner" — the vendor-visible
         // note shouldn't leak the partner channel. Admin sees the full
         // partner attribution through the admin notification below.
@@ -637,3 +640,195 @@ export const cancelBooking = asyncWrapper(
 );
 
 // End of file — all exports are declared above.
+
+// ============== MODIFY BOOKING ==============
+
+/**
+ * PATCH /api/v1/partner/book-ride/:bookingId/modify
+ *
+ * Partner-initiated modification of a live booking. Gated by:
+ *   - ownership (booking must belong to this partner)
+ *   - status (PENDING / OFFERED / RE_OFFERED / CONFIRMED only)
+ *   - the admin-configurable partner change cutoff (lead time)
+ *
+ * Body: { patch: { ...changed fields }, reason?: string }
+ * The heavy lifting (validation, re-pricing, vendor-consent decision,
+ * persistence, and intimations) lives in the shared modification
+ * service so partner + admin edits can never diverge.
+ */
+export const modifyBooking = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const partner = await getPartnerForUser(req.user!.id);
+    requireOperational(partner.status);
+    await requireApprovedAndDocsValid(partner);
+
+    const { bookingId } = req.params;
+    const { patch, reason } = req.body ?? {};
+    if (!patch || typeof patch !== "object") {
+      throw new BadRequestError("No changes supplied.");
+    }
+
+    const existing = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true,
+        partnerId: true,
+        status: true,
+        tripDate: true,
+        tripTime: true,
+      },
+    });
+    if (!existing || existing.partnerId !== partner.id) {
+      throw new NotFoundError("Booking");
+    }
+    if (!PARTNER_MODIFIABLE_STATUSES.has(existing.status)) {
+      throw new BadRequestError("This booking can no longer be modified.");
+    }
+
+    const lead = await checkLeadTime(
+      "partnerChange",
+      existing.tripDate,
+      existing.tripTime,
+    );
+    if (!lead.allowed) {
+      throw new BadRequestError(
+        `Bookings can only be modified up to ${lead.cutoffHours} hours before the trip time.`,
+      );
+    }
+
+    const result = await applyBookingModification({
+      bookingId,
+      rawPatch: patch,
+      actor: "PARTNER",
+      actorUserId: req.user!.id,
+      actorLabel: `Partner ${partner.companyName}`,
+      reason,
+      expectedPartnerId: partner.id,
+      ip: req.ip,
+      userAgent: req.headers["user-agent"] as string | undefined,
+    });
+
+    res.json({ success: true, data: result });
+  },
+);
+
+// ============== REQUEST BOOKING DELETION ==============
+
+/**
+ * POST /api/v1/partner/book-ride/:bookingId/deletion-request
+ *
+ * Partner asks admin to (soft) delete a booking. Blocked when the
+ * booking is financially settled — custom-invoiced, part of a partner
+ * invoice, or included in a PAID vendor payout — to protect ZATCA
+ * retention and payout reconciliation. Admin approval performs the
+ * actual soft delete. Body: { reason }.
+ */
+export const requestBookingDeletion = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const partner = await getPartnerForUser(req.user!.id);
+    requireOperational(partner.status);
+
+    const { bookingId } = req.params;
+    const { reason } = req.body ?? {};
+    if (!reason || !String(reason).trim()) {
+      throw new BadRequestError(
+        "Please provide a reason for the deletion request.",
+      );
+    }
+    const cleanReason = String(reason).trim();
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, partnerId: partner.id },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+    if (booking.status === "IN_PROGRESS") {
+      throw new BadRequestError("An in-progress trip can't be deleted.");
+    }
+
+    // Financial-integrity guard.
+    const blockers: string[] = [];
+    if (booking.isCustomInvoiced) blockers.push("it has been custom-invoiced");
+    if (booking.partnerInvoiceId) {
+      blockers.push("it is part of a partner invoice");
+    }
+    if (
+      booking.status === "COMPLETED" &&
+      booking.vendorId &&
+      booking.completedAt
+    ) {
+      const paidPayout = await prisma.vendorPayout.findFirst({
+        where: {
+          vendorId: booking.vendorId,
+          status: "PAID",
+          periodStart: { lte: booking.completedAt },
+          periodEnd: { gte: booking.completedAt },
+        },
+        select: { id: true },
+      });
+      if (paidPayout)
+        blockers.push("it is included in a settled vendor payout");
+    }
+    if (blockers.length > 0) {
+      throw new BadRequestError(
+        `This booking can't be deleted because ${blockers.join(" and ")}. Contact admin if you believe this is an error.`,
+      );
+    }
+
+    // No duplicate pending requests.
+    const existing = await prisma.bookingDeletionRequest.findFirst({
+      where: { bookingId, status: "PENDING" },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new BadRequestError(
+        "A deletion request for this booking is already pending review.",
+      );
+    }
+
+    const request = await prisma.bookingDeletionRequest.create({
+      data: {
+        bookingId,
+        partnerId: partner.id,
+        reason: cleanReason,
+        status: "PENDING",
+      },
+    });
+
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN", isActive: true },
+      select: { id: true },
+    });
+    if (admins.length > 0) {
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          title: "Booking deletion requested",
+          message: `${partner.companyName} requested deletion of ${booking.bookingRef}: ${cleanReason}`,
+          type: "BOOKING_DELETION_REQUESTED",
+          data: {
+            bookingId,
+            bookingRef: booking.bookingRef,
+            requestId: request.id,
+            partnerId: partner.id,
+          },
+        })),
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "PARTNER_REQUESTED_BOOKING_DELETION",
+        entity: "Booking",
+        entityId: bookingId,
+        changes: { bookingRef: booking.bookingRef, reason: cleanReason },
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Deletion request submitted for admin review.",
+      data: { id: request.id, status: request.status },
+    });
+  },
+);

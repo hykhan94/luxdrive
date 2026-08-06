@@ -3,8 +3,12 @@
 // ============================================
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { adminApi, ApiError } from "@/lib/api";
+import {
+  BookingActivityRow,
+  deriveAdminActivity,
+} from "@/components/shared/booking-activity-row";
 import {
   Search,
   Calendar,
@@ -25,9 +29,42 @@ import {
   ArrowRight,
   Briefcase,
   Car,
+  ArrowUpCircle,
   Download,
+  History,
+  ChevronDown,
+  ChevronUp,
+  ArrowUpDown,
 } from "lucide-react";
+import {
+  ModificationTimeline,
+  type BookingModificationEntry,
+} from "@/components/shared/modification-timeline";
+import VendorEligibilityBreakdown, {
+  type IneligibleVendor,
+} from "@/components/admin/vendor-eligibility-breakdown";
+import {
+  CustomerCard,
+  DriverCard,
+  VehicleCard,
+} from "@/components/shared/assignment-cards";
 import { useNotification } from "@/lib/notification-context";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+// Themed dropdown styling — matches the partner/vendor portal Selects
+// so vendor assignment reads the same across all three surfaces.
+const selectTriggerCls =
+  "w-full h-11 px-3 rounded-lg bg-neutral-800/60 border-neutral-700 text-white text-sm hover:bg-neutral-800 focus:border-luxury-gold/70 focus:ring-2 focus:ring-luxury-gold/20 data-[state=open]:border-luxury-gold/70 disabled:opacity-40";
+const selectContentCls =
+  "z-[90] max-h-72 bg-neutral-900 border-neutral-700 text-white shadow-2xl";
+const selectItemCls =
+  "rounded-md py-2 pr-8 text-white focus:bg-neutral-800 focus:text-white data-[state=checked]:text-luxury-gold";
 
 type StatusFilter =
   | "all"
@@ -60,6 +97,10 @@ type SourceFilter = "all" | "direct" | "partner";
 // outstanding offer. Label + banner reinforce each other; neither
 // hides the state.
 const statusConfig: Record<string, { label: string; color: string }> = {
+  "awaiting-pricing": {
+    label: "Needs Pricing",
+    color: "bg-orange-500/10 text-orange-400 border-orange-500/30",
+  },
   pending: {
     label: "Pending",
     color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
@@ -105,6 +146,8 @@ interface Booking {
   vendorStatus: string | null;
   status: string;
   statusDisplay: string;
+  modificationCount: number;
+  modifiedAt: string | null;
   amount: number;
   vehicleClass: string | null;
   // Trip-type fields — match the partner portal's payload so the
@@ -554,6 +597,9 @@ interface BookingDetail {
   bookingRef: string;
   status: string;
   statusDisplay: string;
+  modificationCount: number;
+  modifiedAt: string | null;
+  modifications: BookingModificationEntry[];
   customer: { name: string; email: string | null; phone: string | null };
   partner: { id: string; companyName: string } | null;
   isPartnerBooking: boolean;
@@ -646,6 +692,108 @@ interface BookingListProps {
   initialOpenBookingId?: string | null;
   onInitialOpenConsumed?: () => void;
 }
+// ── Category-upgrade "deal economics" helpers ──────────────────────────
+// A single before → after row (Partner pays / Vendor earns / LuxDrive
+// margin). Shows the old figure struck through, the new figure, and a
+// signed delta chip (green up, red down). The margin row is the "hero".
+function UpgradeEconRow({
+  label,
+  from,
+  to,
+  delta,
+  toPct,
+  hero,
+}: {
+  label: string;
+  from: number;
+  to: number;
+  delta: number;
+  toPct?: number;
+  hero?: boolean;
+}) {
+  const changed = Math.abs(delta) > 0.001;
+  const up = delta > 0;
+  const fmt = (n: number) =>
+    n.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    });
+  return (
+    <div
+      className={`flex items-center justify-between ${
+        hero ? "pt-2 mt-1 border-t border-neutral-700/70" : ""
+      }`}
+    >
+      <span
+        className={`text-xs ${hero ? "text-white font-medium" : "text-gray-400"}`}
+      >
+        {label}
+      </span>
+      <div className="flex items-center gap-2">
+        {changed && (
+          <span className="text-[11px] text-gray-500 line-through">
+            SAR {fmt(from)}
+          </span>
+        )}
+        <span
+          className={`text-sm font-semibold ${
+            hero ? (to < 0 ? "text-red-400" : "text-luxury-gold") : "text-white"
+          }`}
+        >
+          SAR {fmt(to)}
+          {toPct !== undefined && (
+            <span className="text-[10px] text-gray-500 ml-1">
+              ({toPct.toFixed(1)}%)
+            </span>
+          )}
+        </span>
+        {changed && (
+          <span
+            className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+              up
+                ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                : "text-red-400 border-red-500/30 bg-red-500/10"
+            }`}
+          >
+            {up ? "+" : "−"}SAR {fmt(Math.abs(delta))}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Stacked share bar: [ vendor payout | LuxDrive margin ] as a proportion
+// of the partner price. Two of these (Now / After) let the admin SEE the
+// margin slice move. The right-hand % is the LuxDrive margin share.
+function UpgradeSplitBar({
+  label,
+  vendorShare,
+  muted,
+}: {
+  label: string;
+  vendorShare: number;
+  muted?: boolean;
+}) {
+  const v = Math.max(0, Math.min(100, vendorShare));
+  const marginPct = 100 - v;
+  return (
+    <div className={`flex items-center gap-2 ${muted ? "opacity-50" : ""}`}>
+      <span className="text-[10px] text-gray-500 w-9 shrink-0">{label}</span>
+      <div className="flex-1 h-2.5 rounded-full overflow-hidden flex bg-neutral-800">
+        <div className="h-full bg-neutral-500" style={{ width: `${v}%` }} />
+        <div
+          className="h-full bg-luxury-gold"
+          style={{ width: `${marginPct}%` }}
+        />
+      </div>
+      <span className="text-[10px] text-gray-400 w-11 shrink-0 text-right">
+        {marginPct.toFixed(0)}% margin
+      </span>
+    </div>
+  );
+}
+
 export default function BookingList({
   showSourceFilter = false,
   initialOpenBookingId,
@@ -680,9 +828,13 @@ export default function BookingList({
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [dateFrom, setDateFrom] = useState("");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc" | null>(null);
   const [dateTo, setDateTo] = useState("");
 
   // Detail panel
+  // Lets the row's "Modified" pill jump straight to the change history.
+  const changesRef = useRef<HTMLDivElement | null>(null);
+  const [scrollToChanges, setScrollToChanges] = useState(false);
   const [selectedBooking, setSelectedBooking] = useState<BookingDetail | null>(
     null,
   );
@@ -694,9 +846,20 @@ export default function BookingList({
   const [availableVendors, setAvailableVendors] = useState<AvailableVendor[]>(
     [],
   );
+  const [ineligibleVendors, setIneligibleVendors] = useState<
+    IneligibleVendor[]
+  >([]);
   const [selectedVendorId, setSelectedVendorId] = useState("");
   const [payoutAmount, setPayoutAmount] = useState("");
+  const [partnerPriceInput, setPartnerPriceInput] = useState("");
+  const [isPricing, setIsPricing] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
+  // Admin-driven category upgrade authorization for a booking.
+  const [showUpgradePanel, setShowUpgradePanel] = useState(false);
+  const [upgradeClasses, setUpgradeClasses] = useState<string[]>([]);
+  const [upgradePrice, setUpgradePrice] = useState("");
+  const [upgradePayout, setUpgradePayout] = useState("");
+  const [isAuthorizingUpgrade, setIsAuthorizingUpgrade] = useState(false);
   const [isLoadingVendors, setIsLoadingVendors] = useState(false);
   // Tracks whether a vendor-load attempt has completed for the current
   // booking. We can't rely on `availableVendors.length > 0` alone —
@@ -741,6 +904,7 @@ export default function BookingList({
         if (dateFrom) params.startDate = dateFrom;
         if (dateTo) params.endDate = dateTo;
         params.dateType = "tripDate";
+        if (sortOrder) params.sortOrder = sortOrder;
 
         const res = await adminApi.getBookings(params);
         if (res.success && res.data) {
@@ -778,6 +942,7 @@ export default function BookingList({
       sourceFilter,
       dateFrom,
       dateTo,
+      sortOrder,
       showNotification,
     ],
   );
@@ -792,6 +957,7 @@ export default function BookingList({
   const resetDetailState = () => {
     setSelectedVendorId("");
     setAvailableVendors([]);
+    setIneligibleVendors([]);
     setVendorsLoaded(false);
     setPayoutAmount("");
     setReOfferPayoutAmount("");
@@ -830,6 +996,20 @@ export default function BookingList({
     }
   };
 
+  // When the detail is opened via a "Modified" pill, scroll to the
+  // change-history section once it has rendered.
+  useEffect(() => {
+    if (!selectedBooking || !scrollToChanges) return;
+    const t = setTimeout(() => {
+      changesRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      setScrollToChanges(false);
+    }, 150);
+    return () => clearTimeout(t);
+  }, [selectedBooking, scrollToChanges]);
+
   // Fetch available vendors (uses the new eligibility filter — backend
   // returns only vendors whose docs are valid through trip date and who
   // haven't already rejected this booking, sorted by completed-bookings).
@@ -840,8 +1020,10 @@ export default function BookingList({
     setVendorsLoaded(false);
     try {
       const res = await adminApi.getAvailableVendors(bookingId);
-      if (res.success && res.data)
+      if (res.success && res.data) {
         setAvailableVendors(res.data.available || []);
+        setIneligibleVendors(res.data.ineligible || []);
+      }
     } catch (err: any) {
       showNotification("error", err.message || "Failed to load vendors");
     } finally {
@@ -871,6 +1053,73 @@ export default function BookingList({
     margin !== null && partnerPrice > 0 ? (margin / partnerPrice) * 100 : null;
   const isMarginNegative = margin !== null && margin < 0;
 
+  // Live "deal economics" for the category-upgrade modal. Recomputes as
+  // the admin types a new price / payout; blank inputs fall back to the
+  // current values so the panel always shows a coherent before → after.
+  const upgradeEconomics = useMemo(() => {
+    const curPrice = selectedBooking?.pricing.totalPrice ?? 0;
+    const curPayout = Number(
+      selectedBooking?.vendorAssignment?.vendorPayoutAmount ?? 0,
+    );
+    const pNew = Number(upgradePrice);
+    const vNew = Number(upgradePayout);
+    const newPrice = upgradePrice.trim() && pNew > 0 ? pNew : curPrice;
+    const newPayout = upgradePayout.trim() && vNew > 0 ? vNew : curPayout;
+
+    const curMargin = curPrice - curPayout;
+    const newMargin = newPrice - newPayout;
+    const curMarginPct = curPrice > 0 ? (curMargin / curPrice) * 100 : 0;
+    const newMarginPct = newPrice > 0 ? (newMargin / newPrice) * 100 : 0;
+
+    return {
+      curPrice,
+      curPayout,
+      newPrice,
+      newPayout,
+      curMargin,
+      newMargin,
+      marginDelta: newMargin - curMargin,
+      curMarginPct,
+      newMarginPct,
+      partnerDelta: newPrice - curPrice,
+      vendorDelta: newPayout - curPayout,
+      changed:
+        Math.abs(newPrice - curPrice) > 0.001 ||
+        Math.abs(newPayout - curPayout) > 0.001,
+      curVendorShare: curPrice > 0 ? (curPayout / curPrice) * 100 : 0,
+      newVendorShare: newPrice > 0 ? (newPayout / newPrice) * 100 : 0,
+    };
+  }, [selectedBooking, upgradePrice, upgradePayout]);
+
+  // Admin-driven pricing: set the partner-facing price on an
+  // AWAITING_PRICING booking. Backend splits VAT, moves it to PENDING
+  // (offer-eligible), and notifies the partner immediately.
+  const handleSetPrice = async () => {
+    if (!selectedBooking) return;
+    const price = Number(partnerPriceInput);
+    if (!Number.isFinite(price) || price <= 0) {
+      showNotification("error", "Enter a partner price greater than zero");
+      return;
+    }
+    setIsPricing(true);
+    try {
+      const res = await adminApi.setBookingPrice(selectedBooking.id, {
+        totalPrice: price,
+      });
+      if (res.success) {
+        showNotification("success", res.message || "Partner price set");
+        setPartnerPriceInput("");
+        handleSelectBooking(selectedBooking.id);
+        fetchBookings(pagination.page);
+      }
+    } catch (err: any) {
+      const msg = err instanceof ApiError ? err.message : "Failed to set price";
+      showNotification("error", msg);
+    } finally {
+      setIsPricing(false);
+    }
+  };
+
   // Assign vendor — now sends payoutAmount as part of the offer payload.
   // Backend creates a BookingAssignmentOffer row at attemptNumber=1 and
   // transitions booking to ASSIGNMENT_OFFERED.
@@ -897,6 +1146,44 @@ export default function BookingList({
       showNotification("error", msg);
     } finally {
       setIsAssigning(false);
+    }
+  };
+
+  // Authorize a category upgrade for this booking (admin-driven). Grants
+  // the vendor extra categories to assign from and, if agreed on the call,
+  // sets a new price — which then reflects everywhere and re-confirms the
+  // partner via notification.
+  const handleAuthorizeUpgrade = async () => {
+    if (!selectedBooking || upgradeClasses.length === 0) {
+      showNotification("error", "Select at least one category to authorize");
+      return;
+    }
+    setIsAuthorizingUpgrade(true);
+    try {
+      const priceNum = Number(upgradePrice);
+      const payoutNum = Number(upgradePayout);
+      const res = await adminApi.authorizeCategoryUpgrade(selectedBooking.id, {
+        allowedClasses: upgradeClasses,
+        newTotalPrice:
+          upgradePrice.trim() && priceNum > 0 ? priceNum : undefined,
+        newVendorPayout:
+          upgradePayout.trim() && payoutNum > 0 ? payoutNum : undefined,
+      });
+      if (res.success) {
+        showNotification("success", res.message || "Upgrade authorized");
+        setShowUpgradePanel(false);
+        setUpgradeClasses([]);
+        setUpgradePrice("");
+        setUpgradePayout("");
+        handleSelectBooking(selectedBooking.id);
+        fetchBookings(pagination.page);
+      }
+    } catch (err: any) {
+      const msg =
+        err instanceof ApiError ? err.message : "Failed to authorize upgrade";
+      showNotification("error", msg);
+    } finally {
+      setIsAuthorizingUpgrade(false);
     }
   };
 
@@ -1169,8 +1456,8 @@ export default function BookingList({
         </div>
       </div>
 
-      {/* Bookings Table */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+      {/* Bookings list */}
+      <div className="space-y-4">
         {isLoading ? (
           <div className="flex justify-center py-16">
             <Loader2 className="w-8 h-8 text-luxury-gold animate-spin" />
@@ -1182,276 +1469,29 @@ export default function BookingList({
             <p className="text-sm text-gray-500">Try adjusting your filters</p>
           </div>
         ) : (
-          <>
-            {/* Desktop */}
-            <div className="overflow-x-auto hidden md:block">
-              <table className="w-full min-w-[900px]">
-                <thead className="bg-neutral-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Booking
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Customer
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Route
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Trip Date
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Vendor
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Status
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Amount
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">
-                      Action
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-800">
-                  {bookings.map((b) => (
-                    <tr
-                      key={b.id}
-                      className={`hover:bg-neutral-800/30 transition-colors ${b.highlightType === "attention" ? "bg-red-500/5" : b.highlightType === "unread" ? "bg-blue-500/5" : ""}`}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          {b.isUnread && (
-                            <span className="w-2 h-2 bg-blue-400 rounded-full flex-shrink-0" />
-                          )}
-                          {b.needsAttention && (
-                            <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
-                          )}
-                          <span className="text-sm text-luxury-gold font-mono">
-                            {b.bookingRef}
-                          </span>
-                        </div>
-                        {/* Trip type + city + vehicle class descriptors */}
-                        <div className="flex flex-wrap items-center gap-1 mb-1">
-                          <TripTypeBadge
-                            tripType={b.tripType}
-                            hours={b.hours}
-                          />
-                          {b.tripType === "HOURLY" && (
-                            <CityBadge city={b.city} />
-                          )}
-                          <VehicleClassBadge vehicleClass={b.vehicleClass} />
-                        </div>
-                        {/* Source — always rendered. */}
-                        <SourceBadge partner={b.partner} />
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-white text-sm">{b.customer.name}</p>
-                        {b.customer.phone && (
-                          <p className="text-xs text-gray-500">
-                            {b.customer.phone}
-                          </p>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        {/* Smart route cell.
-                            HOURLY: pickup-only with green pin (no
-                              fixed drop-off; arrow would mislead).
-                            ONE_WAY: pickup → drop-off, same compact
-                              two-line layout as before. */}
-                        {b.tripType === "HOURLY" ? (
-                          <div className="flex items-start gap-1.5 max-w-[180px]">
-                            <MapPin className="w-3 h-3 text-emerald-400 mt-0.5 flex-shrink-0" />
-                            <p className="text-white text-sm truncate">
-                              {b.route.pickup || "—"}
-                            </p>
-                          </div>
-                        ) : (
-                          <>
-                            <p className="text-white text-sm truncate max-w-[180px]">
-                              {b.route.pickup || "—"}
-                            </p>
-                            <p className="text-xs text-gray-500 truncate max-w-[180px] flex items-center gap-1">
-                              <ArrowRight className="w-3 h-3 flex-shrink-0" />
-                              {b.route.dropoff || "—"}
-                            </p>
-                          </>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-white text-sm">
-                          {new Date(b.tripDate).toLocaleDateString("en-US", {
-                            month: "short",
-                            day: "numeric",
-                          })}
-                        </p>
-                        {b.tripTime && (
-                          <p className="text-xs text-gray-500">{b.tripTime}</p>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        {/* Vendor cell. Unassigned gets an amber
-                            warning pill — visible call-to-action for
-                            admin's queue. Assigned vendors render
-                            plainly. */}
-                        {b.vendor ? (
-                          <p className="text-sm text-gray-300">
-                            {b.vendor.companyName}
-                          </p>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-amber-500/10 text-amber-400 border-amber-500/30">
-                            <AlertCircle className="w-3 h-3" />
-                            Unassigned
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`px-2 py-0.5 text-xs rounded-full border ${getStatusStyle(b.status)}`}
-                        >
-                          {getStatusLabel(b.status)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-white font-medium">
-                        SAR {Number(b.amount).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3">
-                        {/* Action cell: view + PO download. The PO
-                            button matches the partner-portal pattern;
-                            opens the PO HTML in a new tab with print
-                            triggered. */}
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleSelectBooking(b.id)}
-                            className="p-1.5 text-gray-400 hover:text-luxury-gold hover:bg-luxury-gold/10 rounded transition-colors"
-                            title="View details"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              try {
-                                await downloadPOWindow(b.id);
-                              } catch (err) {
-                                showNotification(
-                                  "error",
-                                  err instanceof Error
-                                    ? err.message
-                                    : "Could not open PO",
-                                );
-                              }
-                            }}
-                            className="p-1.5 text-gray-400 hover:text-luxury-gold hover:bg-luxury-gold/10 rounded transition-colors"
-                            title="Download Purchase Order"
-                          >
-                            <Download className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Mobile Cards */}
-            <div className="md:hidden space-y-3 p-4">
-              {bookings.map((b) => (
-                <div
+          <div className="space-y-2.5">
+            {bookings.map((b) => {
+              const a = deriveAdminActivity(b);
+              const vehicle =
+                VEHICLE_CLASS_LABEL_LIST[b.vehicleClass] || b.vehicleClass;
+              const route =
+                b.route?.pickup && b.route?.dropoff
+                  ? `${b.route.pickup} → ${b.route.dropoff}`
+                  : b.route?.pickup || "";
+              const partner = b.partner?.companyName
+                ? `${b.partner.companyName} · `
+                : "";
+              return (
+                <BookingActivityRow
                   key={b.id}
+                  name={b.customer?.name || "Guest"}
+                  subline={`${partner}${route} · ${vehicle}`}
                   onClick={() => handleSelectBooking(b.id)}
-                  className={`rounded-xl p-4 border cursor-pointer transition-colors ${b.highlightType === "attention" ? "bg-red-500/5 border-red-500/30" : b.highlightType === "unread" ? "bg-blue-500/5 border-blue-500/30" : "bg-neutral-800 border-neutral-700"}`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {b.isUnread && (
-                        <span className="w-2 h-2 bg-blue-400 rounded-full" />
-                      )}
-                      {b.needsAttention && (
-                        <AlertTriangle className="w-3 h-3 text-red-400" />
-                      )}
-                      <span className="text-luxury-gold text-sm font-mono">
-                        {b.bookingRef}
-                      </span>
-                    </div>
-                    <span
-                      className={`px-2 py-0.5 text-xs rounded-full border ${getStatusStyle(b.status)}`}
-                    >
-                      {getStatusLabel(b.status)}
-                    </span>
-                  </div>
-
-                  {/* Badges row — trip type, city (HOURLY), vehicle,
-                      source. Wraps on narrow viewports; identical
-                      badge set to the desktop table. */}
-                  <div className="flex flex-wrap items-center gap-1 mb-2">
-                    <TripTypeBadge tripType={b.tripType} hours={b.hours} />
-                    {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
-                    <VehicleClassBadge vehicleClass={b.vehicleClass} />
-                    <SourceBadge partner={b.partner} />
-                  </div>
-
-                  <p className="text-white text-sm">{b.customer.name}</p>
-                  {/* Route — same HOURLY/ONE_WAY branching as desktop. */}
-                  {b.tripType === "HOURLY" ? (
-                    <p className="text-xs text-gray-500 truncate flex items-center gap-1">
-                      <MapPin className="w-3 h-3 text-emerald-400 flex-shrink-0" />
-                      {b.route.pickup || "—"}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-gray-500 truncate">
-                      {b.route.pickup} → {b.route.dropoff}
-                    </p>
-                  )}
-
-                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-neutral-700">
-                    <div className="text-xs">
-                      <span className="text-gray-400">
-                        {new Date(b.tripDate).toLocaleDateString()}
-                      </span>
-                      <span className="text-gray-500 mx-1">·</span>
-                      {b.vendor ? (
-                        <span className="text-gray-400">
-                          {b.vendor.companyName}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-amber-400">
-                          <AlertCircle className="w-3 h-3" />
-                          Unassigned
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          try {
-                            await downloadPOWindow(b.id);
-                          } catch (err) {
-                            showNotification(
-                              "error",
-                              err instanceof Error
-                                ? err.message
-                                : "Could not open PO",
-                            );
-                          }
-                        }}
-                        className="p-1 text-gray-400 hover:text-luxury-gold rounded"
-                        title="Download PO"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="text-sm text-white font-medium">
-                        SAR {Number(b.amount).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
+                  {...a}
+                />
+              );
+            })}
+          </div>
         )}
 
         {/* Pagination */}
@@ -1546,43 +1586,26 @@ export default function BookingList({
                     </div>
                   )}
 
-                  {/* Customer */}
-                  <div className="bg-neutral-800 rounded-xl p-4 mb-4">
-                    <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
-                      <User className="w-4 h-4 text-luxury-gold" /> Customer
-                    </h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Name</span>
-                        <span className="text-white">
-                          {selectedBooking.customer.name}
-                        </span>
+                  {selectedBooking.modifications &&
+                    selectedBooking.modifications.length > 0 && (
+                      <div className="mb-4" ref={changesRef}>
+                        <ModificationTimeline
+                          modifications={selectedBooking.modifications}
+                          defaultOpen
+                        />
                       </div>
-                      {selectedBooking.customer.email && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Email</span>
-                          <span className="text-white">
-                            {selectedBooking.customer.email}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.customer.phone && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Phone</span>
-                          <span className="text-white">
-                            {selectedBooking.customer.phone}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.partner && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Partner</span>
-                          <span className="text-purple-400">
-                            {selectedBooking.partner.companyName}
-                          </span>
-                        </div>
-                      )}
-                    </div>
+                    )}
+
+                  {/* Customer */}
+                  <div className="mb-4">
+                    <CustomerCard
+                      customer={{
+                        name: selectedBooking.customer.name,
+                        phone: selectedBooking.customer.phone,
+                        email: selectedBooking.customer.email,
+                        partnerName: selectedBooking.partner?.companyName,
+                      }}
+                    />
                   </div>
 
                   {/* Trip Details — trip-type-aware
@@ -1817,6 +1840,254 @@ export default function BookingList({
                     )}
                   </div>
 
+                  {/* Admin-driven category upgrade authorization */}
+                  {selectedBooking.vehicleClass && (
+                    <div className="mb-4">
+                      {!showUpgradePanel ? (
+                        ((selectedBooking as any).upgradeAllowedClasses
+                          ?.length ?? 0) > 0 ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md bg-green-500/15 text-green-300 border border-green-500/30">
+                              <ArrowUpCircle className="w-3.5 h-3.5" />
+                              Upgrade authorized:{" "}
+                              {(
+                                (selectedBooking as any)
+                                  .upgradeAllowedClasses as string[]
+                              )
+                                .map((c) =>
+                                  (VEHICLE_CLASS_LABEL_LIST[c] || c).replace(
+                                    /_/g,
+                                    " ",
+                                  ),
+                                )
+                                .join(", ")}
+                              {(selectedBooking as any).upgradeAuthorizedPrice
+                                ? ` · SAR ${Number(
+                                    (selectedBooking as any)
+                                      .upgradeAuthorizedPrice,
+                                  ).toFixed(2)}`
+                                : ""}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowUpgradePanel(true);
+                                setUpgradeClasses(
+                                  (selectedBooking as any)
+                                    .upgradeAllowedClasses ?? [],
+                                );
+                              }}
+                              className="text-xs text-luxury-gold hover:underline"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowUpgradePanel(true);
+                              setUpgradeClasses(
+                                (selectedBooking as any)
+                                  .upgradeAllowedClasses ?? [],
+                              );
+                            }}
+                            className="text-xs text-luxury-gold hover:underline flex items-center gap-1.5"
+                          >
+                            <ArrowUpCircle className="w-3.5 h-3.5" />
+                            Authorize a category upgrade
+                          </button>
+                        )
+                      ) : (
+                        <div className="bg-neutral-800/60 border border-neutral-700 rounded-xl p-4 space-y-3">
+                          <p className="text-sm text-white font-medium">
+                            Authorize category upgrade
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            Let the assigned vendor pick from other categories
+                            for this booking (e.g. they ran out of{" "}
+                            {selectedBooking.vehicleClassDisplay}). Set a new
+                            price only if agreed with the partner on the call.
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(VEHICLE_CLASS_LABEL_LIST)
+                              .filter(
+                                ([c]) => c !== selectedBooking.vehicleClass,
+                              )
+                              .map(([c, label]) => {
+                                const on = upgradeClasses.includes(c);
+                                return (
+                                  <button
+                                    key={c}
+                                    type="button"
+                                    onClick={() =>
+                                      setUpgradeClasses(
+                                        on
+                                          ? upgradeClasses.filter(
+                                              (x) => x !== c,
+                                            )
+                                          : [...upgradeClasses, c],
+                                      )
+                                    }
+                                    className={`px-2.5 py-1 rounded-full border text-xs transition ${
+                                      on
+                                        ? "border-luxury-gold/70 bg-luxury-gold/15 text-luxury-gold"
+                                        : "border-neutral-700 text-gray-300 hover:border-neutral-600"
+                                    }`}
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[11px] text-gray-500 mb-1">
+                                New total price (SAR)
+                              </label>
+                              <input
+                                type="number"
+                                value={upgradePrice}
+                                onChange={(e) =>
+                                  setUpgradePrice(e.target.value)
+                                }
+                                placeholder="unchanged"
+                                className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm focus:border-luxury-gold/60 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-gray-500 mb-1">
+                                New vendor payout (SAR)
+                              </label>
+                              <input
+                                type="number"
+                                value={upgradePayout}
+                                onChange={(e) =>
+                                  setUpgradePayout(e.target.value)
+                                }
+                                placeholder="unchanged"
+                                className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm focus:border-luxury-gold/60 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+                          {/* ===== Deal economics (live before → after) ===== */}
+                          <div className="rounded-xl border border-neutral-700 bg-neutral-900/70 p-3.5 space-y-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold text-white tracking-wide">
+                                Deal economics
+                              </span>
+                              {upgradeEconomics.changed && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-luxury-gold/15 text-luxury-gold border border-luxury-gold/30">
+                                  live preview
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="space-y-2">
+                              <UpgradeEconRow
+                                label="Partner pays"
+                                from={upgradeEconomics.curPrice}
+                                to={upgradeEconomics.newPrice}
+                                delta={upgradeEconomics.partnerDelta}
+                              />
+                              <UpgradeEconRow
+                                label="Vendor earns"
+                                from={upgradeEconomics.curPayout}
+                                to={upgradeEconomics.newPayout}
+                                delta={upgradeEconomics.vendorDelta}
+                              />
+                              <UpgradeEconRow
+                                label="LuxDrive margin"
+                                from={upgradeEconomics.curMargin}
+                                to={upgradeEconomics.newMargin}
+                                delta={upgradeEconomics.marginDelta}
+                                toPct={upgradeEconomics.newMarginPct}
+                                hero
+                              />
+                            </div>
+
+                            <div className="space-y-1.5 pt-1">
+                              <UpgradeSplitBar
+                                label="Now"
+                                vendorShare={upgradeEconomics.curVendorShare}
+                                muted
+                              />
+                              <UpgradeSplitBar
+                                label="After"
+                                vendorShare={upgradeEconomics.newVendorShare}
+                              />
+                              <div className="flex items-center gap-3 text-[10px] text-gray-500 pt-0.5">
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-neutral-500" />
+                                  Vendor payout
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-luxury-gold" />
+                                  LuxDrive margin
+                                </span>
+                              </div>
+                            </div>
+
+                            {upgradeEconomics.newMargin < 0 ? (
+                              <p className="text-[11px] text-red-400">
+                                This upgrade runs the booking at a loss of SAR{" "}
+                                {Math.abs(upgradeEconomics.newMargin).toFixed(
+                                  2,
+                                )}
+                                .
+                              </p>
+                            ) : upgradeEconomics.marginDelta < -0.001 ? (
+                              <p className="text-[11px] text-amber-300/80">
+                                Margin drops SAR{" "}
+                                {Math.abs(upgradeEconomics.marginDelta).toFixed(
+                                  2,
+                                )}{" "}
+                                — from{" "}
+                                {upgradeEconomics.curMarginPct.toFixed(1)}% to{" "}
+                                {upgradeEconomics.newMarginPct.toFixed(1)}%.
+                              </p>
+                            ) : upgradeEconomics.marginDelta > 0.001 ? (
+                              <p className="text-[11px] text-emerald-400/90">
+                                Margin improves SAR{" "}
+                                {upgradeEconomics.marginDelta.toFixed(2)} — up
+                                to {upgradeEconomics.newMarginPct.toFixed(1)}%.
+                              </p>
+                            ) : null}
+                          </div>
+
+                          <p className="text-[11px] text-amber-300/80">
+                            Setting a price updates the booking everywhere and
+                            notifies the partner to confirm. Leave blank to keep
+                            the current price.
+                          </p>
+                          <div className="flex gap-2 justify-end">
+                            <button
+                              type="button"
+                              onClick={() => setShowUpgradePanel(false)}
+                              className="px-3 py-1.5 rounded-lg text-sm text-gray-300 hover:bg-neutral-700"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleAuthorizeUpgrade}
+                              disabled={
+                                isAuthorizingUpgrade ||
+                                upgradeClasses.length === 0
+                              }
+                              className="px-3 py-1.5 rounded-lg text-sm bg-luxury-gold text-black hover:bg-luxury-gold/90 disabled:opacity-50 flex items-center gap-1.5"
+                            >
+                              {isAuthorizingUpgrade && (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              )}
+                              Authorize
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Pricing */}
                   <div className="bg-neutral-800 rounded-xl p-4 mb-4">
                     <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
@@ -1915,22 +2186,55 @@ export default function BookingList({
                             </span>
                           </div>
                         )}
-                        {selectedBooking.vendorAssignment.vehicle && (
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Vehicle</span>
-                            <span className="text-white">
-                              {selectedBooking.vendorAssignment.vehicle.name ||
+                        {(selectedBooking.vendorAssignment.vehicle ||
+                          selectedBooking.vendorAssignment.driver) && (
+                          <div className="mt-3 space-y-3">
+                            <DriverCard
+                              driver={
+                                selectedBooking.vendorAssignment.driver
+                                  ? {
+                                      name: selectedBooking.vendorAssignment
+                                        .driver.name,
+                                      phone:
+                                        selectedBooking.vendorAssignment.driver
+                                          .phone,
+                                      photoUrl:
+                                        selectedBooking.vendorAssignment.driver
+                                          .photoUrl,
+                                      rating:
+                                        selectedBooking.vendorAssignment.driver
+                                          .rating,
+                                    }
+                                  : null
+                              }
+                            />
+                            <VehicleCard
+                              vehicle={
                                 selectedBooking.vendorAssignment.vehicle
-                                  .plateNumber}
-                            </span>
-                          </div>
-                        )}
-                        {selectedBooking.vendorAssignment.driver && (
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Driver</span>
-                            <span className="text-white">
-                              {selectedBooking.vendorAssignment.driver.name}
-                            </span>
+                                  ? {
+                                      name:
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .name ||
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .plateNumber,
+                                      plateNumber:
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .plateNumber,
+                                      year: selectedBooking.vendorAssignment
+                                        .vehicle.year,
+                                      color:
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .color,
+                                      seats:
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .seats,
+                                      category:
+                                        selectedBooking.vendorAssignment.vehicle
+                                          .category,
+                                    }
+                                  : null
+                              }
+                            />
                           </div>
                         )}
 
@@ -2170,6 +2474,52 @@ export default function BookingList({
                       </div>
                     )}
 
+                    {/* ============== SET PARTNER PRICE ==============
+                        Admin-driven pricing. Shown while the booking is
+                        AWAITING_PRICING. Admin sets the partner-facing
+                        total; the partner is notified immediately and the
+                        booking moves to PENDING, at which point the
+                        vendor-assign block below becomes available. */}
+                    {selectedBooking.status === "AWAITING_PRICING" && (
+                      <div className="mt-4 pt-4 border-t border-neutral-700">
+                        <h4 className="text-sm font-medium text-white mb-1">
+                          Set Partner Price
+                        </h4>
+                        <p className="text-xs text-gray-500 mb-3">
+                          This partner is waiting on pricing. Enter the
+                          VAT-inclusive total they'll be charged — they're
+                          notified right away, then you can offer a vendor.
+                        </p>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">
+                              Partner Price (SAR, VAT-inclusive)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={partnerPriceInput}
+                              onChange={(e) =>
+                                setPartnerPriceInput(e.target.value)
+                              }
+                              placeholder="Enter total price"
+                              className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm focus:outline-none focus:border-luxury-gold"
+                            />
+                          </div>
+                          <button
+                            onClick={handleSetPrice}
+                            disabled={isPricing || !partnerPriceInput}
+                            className="w-full px-4 py-2 bg-luxury-gold hover:bg-luxury-gold/90 disabled:opacity-50 disabled:cursor-not-allowed text-black rounded-lg text-sm font-medium transition-colors"
+                          >
+                            {isPricing
+                              ? "Setting price…"
+                              : "Set Price & Notify Partner"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {/* ============== ASSIGN VENDOR (new flow) ==============
                         Available when canAssignVendor is true AND we're
                         NOT in ASSIGNMENT_RE_OFFERED state (re-offer has
@@ -2222,38 +2572,48 @@ export default function BookingList({
                                 <label className="block text-xs text-gray-500 mb-1">
                                   Vendor
                                 </label>
-                                <select
-                                  value={selectedVendorId}
-                                  onChange={(e) =>
-                                    setSelectedVendorId(e.target.value)
-                                  }
+                                <Select
+                                  value={selectedVendorId || undefined}
+                                  onValueChange={setSelectedVendorId}
                                   disabled={availableVendors.length === 0}
-                                  className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm focus:outline-none focus:border-luxury-gold disabled:opacity-40"
                                 >
-                                  <option value="">
-                                    {availableVendors.length === 0
-                                      ? "No eligible vendors"
-                                      : "Select vendor..."}
-                                  </option>
-                                  {availableVendors.map((v) => (
-                                    <option key={v.id} value={v.id}>
-                                      {v.displayText}
-                                    </option>
-                                  ))}
-                                </select>
+                                  <SelectTrigger className={selectTriggerCls}>
+                                    <SelectValue
+                                      placeholder={
+                                        availableVendors.length === 0
+                                          ? "No eligible vendors"
+                                          : "Select vendor..."
+                                      }
+                                    />
+                                  </SelectTrigger>
+                                  <SelectContent className={selectContentCls}>
+                                    {availableVendors.map((v) => (
+                                      <SelectItem
+                                        key={v.id}
+                                        value={v.id}
+                                        className={selectItemCls}
+                                      >
+                                        {v.displayText}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
                                 {availableVendors.length === 0 && (
                                   <div className="mt-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded text-xs text-amber-300 space-y-1">
                                     <p className="font-medium">
                                       No eligible vendors found.
                                     </p>
-                                    <p className="text-amber-400/80">
-                                      All vendors with vehicles in this category
-                                      either have expired documents (profile /
-                                      vehicle / driver) through the trip date,
-                                      no approved vehicles/drivers, or have
-                                      already rejected this booking. Resolve
-                                      expirations or wait for the pool to grow.
-                                    </p>
+                                    {ineligibleVendors.length > 0 ? (
+                                      <VendorEligibilityBreakdown
+                                        vendors={ineligibleVendors}
+                                      />
+                                    ) : (
+                                      <p className="text-amber-400/80">
+                                        No approved vendor has a vehicle in this
+                                        class yet — add or approve a matching
+                                        vehicle, or wait for the pool to grow.
+                                      </p>
+                                    )}
                                     <button
                                       onClick={handleLoadVendors}
                                       className="mt-1 text-amber-300 underline hover:text-amber-200"
@@ -2485,12 +2845,19 @@ export default function BookingList({
                             (event: any, i: number) => (
                               <div key={i} className="flex items-start gap-3">
                                 <div
-                                  className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${event.completed ? "bg-luxury-gold" : "bg-neutral-600"}`}
+                                  className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${event.actionNeeded ? "bg-amber-400" : event.completed ? "bg-luxury-gold" : "bg-neutral-600"}`}
                                 />
                                 <div>
-                                  <p className="text-sm text-white">
+                                  <p
+                                    className={`text-sm ${event.actionNeeded ? "text-amber-300" : "text-white"}`}
+                                  >
                                     {event.status || event.label}
                                   </p>
+                                  {event.detail && (
+                                    <p className="text-xs text-gray-400">
+                                      {event.detail}
+                                    </p>
+                                  )}
                                   {event.date && (
                                     <p className="text-xs text-gray-500">
                                       {event.date}

@@ -13,6 +13,7 @@ import { NotFoundError } from "../../utils/AppError";
 import { requireOperational } from "./_shared";
 import { getReadUrl } from "../../lib/gcs";
 import { buildPOHtml } from "../../utils/helpers/po.helpers";
+import { checkLeadTime } from "../../utils/helpers/booking-modification.helpers";
 
 // ============== HELPERS ==============
 
@@ -43,6 +44,7 @@ async function getPartnerForUser(userId: string) {
 // Assignment" on the partner side. The partner only sees the
 // progression once a vendor has actually accepted (CONFIRMED onwards).
 const STATUS_LABELS: Record<string, string> = {
+  AWAITING_PRICING: "Awaiting Pricing",
   PENDING: "Awaiting Driver/Vehicle Assignment",
   ASSIGNMENT_OFFERED: "Awaiting Driver/Vehicle Assignment",
   ASSIGNMENT_RE_OFFERED: "Awaiting Driver/Vehicle Assignment",
@@ -59,9 +61,14 @@ const STATUS_LABELS: Record<string, string> = {
 // sees it as one continuous step.
 const STATUS_TIMELINE = [
   {
+    key: "AWAITING_PRICING",
+    label: "Received",
+    description: "We've received your booking and are pricing it",
+  },
+  {
     key: "PENDING",
-    label: "Booking Placed",
-    description: "Sent to admin for assignment",
+    label: "Priced",
+    description: "Price confirmed — arranging your driver & vehicle",
   },
   {
     key: "ASSIGNMENT_OFFERED",
@@ -81,7 +88,11 @@ const STATUS_TIMELINE = [
   },
 ];
 
-function buildStatusTimeline(currentStatus: string, booking: any) {
+function buildStatusTimeline(
+  currentStatus: string,
+  booking: any,
+  awaitingReassignment = false,
+) {
   // CANCELLED is terminal — covers both explicit cancellation and the
   // implicit "all eligible vendors rejected and we ran out" path. Per
   // the design rule the partner sees only "Cancelled" with no internal
@@ -104,6 +115,32 @@ function buildStatusTimeline(currentStatus: string, booking: any) {
     ];
   }
 
+  // A change the partner just made released the booking, so it's being
+  // re-matched. Show that as an explicit "Updating your booking" step
+  // instead of snapping back to "Booking Placed" (which reads like the
+  // booking regressed). No vendor/driver internals are revealed.
+  if (awaitingReassignment) {
+    return [
+      {
+        key: "PENDING",
+        label: "Booking Placed",
+        status: "completed",
+        timestamp: booking.createdAt,
+      },
+      {
+        key: "REASSIGNING",
+        label: "Updating Your Booking",
+        status: "current",
+        timestamp: booking.modifiedAt ?? booking.updatedAt,
+        description:
+          "Your changes are being applied — we're arranging your driver & vehicle.",
+      },
+      { key: "CONFIRMED", label: "Confirmed", status: "upcoming" },
+      { key: "IN_PROGRESS", label: "In Progress", status: "upcoming" },
+      { key: "COMPLETED", label: "Completed", status: "upcoming" },
+    ];
+  }
+
   // Normal flow. Both ASSIGNMENT_OFFERED and ASSIGNMENT_RE_OFFERED
   // collapse to ASSIGNMENT_OFFERED for the partner's timeline so they
   // don't see the offer-iteration internals.
@@ -113,6 +150,7 @@ function buildStatusTimeline(currentStatus: string, booking: any) {
       : currentStatus;
 
   const statusOrder = [
+    "AWAITING_PRICING",
     "PENDING",
     "ASSIGNMENT_OFFERED",
     "CONFIRMED",
@@ -127,10 +165,12 @@ function buildStatusTimeline(currentStatus: string, booking: any) {
 
     if (i < currentIndex) {
       stepStatus = "completed";
+      if (step.key === "AWAITING_PRICING") timestamp = booking.createdAt;
       if (step.key === "PENDING") timestamp = booking.createdAt;
       if (step.key === "CONFIRMED") timestamp = booking.confirmedAt;
     } else if (i === currentIndex) {
       stepStatus = "current";
+      if (step.key === "AWAITING_PRICING") timestamp = booking.createdAt;
       if (step.key === "PENDING") timestamp = booking.createdAt;
       if (step.key === "CONFIRMED") timestamp = booking.confirmedAt;
       if (step.key === "COMPLETED") timestamp = booking.completedAt;
@@ -272,7 +312,10 @@ export const getBookingsList = asyncWrapper(
         where,
         skip,
         take: parseInt(limit as string),
-        orderBy: [{ tripDate: "desc" }, { createdAt: "desc" }],
+        orderBy: [
+          { tripDate: req.query.sortOrder === "asc" ? "asc" : "desc" },
+          { createdAt: "desc" },
+        ],
         select: {
           id: true,
           bookingRef: true,
@@ -293,6 +336,10 @@ export const getBookingsList = asyncWrapper(
           totalPrice: true,
           status: true,
           createdAt: true,
+          updatedAt: true,
+          confirmedAt: true,
+          modificationCount: true,
+          isReadByPartner: true,
         },
       }),
       prisma.booking.count({ where }),
@@ -301,6 +348,7 @@ export const getBookingsList = asyncWrapper(
     // Format for table columns
     const formattedBookings = bookings.map((b) => ({
       id: b.id,
+      modificationCount: (b as any).modificationCount ?? 0,
       bookingRef: b.bookingRef,
       guestName: b.guestName || "—",
       guestPhone: b.guestPhone || "—",
@@ -320,6 +368,10 @@ export const getBookingsList = asyncWrapper(
       totalPrice: Number(b.totalPrice),
       status: b.status,
       statusLabel: STATUS_LABELS[b.status] || b.status,
+      // Unseen-update glow + activity time for the redesigned list row.
+      hasUnseenUpdate: !((b as any).isReadByPartner ?? true),
+      lastActivityAt:
+        (b as any).confirmedAt ?? (b as any).updatedAt ?? b.createdAt,
     }));
 
     // ---- TAB COUNTS (for badge numbers) ----
@@ -408,6 +460,19 @@ export const getBookingDetail = asyncWrapper(
         partnerId: partner.id,
       },
       include: {
+        modifications: {
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            actor: true,
+            changedFields: true,
+            reason: true,
+            vendorDecision: true,
+            vendorDecisionReason: true,
+            vendorDecidedAt: true,
+            createdAt: true,
+          },
+        },
         vendor: {
           select: { companyName: true },
         },
@@ -435,8 +500,36 @@ export const getBookingDetail = asyncWrapper(
 
     if (!booking) throw new NotFoundError("Booking");
 
+    // Opening the detail clears the unseen-update glow in the partner's
+    // list. Fire-and-forget — never block the read on this write.
+    if (!(booking as any).isReadByPartner) {
+      prisma.booking
+        .update({
+          where: { id: booking.id },
+          data: { isReadByPartner: true },
+        })
+        .catch((err) =>
+          console.error("Failed to mark booking read (partner):", err),
+        );
+    }
+
+    // A voided (CANCELLED) offer means a change released this booking for
+    // reassignment. Surfaced to the partner as a distinct "Updating your
+    // booking" state rather than snapping back to "Booking Placed".
+    const cancelledOfferCount = await prisma.bookingAssignmentOffer.count({
+      where: { bookingId: booking.id, status: "CANCELLED" },
+    });
+    const awaitingReassignment =
+      booking.status === "PENDING" &&
+      !booking.vendorId &&
+      cancelledOfferCount > 0;
+
     // Build status timeline
-    const timeline = buildStatusTimeline(booking.status, booking);
+    const timeline = buildStatusTimeline(
+      booking.status,
+      booking,
+      awaitingReassignment,
+    );
 
     // Sign the driver's photoUrl before returning. The DB stores raw
     // GCS object paths (e.g. "drivers/abc/photo.jpg") that the browser
@@ -449,6 +542,43 @@ export const getBookingDetail = asyncWrapper(
     const driverPhotoReadUrl = booking.driver
       ? await getReadUrl(booking.driver.photoUrl)
       : null;
+
+    // Lead-time lock: once the trip is within the admin-configured partner
+    // change cutoff, the partner can no longer modify it. Surfaced so the UI
+    // can grey the Modify action out with an explanation.
+    const changeLead = await checkLeadTime(
+      "partnerChange",
+      booking.tripDate,
+      booking.tripTime,
+    );
+
+    // Partner-visible change history. Two classes of entry are hidden:
+    //   1. A bare "category upgrade authorized" event (admin/vendor
+    //      plumbing) — the partner only sees the resulting vehicleClass
+    //      change once the vendor actually assigns the upgraded vehicle.
+    //   2. The initial "Partner price set" event. Under admin-driven
+    //      pricing this is the FIRST price, not a modification — the
+    //      partner already learns it from the fare, the confirmation
+    //      notification, and the "Priced" timeline step. Surfacing it here
+    //      reads as a spurious "Booking modified" entry with a "— -> SAR X"
+    //      diff, which is exactly what we don't want.
+    const visibleModifications = ((booking as any).modifications ?? []).filter(
+      (m: any) => {
+        const fields = Array.isArray(m.changedFields) ? m.changedFields : [];
+        const onlyAuthorization =
+          fields.length > 0 &&
+          fields.every((f: any) => f?.field === "upgradeAllowedClasses");
+        const isInitialPricing =
+          m.reason === "Partner price set" ||
+          (fields.length > 0 &&
+            fields.every(
+              (f: any) =>
+                f?.field === "totalPrice" &&
+                (f?.from === null || f?.from === undefined),
+            ));
+        return !onlyAuthorization && !isInitialPricing;
+      },
+    );
 
     res.json({
       success: true,
@@ -465,7 +595,42 @@ export const getBookingDetail = asyncWrapper(
         // sends the older inline-details message instead.
         shareToken: (booking as any).shareToken || null,
         status: booking.status,
-        statusLabel: STATUS_LABELS[booking.status] || booking.status,
+        statusLabel: awaitingReassignment
+          ? "Reassigning"
+          : STATUS_LABELS[booking.status] || booking.status,
+        awaitingReassignment,
+        changeLocked: !changeLead.allowed,
+        changeCutoffHours: changeLead.cutoffHours,
+        modificationCount: visibleModifications.length,
+        modifiedAt: (booking as any).modifiedAt ?? null,
+        modifications: visibleModifications.map((m: any) => ({
+          id: m.id,
+          // Partners must never learn a vendor exists. Their own edits stay
+          // "PARTNER"; everything else (vendor swaps, admin actions) is
+          // masked to the neutral "PLATFORM" ("LuxDrive").
+          actor: m.actor === "PARTNER" ? "PARTNER" : "PLATFORM",
+          // The partner has no concern with fleet internals like whether a
+          // vehicle/driver was temporary. Strip the "(temporary)" suffix
+          // from the from/to labels so it never surfaces on their side.
+          changedFields: Array.isArray(m.changedFields)
+            ? m.changedFields.map((f: any) => ({
+                ...f,
+                from:
+                  typeof f.from === "string"
+                    ? f.from.replace(/\s*\(temporary\)/gi, "")
+                    : f.from,
+                to:
+                  typeof f.to === "string"
+                    ? f.to.replace(/\s*\(temporary\)/gi, "")
+                    : f.to,
+              }))
+            : m.changedFields,
+          reason: m.reason,
+          vendorDecision: m.vendorDecision,
+          vendorDecisionReason: m.vendorDecisionReason,
+          vendorDecidedAt: m.vendorDecidedAt,
+          createdAt: m.createdAt,
+        })),
 
         // Status Timeline
         timeline,

@@ -371,7 +371,9 @@ export const getReceiptsList = asyncWrapper(
       return {
         id: r.id,
         receiptNumber: r.receiptNumber,
-        month: new Date(r.periodStart).toLocaleString("default", {
+        hasUnseenUpdate: !r.isViewedByVendor,
+        month: new Date(r.periodStart).toLocaleDateString("en-GB", {
+          day: "numeric",
           month: "long",
           year: "numeric",
         }),
@@ -461,6 +463,18 @@ export const getReceiptDetail = asyncWrapper(
 
     if (!receipt) throw new NotFoundError("Payout");
 
+    // Vendor opened the payout — clear the unseen-action flag.
+    if (!(receipt as any).isViewedByVendor) {
+      prisma.vendorPayout
+        .update({
+          where: { id: receipt.id },
+          data: { isViewedByVendor: true },
+        })
+        .catch((err) =>
+          console.error("Failed to clear payout vendor-seen flag:", err),
+        );
+    }
+
     // Get bookings for this payout period
     const bookings = await prisma.booking.findMany({
       where: {
@@ -545,7 +559,8 @@ export const getReceiptDetail = asyncWrapper(
         receipt: {
           id: receipt.id,
           receiptNumber: receipt.receiptNumber,
-          month: new Date(receipt.periodStart).toLocaleString("default", {
+          month: new Date(receipt.periodStart).toLocaleDateString("en-GB", {
+            day: "numeric",
             month: "long",
             year: "numeric",
           }),
@@ -727,9 +742,9 @@ export const downloadReceiptPdf = asyncWrapper(
       5,
     );
 
-    const periodLabel = new Date(receipt.periodStart).toLocaleString(
-      "default",
-      { month: "long", year: "numeric" },
+    const periodLabel = new Date(receipt.periodStart).toLocaleDateString(
+      "en-GB",
+      { day: "numeric", month: "long", year: "numeric" },
     );
 
     let displayStatus: string;

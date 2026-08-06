@@ -343,6 +343,15 @@ function PartnerDashboardInner() {
     if (t !== "bookings") setBookingsDateFilter(null);
     setActiveTab(t);
     setMobileMenuOpen(false);
+
+    // Opening the bookings section acknowledges booking notifications
+    // (including detail changes) so the sidebar count clears.
+    if (t === "bookings") {
+      partnerApi
+        .markAllNotificationsAsRead({ category: "BOOKING" })
+        .then(() => refreshBadges())
+        .catch(() => {});
+    }
   };
 
   const handleCalendarDateClick = (dateStr: string) => {

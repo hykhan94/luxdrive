@@ -21,6 +21,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { partnerApi } from "@/lib/api";
 import { useNotification } from "@/lib/notification-context";
+import { openWhatsApp } from "@/lib/support-contact";
 import { useLoadScript, Autocomplete } from "@react-google-maps/api";
 import { PhoneInput, EmailInput } from "@/components/ui/form-fields";
 import { DatePicker } from "@/components/ui/date-picker";
@@ -28,6 +29,8 @@ import { TimePicker } from "@/components/ui/time-picker";
 import {
   Loader2,
   Plane,
+  PlaneLanding,
+  PlaneTakeoff,
   MapPin,
   Users,
   Calendar,
@@ -35,6 +38,7 @@ import {
   Car,
   Crown,
   Zap,
+  MessageCircle,
   StickyNote,
   Send,
   AlertCircle,
@@ -42,6 +46,14 @@ import {
   Info,
   ShieldAlert,
 } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { detectAirport } from "@/lib/saudi-airports";
 
 // Google Maps libraries to load
 const GOOGLE_MAPS_LIBRARIES: "places"[] = ["places"];
@@ -174,7 +186,8 @@ export default function BookRidePanel({
   const [hours, setHours] = useState<number | "">("");
   const [passengers, setPassengers] = useState<number | "">("");
   const [flightNumber, setFlightNumber] = useState("");
-  const [totalPriceInput, setTotalPriceInput] = useState<string>("");
+  const [terminalNo, setTerminalNo] = useState("");
+  const [terminalLocation, setTerminalLocation] = useState("");
   const [notes, setNotes] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -240,39 +253,47 @@ export default function BookRidePanel({
     }
   }, [availableClasses, vehicleClass]);
 
-  // VAT split — the receipt card renders directly from this. Number()
-  // handles the raw string input; empty/invalid → 0 so the preview
-  // shows a clean SAR 0.00 initial state.
-  const priceSplit = useMemo(() => {
-    const total = Number(totalPriceInput.replace(/,/g, ""));
-    if (!Number.isFinite(total) || total <= 0) {
-      return { total: 0, base: 0, vat: 0, isValid: false };
-    }
-    const base = Math.round((total / (1 + VAT_RATE)) * 100) / 100;
-    const vat = Math.round((total - base) * 100) / 100;
-    return { total, base, vat, isValid: true };
-  }, [totalPriceInput]);
+  // Premium classes disabled for this city — surfaced as "request
+  // access" chips so the partner can ask admin to enable them.
+  const requestableClasses = useMemo(() => {
+    const out: Array<{ code: string; label: string }> = [];
+    if (selectedCity && !selectedCity.electricEnabled)
+      out.push({ code: "ELECTRIC", label: "Electric" });
+    if (selectedCity && !selectedCity.ultraLuxuryEnabled)
+      out.push({ code: "ULTRA_LUXURY", label: "Ultra Luxury" });
+    return out;
+  }, [selectedCity]);
 
-  // Implied hourly rate — useful convenience hint for HOURLY bookings.
-  // Divides the partner-set total by the hours they entered.
-  const impliedHourly = useMemo(() => {
-    if (tripType !== "HOURLY") return null;
-    const h = Number(hours);
-    if (!Number.isFinite(h) || h <= 0) return null;
-    if (!priceSplit.isValid) return null;
-    return Math.round((priceSplit.total / h) * 100) / 100;
-  }, [tripType, hours, priceSplit]);
-
-  // Airport-address detection — same heuristic as the server (matches
-  // /airport|intl|international|terminal|kaia|ruh|jed|med/i). If either
-  // pickup or dropoff contains an airport token, we surface the flight
-  // number field and require it.
-  const isAirport = useMemo(() => {
-    const combined = `${pickupAddress} ${dropoffAddress}`.toLowerCase();
-    return /\b(airport|intl|international|terminal|kaia|ruh|jed|med)\b/.test(
-      combined,
+  // Open WhatsApp to the support line rather than filing an in-app request.
+  const requestClass = (_code: string, label: string) => {
+    const cityName = selectedCity?.name || cityCode || "the selected city";
+    openWhatsApp(
+      `Hello, I'd like to book a ${label} vehicle in ${cityName}, but it isn't available. Could you enable ${label} for me?`,
     );
-  }, [pickupAddress, dropoffAddress]);
+  };
+
+  // Airport-address detection via the shared saudi-airports helper —
+  // returns the matched airport (with its terminal list) so the airport
+  // block can offer flight number, terminal, and arrivals/departures,
+  // matching the modify-booking flow.
+  const pickupAirport = useMemo(
+    () => detectAirport(pickupAddress),
+    [pickupAddress],
+  );
+  const dropoffAirport = useMemo(
+    () => (tripType === "HOURLY" ? null : detectAirport(dropoffAddress)),
+    [dropoffAddress, tripType],
+  );
+  const airport = pickupAirport || dropoffAirport;
+  const isAirport = !!airport;
+
+  // Default arrivals/departures once an airport is detected: pickup at
+  // the airport ⇒ arriving; otherwise dropping for a departure.
+  useEffect(() => {
+    if (isAirport && !terminalLocation) {
+      setTerminalLocation(pickupAirport ? "Arrivals" : "Departures");
+    }
+  }, [isAirport, pickupAirport, terminalLocation]);
 
   // Max passengers for the currently-selected vehicle class. Drives the
   // passenger input max/hint.
@@ -297,7 +318,6 @@ export default function BookRidePanel({
       if (!Number.isFinite(h) || h <= 0)
         e.hours = "Enter number of hours (> 0)";
     }
-    if (!priceSplit.isValid) e.totalPrice = "Enter a total price";
     if (maxPax && passengers && Number(passengers) > maxPax) {
       // Look up the friendly label from the class metadata so the
       // error reads "Business Sedan seats 3" not "BUSINESS_SEDAN seats 3".
@@ -341,13 +361,15 @@ export default function BookRidePanel({
         dropoffLng: dropoffCoords?.lng,
         tripDate,
         tripTime,
-        totalPrice: priceSplit.total,
         notes: notes.trim() || undefined,
       };
       if (tripType === "HOURLY") body.hours = Number(hours);
       if (passengers) body.passengers = Number(passengers);
       if (isAirport && flightNumber.trim())
         body.flightNumber = flightNumber.trim();
+      if (isAirport && terminalNo.trim()) body.terminalNo = terminalNo.trim();
+      if (isAirport && terminalLocation)
+        body.terminalLocation = terminalLocation;
 
       const res = await partnerApi.createBooking(body);
       notify.showNotification(
@@ -384,7 +406,8 @@ export default function BookRidePanel({
     setHours("");
     setPassengers("");
     setFlightNumber("");
-    setTotalPriceInput("");
+    setTerminalNo("");
+    setTerminalLocation("");
     setNotes("");
     setErrors({});
   }
@@ -500,19 +523,32 @@ export default function BookRidePanel({
                     <Loader2 className="w-4 h-4 animate-spin text-neutral-500" />
                   </div>
                 ) : (
-                  <select
-                    value={cityCode}
-                    onChange={(e) => setCityCode(e.target.value)}
-                    className={inputClass(!!errors.city)}
+                  <Select
+                    value={cityCode || undefined}
+                    onValueChange={setCityCode}
                   >
-                    <option value="">Select city…</option>
-                    {cities.map((c) => (
-                      <option key={c.code} value={c.code}>
-                        {c.name}
-                        {c.region ? ` · ${c.region}` : ""}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger
+                      className={`w-full h-11 px-3 rounded-lg bg-neutral-800/60 text-white text-sm hover:bg-neutral-800 focus:ring-2 focus:ring-luxury-gold/20 data-[state=open]:border-luxury-gold/70 ${
+                        errors.city
+                          ? "border-red-500/60"
+                          : "border-neutral-700 focus:border-luxury-gold/70"
+                      }`}
+                    >
+                      <SelectValue placeholder="Select city…" />
+                    </SelectTrigger>
+                    <SelectContent className="z-[90] max-h-72 bg-neutral-900 border-neutral-700 text-white shadow-2xl">
+                      {cities.map((c) => (
+                        <SelectItem
+                          key={c.code}
+                          value={c.code}
+                          className="rounded-md py-2 pr-8 text-white focus:bg-neutral-800 focus:text-white data-[state=checked]:text-luxury-gold"
+                        >
+                          {c.name}
+                          {c.region ? ` · ${c.region}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
               </Field>
               {tripType === "HOURLY" && (
@@ -558,6 +594,22 @@ export default function BookRidePanel({
                   />
                 ))}
               </div>
+              {requestableClasses.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {requestableClasses.map((rc) => (
+                    <button
+                      key={rc.code}
+                      type="button"
+                      onClick={() => requestClass(rc.code, rc.label)}
+                      className="inline-flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md border border-luxury-gold/30 text-luxury-gold/90 hover:bg-luxury-gold/10 transition-colors"
+                      title={`${rc.label} isn't enabled here — message us to arrange it`}
+                    >
+                      <MessageCircle className="w-3 h-3" />
+                      Request {rc.label} access
+                    </button>
+                  ))}
+                </div>
+              )}
               {errors.vehicleClass && (
                 <p className="text-xs text-red-500 mt-1">
                   {errors.vehicleClass}
@@ -606,22 +658,128 @@ export default function BookRidePanel({
               </Field>
             )}
 
-            {/* Airport heuristic surfaces flight number */}
+            {/* Airport transfer — flight, terminal, and arrivals/
+                departures, matching the modify-booking flow. */}
             {isAirport && (
-              <Field
-                label="Flight number"
-                required
-                error={errors.flightNumber}
-                icon={<Plane className="w-4 h-4 text-luxury-gold" />}
-              >
-                <input
-                  type="text"
-                  value={flightNumber}
-                  onChange={(e) => setFlightNumber(e.target.value)}
-                  className={inputClass(!!errors.flightNumber)}
-                  placeholder="e.g. SV1005"
-                />
-              </Field>
+              <div className="rounded-lg border border-luxury-gold/25 bg-luxury-gold/[0.04] p-4 space-y-3">
+                <p className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Plane className="w-3.5 h-3.5 text-luxury-gold" />
+                  {airport?.code === "GENERIC"
+                    ? "Airport transfer detected."
+                    : airport?.name}
+                </p>
+
+                {/* Arrivals / Departures */}
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    {
+                      v: "Arrivals",
+                      icon: <PlaneLanding className="w-4 h-4" />,
+                      sub: "Meeting a landing flight",
+                    },
+                    {
+                      v: "Departures",
+                      icon: <PlaneTakeoff className="w-4 h-4" />,
+                      sub: "Dropping for a flight",
+                    },
+                  ].map((o) => {
+                    const active = terminalLocation === o.v;
+                    return (
+                      <button
+                        key={o.v}
+                        type="button"
+                        onClick={() => setTerminalLocation(o.v)}
+                        className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-all ${
+                          active
+                            ? "border-luxury-gold bg-luxury-gold/10 text-luxury-gold"
+                            : "border-neutral-700 text-gray-400 hover:border-neutral-600"
+                        }`}
+                      >
+                        {o.icon}
+                        <span>
+                          <span className="block text-sm font-medium">
+                            {o.v}
+                          </span>
+                          <span className="block text-[10px] text-gray-500">
+                            {o.sub}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5">
+                      Terminal
+                    </label>
+                    {airport && airport.terminals.length > 0 ? (
+                      <Select
+                        value={terminalNo || undefined}
+                        onValueChange={setTerminalNo}
+                      >
+                        <SelectTrigger className="w-full h-11 px-3 rounded-lg bg-neutral-800/60 border-neutral-700 text-white text-sm hover:bg-neutral-800 focus:border-luxury-gold/70 focus:ring-2 focus:ring-luxury-gold/20 data-[state=open]:border-luxury-gold/70">
+                          <span
+                            className={
+                              terminalNo
+                                ? "truncate text-white"
+                                : "text-neutral-500"
+                            }
+                          >
+                            {terminalNo || "Select terminal…"}
+                          </span>
+                        </SelectTrigger>
+                        <SelectContent className="z-[90] max-h-72 bg-neutral-900 border-neutral-700 text-white shadow-2xl">
+                          {airport.terminals.map((t) => (
+                            <SelectItem
+                              key={t}
+                              value={t}
+                              className="rounded-md py-2 pr-8 text-white focus:bg-neutral-800 focus:text-white data-[state=checked]:text-luxury-gold"
+                            >
+                              {t}
+                            </SelectItem>
+                          ))}
+                          {terminalNo &&
+                            !airport.terminals.includes(terminalNo) && (
+                              <SelectItem
+                                value={terminalNo}
+                                className="rounded-md py-2 pr-8 text-white focus:bg-neutral-800 focus:text-white data-[state=checked]:text-luxury-gold"
+                              >
+                                {terminalNo}
+                              </SelectItem>
+                            )}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={terminalNo}
+                        onChange={(e) => setTerminalNo(e.target.value)}
+                        className={inputClass(false)}
+                        placeholder="e.g. Terminal 1"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-1 text-xs text-gray-400 mb-1.5">
+                      <Plane className="w-3 h-3" /> Flight number
+                    </label>
+                    <input
+                      type="text"
+                      value={flightNumber}
+                      onChange={(e) => setFlightNumber(e.target.value)}
+                      className={inputClass(!!errors.flightNumber)}
+                      placeholder="e.g. SV1005"
+                    />
+                    {errors.flightNumber && (
+                      <p className="text-[11px] text-red-400 mt-1">
+                        {errors.flightNumber}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
             )}
           </Section>
 
@@ -703,14 +861,14 @@ export default function BookRidePanel({
         {/* ============ Right column: sticky receipt card ============ */}
         <div className="lg:col-span-1">
           <div className="sticky top-6">
-            <ReceiptCard
-              totalPriceInput={totalPriceInput}
-              onChange={setTotalPriceInput}
-              split={priceSplit}
-              impliedHourly={impliedHourly}
-              tripType={tripType}
-              error={errors.totalPrice}
-            />
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+              <h3 className="text-sm font-semibold text-white mb-1">Pricing</h3>
+              <p className="text-sm text-gray-400 leading-relaxed">
+                Our team prices your booking after it's received. You'll be
+                notified with the confirmed price shortly — no amount needed
+                here.
+              </p>
+            </div>
             <button
               type="submit"
               disabled={submitting}

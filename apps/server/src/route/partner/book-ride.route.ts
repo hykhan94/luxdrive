@@ -14,6 +14,8 @@ import {
   createBooking,
   getBookingDetail,
   cancelBooking,
+  modifyBooking,
+  requestBookingDeletion,
 } from "../../controller/partner/book-ride.controller";
 
 const router = Router();
@@ -22,5 +24,7 @@ const router = Router();
 router.post("/", createBooking);
 router.get("/:bookingId", getBookingDetail);
 router.patch("/:bookingId/cancel", cancelBooking);
+router.patch("/:bookingId/modify", modifyBooking);
+router.post("/:bookingId/deletion-request", requestBookingDeletion);
 
 export default router;

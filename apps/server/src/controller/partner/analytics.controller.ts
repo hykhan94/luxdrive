@@ -361,7 +361,7 @@ export const getAnalytics = asyncWrapper(
       vehicleClass: v.vehicleClass,
       label: VEHICLE_CLASS_LABELS[v.vehicleClass] || v.vehicleClass,
       count: v._count!.id,
-      totalEarned: Number(v._sum?.totalPrice || 0),
+      totalSpend: Number(v._sum?.totalPrice || 0),
       percentage:
         totalVehicleBookings > 0
           ? Math.round((v._count!.id / totalVehicleBookings) * 100)
@@ -395,7 +395,7 @@ export const getAnalytics = asyncWrapper(
       city: c.city,
       label: CITY_LABELS[c.city] || c.city,
       count: c._count!.id,
-      totalEarned: Number(c._sum?.totalPrice || 0),
+      totalSpend: Number(c._sum?.totalPrice || 0),
       percentage:
         totalCityBookings > 0
           ? Math.round((c._count!.id / totalCityBookings) * 100)
@@ -428,7 +428,7 @@ export const getAnalytics = asyncWrapper(
       rank: i + 1,
       route: r.route,
       count: r._count!.id,
-      totalEarned: Number(r._sum?.totalPrice || 0),
+      totalSpend: Number(r._sum?.totalPrice || 0),
     }));
 
     // ============================================
@@ -487,27 +487,31 @@ export const getAnalytics = asyncWrapper(
     res.json({
       success: true,
       data: {
-        // 1. Summary KPI tiles
+        // 1. Summary KPI tiles (partner-facing "spend" contract, matching
+        //    the reports panel: totalRides / totalSpend / cancelledCount).
         summary: {
-          completedRides: completedRidesCount,
-          totalEarned,
+          totalRides: completedRidesCount,
+          totalSpend: totalEarned,
           averageBookingValue: Math.round(averageBookingValue * 100) / 100,
           cancellationRate,
+          cancelledCount,
           partnerJoinedAt: partnerJoinDate,
         },
 
-        // 2. Monthly earnings — last 6 months (oldest first for chart)
-        monthlyEarnings: {
-          months: monthlyEarnings.slice().reverse(),
+        // 2. Monthly spending — last 6 months (oldest first for chart)
+        spending: {
           currentMonth: {
             label: currentMonthLabel,
             amount: currentMonthEarning,
+            rides: monthlyEarnings[0]?.rides ?? 0,
           },
           previousMonth: {
             label: previousMonthLabel,
             amount: previousMonthEarning,
+            rides: monthlyEarnings[1]?.rides ?? 0,
           },
           percentChange: earningsPercentChange,
+          monthlyTrend: monthlyEarnings.slice().reverse(),
         },
 
         // 3. Booking status breakdown
@@ -516,12 +520,8 @@ export const getAnalytics = asyncWrapper(
           breakdown: bookingStatusBreakdown,
         },
 
-        // 4. Trip type split + current month weekly trend
-        tripTypes: {
-          total: totalTripTypeBookings,
-          split: tripTypeData,
-          currentMonthWeeklyTrend,
-        },
+        // 4. Trip type split (top-level, per the reports panel contract)
+        tripTypeSplit: tripTypeData,
 
         // 5. Vehicle category breakdown
         vehicleUsage: {
@@ -539,13 +539,7 @@ export const getAnalytics = asyncWrapper(
         topRoutes: topRoutesData,
 
         // 8. Weekly comparison for current month (rides + money)
-        currentMonthWeeklyComparison: {
-          monthLabel: currentMonthStart.toLocaleString("default", {
-            month: "long",
-            year: "numeric",
-          }),
-          weeks: weeklyComparisonData,
-        },
+        weeklyTrend: weeklyComparisonData,
       },
     });
   },

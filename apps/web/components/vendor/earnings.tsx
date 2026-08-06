@@ -93,6 +93,7 @@ interface Receipt {
   dueDate: string | null;
   isOverdue: boolean;
   status: string; // PENDING | CONFIRMED | OVERDUE
+  hasUnseenUpdate?: boolean;
   statusLabel: string;
   isPaid: boolean;
   paidAt: string | null;
@@ -299,6 +300,10 @@ export default function VendorEarningsPanel({
       // Backend wraps the detail as { receipt, vendor, bookings, summary }
       // so we keep the full envelope rather than try to flatten it.
       if (res.success && res.data) setReceiptDetail(res.data);
+      // Opening a payout clears its unseen flag on the backend; refresh
+      // the list + sidebar badge so the row shade and the count go away.
+      fetchReceipts(pagination.page);
+      refreshBadges();
     } catch (err: any) {
       showNotification("error", err.message || "Failed to load receipt");
       setShowDetailModal(false);
@@ -637,7 +642,7 @@ export default function VendorEarningsPanel({
               </EmptyMedia>
               <EmptyTitle className="text-white">No receipts yet</EmptyTitle>
               <EmptyDescription className="text-gray-400">
-                Your vendor receipts will appear here at the start of each month
+                Your vendor receipts will appear here at the start of each day
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -669,9 +674,20 @@ export default function VendorEarningsPanel({
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
                   {receipts.map((receipt) => (
-                    <tr key={receipt.id} className="hover:bg-neutral-800/30">
+                    <tr
+                      key={receipt.id}
+                      className={`hover:bg-neutral-800/30 ${receipt.hasUnseenUpdate ? "bg-orange-500/5" : ""}`}
+                    >
                       <td className="px-6 py-4 text-sm text-luxury-gold font-mono">
-                        {receipt.receiptNumber}
+                        <span className="flex items-center gap-2">
+                          {receipt.hasUnseenUpdate && (
+                            <span
+                              className="h-2 w-2 rounded-full bg-orange-400 animate-pulse"
+                              title="New update"
+                            />
+                          )}
+                          {receipt.receiptNumber}
+                        </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-white">
                         {receipt.month}

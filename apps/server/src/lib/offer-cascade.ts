@@ -209,7 +209,7 @@ export async function findEligibleVendors(
       _count: {
         select: {
           // Total completed bookings — used for sort key.
-          bookings: { where: { status: "COMPLETED" } },
+          bookings: { where: { status: "COMPLETED", deletedAt: null } },
         },
       },
     },
@@ -291,6 +291,201 @@ export async function findEligibleVendors(
   return eligible;
 }
 
+// ------------------------------------------------------------------
+// Eligibility diagnostics.
+//
+// findEligibleVendors() answers *who* can take a booking. When the
+// answer is "nobody", admins need to know *why* — otherwise a booking
+// with a perfectly good-looking vendor reads as a bug. This returns,
+// for every APPROVED vendor that owns at least one vehicle in the
+// booking's class, the concrete reason(s) they were excluded. It
+// mirrors findEligibleVendors' rules EXACTLY (same doc-expiry
+// semantics: a doc with a null expiry never blocks; a vehicle/driver
+// doc blocks only if its expiry is on/before the trip; a required
+// profile doc blocks if missing OR expiring on/before the trip).
+// Vendors with no matching-class vehicle are intentionally omitted —
+// they simply can't serve this class and aren't worth listing.
+export type EligibilityBlockerCategory =
+  | "APPROVAL" // no approved/active vehicle or driver of the right class
+  | "MISSING" // a required company document isn't on file
+  | "DOCUMENTS" // a document expires on/before the trip date
+  | "OFFER"; // already rejected / already holds the live offer
+
+export interface EligibilityBlocker {
+  category: EligibilityBlockerCategory;
+  message: string;
+}
+
+export interface VendorEligibilityDiagnosis {
+  vendorId: string;
+  companyName: string;
+  // Ordered most-fundamental first, so blockers[0].category is the
+  // vendor's PRIMARY reason — used to group the admin-side summary.
+  // An empty array means the vendor IS eligible.
+  blockers: EligibilityBlocker[];
+}
+
+export async function diagnoseVendorEligibility(
+  bookingId: string,
+): Promise<VendorEligibilityDiagnosis[]> {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { id: true, vehicleClass: true, tripDate: true, tripTime: true },
+  });
+  if (!booking) return [];
+
+  const tripDateTime = combineTripDateAndTime(
+    booking.tripDate,
+    booking.tripTime,
+  );
+  const tripStr = tripDateTime.toISOString().split("T")[0];
+
+  const [priorRejections, activePending] = await Promise.all([
+    prisma.bookingAssignmentOffer.findMany({
+      where: { bookingId, status: "REJECTED" },
+      select: { vendorId: true },
+    }),
+    prisma.bookingAssignmentOffer.findMany({
+      where: { bookingId, status: "PENDING" },
+      select: { vendorId: true },
+    }),
+  ]);
+  const rejectedSet = new Set(priorRejections.map((r) => r.vendorId));
+  const pendingSet = new Set(activePending.map((r) => r.vendorId));
+
+  const vendors = await prisma.vendor.findMany({
+    where: {
+      status: "APPROVED",
+      vehicles: { some: { category: booking.vehicleClass } },
+    },
+    include: {
+      vendorDocuments: {
+        where: { type: { in: REQUIRED_VENDOR_DOC_TYPES } },
+        select: { type: true, expiryDate: true },
+      },
+      vehicles: {
+        where: { category: booking.vehicleClass },
+        include: { documents: { select: { type: true, expiryDate: true } } },
+      },
+      drivers: {
+        include: { documents: { select: { type: true, expiryDate: true } } },
+      },
+    },
+  });
+
+  const fmt = (d: Date | null | undefined) =>
+    d ? new Date(d).toISOString().split("T")[0] : null;
+  const label = (t: string) => t.replace(/_/g, " ").toLowerCase();
+  const docExpired = (d: { expiryDate: Date | null }) =>
+    !!d.expiryDate && new Date(d.expiryDate) <= tripDateTime;
+  const className = label(booking.vehicleClass);
+
+  const out: VendorEligibilityDiagnosis[] = [];
+  for (const v of vendors) {
+    const blockers: EligibilityBlocker[] = [];
+
+    // (1) Offer state — most fundamental: out of the running entirely.
+    if (rejectedSet.has(v.id)) {
+      blockers.push({
+        category: "OFFER",
+        message: "Rejected this booking on an earlier offer.",
+      });
+    } else if (pendingSet.has(v.id)) {
+      blockers.push({
+        category: "OFFER",
+        message: "Already holds the live offer for this booking.",
+      });
+    }
+
+    // (2) Approval — no usable vehicle / driver of the right class.
+    const usableVehicles = v.vehicles.filter(
+      (veh) => veh.isActive && veh.status === "APPROVED",
+    );
+    if (usableVehicles.length === 0) {
+      const unapproved = v.vehicles.find((veh) => veh.status !== "APPROVED");
+      const inactive = v.vehicles.find((veh) => !veh.isActive);
+      blockers.push({
+        category: "APPROVAL",
+        message: unapproved
+          ? `${className} vehicle ${unapproved.plateNumber} isn't approved yet (status: ${label(unapproved.status)}).`
+          : inactive
+            ? `${className} vehicle ${inactive.plateNumber} is inactive.`
+            : `No approved, active ${className} vehicle.`,
+      });
+    }
+    const usableDrivers = v.drivers.filter(
+      (d) => d.isActive && d.status === "APPROVED",
+    );
+    if (usableDrivers.length === 0) {
+      blockers.push({
+        category: "APPROVAL",
+        message: "No approved, active driver.",
+      });
+    }
+
+    // (3) Missing required company documents.
+    for (const type of REQUIRED_VENDOR_DOC_TYPES) {
+      if (!v.vendorDocuments.find((d) => d.type === type)) {
+        blockers.push({
+          category: "MISSING",
+          message: `Missing company document: ${label(type)}.`,
+        });
+      }
+    }
+
+    // (4) Documents that expire on/before the trip date.
+    for (const type of REQUIRED_VENDOR_DOC_TYPES) {
+      if (!VENDOR_DOCS_REQUIRING_EXPIRY.has(type)) continue;
+      const doc = v.vendorDocuments.find((d) => d.type === type);
+      if (
+        doc &&
+        (!doc.expiryDate || new Date(doc.expiryDate) <= tripDateTime)
+      ) {
+        const when = fmt(doc.expiryDate);
+        blockers.push({
+          category: "DOCUMENTS",
+          message: when
+            ? `Company ${label(type)} expires ${when}, on/before the trip (${tripStr}).`
+            : `Company ${label(type)} has no expiry date on file.`,
+        });
+      }
+    }
+    if (usableVehicles.length > 0) {
+      const anyValid = usableVehicles.some((veh) =>
+        veh.documents.every((d) => !docExpired(d)),
+      );
+      if (!anyValid) {
+        const veh = usableVehicles[0];
+        const bad = veh.documents.find((d) => docExpired(d));
+        if (bad) {
+          blockers.push({
+            category: "DOCUMENTS",
+            message: `${className} vehicle ${veh.plateNumber}: ${label(bad.type)} expires ${fmt(bad.expiryDate)}, on/before the trip (${tripStr}).`,
+          });
+        }
+      }
+    }
+    if (usableDrivers.length > 0) {
+      const anyValid = usableDrivers.some((d) =>
+        d.documents.every((doc) => !docExpired(doc)),
+      );
+      if (!anyValid) {
+        const d = usableDrivers[0];
+        const bad = d.documents.find((doc) => docExpired(doc));
+        if (bad) {
+          blockers.push({
+            category: "DOCUMENTS",
+            message: `Driver ${d.firstName} ${d.lastName}: ${label(bad.type)} expires ${fmt(bad.expiryDate)}, on/before the trip (${tripStr}).`,
+          });
+        }
+      }
+    }
+
+    out.push({ vendorId: v.id, companyName: v.companyName, blockers });
+  }
+  return out;
+}
+
 export interface CascadeOptions {
   // Per-booking payout amount to carry into the new offer. When
   // cascading after a non-price rejection, pass the rejected offer's
@@ -351,6 +546,17 @@ export async function cascadeToNextVendor(
 
   const nextVendor = eligible[0];
 
+  // attemptNumber is unique per (booking, vendor). The vendor may
+  // already have a prior offer for this booking (e.g. a CANCELLED one
+  // left after a change released the booking), so take the next number
+  // above their highest rather than assuming attemptNumber 1.
+  const priorForNext = await prisma.bookingAssignmentOffer.findFirst({
+    where: { bookingId, vendorId: nextVendor.id },
+    orderBy: { attemptNumber: "desc" },
+    select: { attemptNumber: true },
+  });
+  const nextAttempt = (priorForNext?.attemptNumber ?? 0) + 1;
+
   // Create the new offer row + transition booking in one transaction.
   // Array form keeps the typing simple against the project's custom
   // Prisma client.
@@ -360,7 +566,7 @@ export async function cascadeToNextVendor(
         bookingId,
         vendorId: nextVendor.id,
         payoutAmount: options.payoutAmount,
-        attemptNumber: 1,
+        attemptNumber: nextAttempt,
         status: "PENDING",
       },
     }),

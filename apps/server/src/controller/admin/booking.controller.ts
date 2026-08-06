@@ -7,6 +7,7 @@
 
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import { getReadUrl } from "../../lib/gcs";
 import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError, BadRequestError } from "../../utils/AppError";
 import {
@@ -16,12 +17,17 @@ import {
   buildStatusTimeline,
   getVendorStatusDisplay,
 } from "../../utils/helpers/booking.helpers";
-import { findEligibleVendors } from "../../lib/offer-cascade";
+import {
+  findEligibleVendors,
+  diagnoseVendorEligibility,
+} from "../../lib/offer-cascade";
 import { buildPOHtml } from "../../utils/helpers/po.helpers";
+import { splitVatInclusive } from "../../utils/helpers/pricing.helpers";
 import {
   notifyVendorOfOffer,
   notifyVendorOfReOffer,
 } from "../../lib/offer-notifications";
+import { applyBookingModification } from "../../lib/booking-modification.service";
 
 /**
  * Get all bookings with comprehensive filters
@@ -45,7 +51,12 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
   // Status filter
   if (status && status !== "all") {
     const statusMap: Record<string, string[]> = {
-      pending: ["PENDING", "ASSIGNMENT_OFFERED", "ASSIGNMENT_RE_OFFERED"],
+      pending: [
+        "AWAITING_PRICING",
+        "PENDING",
+        "ASSIGNMENT_OFFERED",
+        "ASSIGNMENT_RE_OFFERED",
+      ],
       confirmed: ["CONFIRMED"],
       "in-progress": ["IN_PROGRESS"],
       completed: ["COMPLETED"],
@@ -101,11 +112,17 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
         where,
         skip,
         take: parseInt(limit as string),
-        orderBy: [
-          { needsAttention: "desc" },
-          { isReadByAdmin: "asc" },
-          { createdAt: "desc" },
-        ],
+        orderBy:
+          req.query.sortOrder === "asc" || req.query.sortOrder === "desc"
+            ? [
+                { tripDate: req.query.sortOrder as "asc" | "desc" },
+                { createdAt: "desc" as const },
+              ]
+            : [
+                { needsAttention: "desc" as const },
+                { isReadByAdmin: "asc" as const },
+                { createdAt: "desc" as const },
+              ],
         include: {
           customer: {
             select: { id: true, name: true, email: true, phone: true },
@@ -123,7 +140,17 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
       prisma.booking.count({ where }),
       prisma.booking.groupBy({ by: ["status"], _count: { status: true } }),
       prisma.booking.count({ where: { isReadByAdmin: false } }),
-      prisma.booking.count({ where: { needsAttention: true } }),
+      prisma.booking.count({
+        where: {
+          needsAttention: true,
+          // Only bookings that still need admin action count as
+          // "needs attention" — i.e. not yet assigned to a vendor and not
+          // in a terminal state. A confirmed (vendor-assigned), cancelled,
+          // or completed booking never counts, even if it was modified.
+          vendorId: null,
+          status: { notIn: ["CANCELLED", "COMPLETED"] },
+        },
+      }),
     ]);
 
   // Calculate status counts
@@ -138,9 +165,12 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
   statusCounts.forEach((item) => {
     counts.all += item._count.status;
     if (
-      ["PENDING", "ASSIGNMENT_OFFERED", "ASSIGNMENT_RE_OFFERED"].includes(
-        item.status,
-      )
+      [
+        "AWAITING_PRICING",
+        "PENDING",
+        "ASSIGNMENT_OFFERED",
+        "ASSIGNMENT_RE_OFFERED",
+      ].includes(item.status)
     ) {
       counts.pending += item._count.status;
     } else if (item.status === "CONFIRMED")
@@ -177,6 +207,22 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
   });
   (counts as any).needsAction = needsActionCount;
 
+  // Which of these bookings sit at PENDING with no vendor because a change
+  // released them (a voided/CANCELLED offer exists). Batched so the list
+  // can show "Awaiting Reassignment" instead of a bare "Pending".
+  const releaseCandidates = bookings
+    .filter((b) => b.status === "PENDING" && !b.vendorId)
+    .map((b) => b.id);
+  const releasedIds = new Set<string>();
+  if (releaseCandidates.length > 0) {
+    const cancelled = await prisma.bookingAssignmentOffer.findMany({
+      where: { bookingId: { in: releaseCandidates }, status: "CANCELLED" },
+      select: { bookingId: true },
+      distinct: ["bookingId"],
+    });
+    for (const c of cancelled) releasedIds.add(c.bookingId);
+  }
+
   const formattedBookings = bookings.map((booking) => ({
     id: booking.id,
     bookingRef: booking.bookingRef,
@@ -197,9 +243,18 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
     vendor: booking.vendor
       ? { id: booking.vendor.id, companyName: booking.vendor.companyName }
       : null,
-    vendorStatus: getVendorStatusDisplay(booking),
+    vendorStatus: releasedIds.has(booking.id)
+      ? "Awaiting Reassignment"
+      : getVendorStatusDisplay(booking),
     status: booking.status,
-    statusDisplay: formatStatusForUI(booking.status),
+    statusDisplay: releasedIds.has(booking.id)
+      ? "Awaiting Reassignment"
+      : formatStatusForUI(booking.status),
+    awaitingReassignment: releasedIds.has(booking.id),
+    modificationCount: (booking as any).modificationCount ?? 0,
+    modifiedAt: (booking as any).modifiedAt ?? null,
+    // Activity time for the redesigned list row's relative timestamp.
+    lastActivityAt: (booking as any).modifiedAt ?? booking.createdAt,
     amount: booking.totalPrice,
     vehicleClass: booking.vehicleClass,
     // Trip-type fields. Mirrors the partner portal's booking list
@@ -213,13 +268,21 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
     hourlyDuration: (booking as any).hourlyDuration || null,
     city: booking.city,
     isUnread: !booking.isReadByAdmin,
-    needsAttention: booking.needsAttention,
+    needsAttention:
+      booking.needsAttention &&
+      !booking.vendorId &&
+      booking.status !== "CANCELLED" &&
+      booking.status !== "COMPLETED",
     attentionReason: booking.attentionReason,
-    highlightType: booking.needsAttention
-      ? "attention"
-      : !booking.isReadByAdmin
-        ? "unread"
-        : "normal",
+    highlightType:
+      booking.needsAttention &&
+      !booking.vendorId &&
+      booking.status !== "CANCELLED" &&
+      booking.status !== "COMPLETED"
+        ? "attention"
+        : !booking.isReadByAdmin
+          ? "unread"
+          : "normal",
   }));
 
   res.json({
@@ -244,7 +307,12 @@ export const getBookings = asyncWrapper(async (req: Request, res: Response) => {
 export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await prisma.booking.update({ where: { id }, data: { isReadByAdmin: true } });
+  await prisma.booking.update({
+    where: { id },
+    // Opening a booking acknowledges it: mark read AND clear the attention
+    // flag so the red highlight and the "needs attention" count drop for it.
+    data: { isReadByAdmin: true, needsAttention: false, attentionReason: null },
+  });
 
   const booking = await prisma.booking.findUnique({
     where: { id },
@@ -268,6 +336,8 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
           plateNumber: true,
           category: true,
           color: true,
+          year: true,
+          seats: true,
         },
       },
       driver: {
@@ -277,6 +347,26 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
           lastName: true,
           phone: true,
           rating: true,
+          photoUrl: true,
+        },
+      },
+      temporaryDriver: {
+        select: { id: true, name: true, mobile: true, photoUrl: true },
+      },
+      temporaryVehicle: {
+        select: { id: true, model: true, vehicleClass: true },
+      },
+      modifications: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          actor: true,
+          changedFields: true,
+          reason: true,
+          vendorDecision: true,
+          vendorDecisionReason: true,
+          vendorDecidedAt: true,
+          createdAt: true,
         },
       },
     },
@@ -334,7 +424,40 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
     activeOffer,
   );
 
-  const timeline = buildStatusTimeline(booking, rejectionReasons);
+  // Sign the assigned driver's photo (raw GCS path -> short-lived URL) so
+  // the shared driver card can render it, matching the vendor portal.
+  if (vendorAssignment?.driver?.photoUrl) {
+    vendorAssignment.driver.photoUrl = await getReadUrl(
+      vendorAssignment.driver.photoUrl,
+    );
+  }
+
+  // A voided (CANCELLED) offer means the booking was released after a
+  // change invalidated the assignment. When it's sitting at PENDING with
+  // no vendor, that's "Awaiting Reassignment", not a plain new "Pending".
+  const cancelledOfferCount = await prisma.bookingAssignmentOffer.count({
+    where: { bookingId: booking.id, status: "CANCELLED" },
+  });
+  const awaitingReassignment =
+    booking.status === "PENDING" &&
+    !booking.vendorId &&
+    cancelledOfferCount > 0;
+
+  // "Assigned to Vendor" is timestamped from the first offer ever made
+  // on this booking (when it first went out to a vendor). Change history
+  // no longer feeds the journey timeline — it's rendered separately in
+  // the change-history card.
+  const firstOffer = await prisma.bookingAssignmentOffer.findFirst({
+    where: { bookingId: booking.id },
+    orderBy: { offeredAt: "asc" },
+    select: { offeredAt: true },
+  });
+  const timeline = buildStatusTimeline(
+    booking,
+    rejectionReasons,
+    awaitingReassignment,
+    firstOffer?.offeredAt ?? null,
+  );
 
   // For the "available vendors" pool we use the exact same eligibility
   // function the assign-vendor endpoint uses (findEligibleVendors). The
@@ -356,7 +479,21 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
       id: booking.id,
       bookingRef: booking.bookingRef,
       status: booking.status,
-      statusDisplay: formatStatusForUI(booking.status),
+      statusDisplay: awaitingReassignment
+        ? "Awaiting Reassignment"
+        : formatStatusForUI(booking.status),
+      modificationCount: (booking as any).modificationCount ?? 0,
+      modifiedAt: (booking as any).modifiedAt ?? null,
+      modifications: ((booking as any).modifications ?? []).map((m: any) => ({
+        id: m.id,
+        actor: m.actor,
+        changedFields: m.changedFields,
+        reason: m.reason,
+        vendorDecision: m.vendorDecision,
+        vendorDecisionReason: m.vendorDecisionReason,
+        vendorDecidedAt: m.vendorDecidedAt,
+        createdAt: m.createdAt,
+      })),
       customer: {
         name: booking.customer?.name || booking.guestName || "Guest",
         email: booking.customer?.email || booking.guestEmail,
@@ -370,6 +507,13 @@ export const getBooking = asyncWrapper(async (req: Request, res: Response) => {
       tripTime: booking.tripTime,
       vehicleClass: booking.vehicleClass,
       vehicleClassDisplay: formatVehicleClass(booking.vehicleClass),
+      // Categories admin has authorized the vendor to upgrade to for this
+      // booking. Drives the "already authorized" state on the admin panel.
+      upgradeAllowedClasses: (booking as any).upgradeAllowedClasses ?? [],
+      upgradeAuthorizedPrice:
+        (booking as any).upgradeAuthorizedPrice != null
+          ? Number((booking as any).upgradeAuthorizedPrice)
+          : null,
       passengers: booking.passengers,
       // Trip-type fields — power the Service Window / Trip Route
       // cards, the Service Day timeline, and the static map on the
@@ -470,9 +614,12 @@ export const getBookingStats = asyncWrapper(
     statusCounts.forEach((item) => {
       stats.byStatus.all += item._count.status;
       if (
-        ["PENDING", "ASSIGNMENT_OFFERED", "ASSIGNMENT_RE_OFFERED"].includes(
-          item.status,
-        )
+        [
+          "AWAITING_PRICING",
+          "PENDING",
+          "ASSIGNMENT_OFFERED",
+          "ASSIGNMENT_RE_OFFERED",
+        ].includes(item.status)
       ) {
         stats.byStatus.pending += item._count.status;
       } else if (item.status === "CONFIRMED")
@@ -577,6 +724,15 @@ export const getAvailableVendors = asyncWrapper(
 
     const eligible = await findEligibleVendors(bookingId);
 
+    // When the eligible pool is empty (or thin), tell the admin WHY the
+    // vendors they expect aren't offerable — per-vendor exclusion reasons
+    // computed from the exact same rules as findEligibleVendors.
+    const diagnosis = await diagnoseVendorEligibility(bookingId);
+    const eligibleIds = new Set(eligible.map((v) => v.id));
+    const ineligible = diagnosis.filter(
+      (d) => d.blockers.length > 0 && !eligibleIds.has(d.vendorId),
+    );
+
     const rejectedOffers = await prisma.bookingAssignmentOffer.findMany({
       where: { bookingId, status: "REJECTED" },
       include: { vendor: { select: { id: true, companyName: true } } },
@@ -602,9 +758,15 @@ export const getAvailableVendors = asyncWrapper(
           attemptNumber: o.attemptNumber,
           rejectedAt: o.respondedAt,
         })),
+        ineligible: ineligible.map((d) => ({
+          id: d.vendorId,
+          companyName: d.companyName,
+          blockers: d.blockers,
+        })),
         summary: {
           availableCount: eligible.length,
           rejectedCount: rejectedOffers.length,
+          ineligibleCount: ineligible.length,
         },
       },
     });
@@ -639,6 +801,117 @@ export const getAvailableVendors = asyncWrapper(
  * doesn't gate the offer — it raises a 400 with a clear message so
  * admin picks a different vehicle/driver before offering.
  */
+/**
+ * PATCH /api/v1/admin/bookings/:id/set-price
+ *
+ * Admin-driven pricing. Sets the partner-facing price on an AWAITING_PRICING
+ * booking: splits the VAT-inclusive total into base + VAT, stores all three,
+ * and moves the booking to PENDING (now offer-eligible). Notifies the partner
+ * their booking is priced/confirmed and records the event on the change
+ * history. Admin price is unbounded — only a positive number is enforced.
+ *
+ * The downstream vendor-offer flow (assignVendor / reOfferBooking) is
+ * unchanged; it already requires PENDING, so an unpriced booking simply
+ * can't be offered until it has been priced here.
+ */
+export const setBookingPrice = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { totalPrice } = req.body;
+
+    const totalNum = Number(totalPrice);
+    if (!Number.isFinite(totalNum) || totalNum <= 0) {
+      throw new BadRequestError(
+        "A valid total price greater than 0 is required.",
+      );
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id },
+      include: { partner: { select: { userId: true } } },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+
+    if (booking.status !== "AWAITING_PRICING") {
+      throw new BadRequestError(
+        `Cannot price a booking in status "${booking.status}". Only bookings awaiting pricing can be priced.`,
+      );
+    }
+
+    const {
+      basePrice,
+      vatAmount,
+      totalPrice: total,
+    } = splitVatInclusive(totalNum);
+
+    const updated = await prisma.booking.update({
+      where: { id },
+      data: {
+        basePrice,
+        vatAmount,
+        totalPrice: total,
+        // Priced → ready to be offered to a vendor.
+        status: "PENDING",
+        needsAttention: true,
+        attentionReason: "Priced — needs vendor assignment",
+        attentionAt: new Date(),
+        // Partner has a new update to see: their booking is now priced.
+        isReadByPartner: false,
+      },
+    });
+
+    // Record on the change history (visible to admin + partner).
+    await prisma.bookingModification
+      .create({
+        data: {
+          bookingId: id,
+          actor: "ADMIN",
+          actorUserId: req.user!.id,
+          reason: "Partner price set",
+          changedFields: [
+            {
+              field: "totalPrice",
+              from: null,
+              to: `SAR ${total.toFixed(2)}`,
+            },
+          ] as any,
+        },
+      })
+      .catch((err) => {
+        console.error("Failed to record pricing modification:", err);
+      });
+
+    // Notify the partner: their booking is now priced/confirmed.
+    if (booking.partner?.userId) {
+      await prisma.notification.create({
+        data: {
+          userId: booking.partner.userId,
+          title: "Booking Confirmed",
+          message: `Your booking ${booking.bookingRef} is confirmed at SAR ${total.toFixed(2)}. We're now arranging your driver and vehicle.`,
+          type: "BOOKING_PRICED",
+          data: {
+            bookingId: id,
+            bookingRef: booking.bookingRef,
+            totalPrice: total,
+          },
+        },
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Partner price set.",
+      data: {
+        id: updated.id,
+        status: updated.status,
+        basePrice,
+        vatAmount,
+        totalPrice: total,
+      },
+    });
+  },
+);
+
 export const assignVendor = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
@@ -659,9 +932,12 @@ export const assignVendor = asyncWrapper(
     // Booking must be in an offer-eligible state. CONFIRMED/IN_PROGRESS/
     // COMPLETED/CANCELLED are terminal-ish — assignment is over.
     if (
-      !["PENDING", "ASSIGNMENT_OFFERED", "ASSIGNMENT_RE_OFFERED"].includes(
-        booking.status,
-      )
+      ![
+        "AWAITING_PRICING",
+        "PENDING",
+        "ASSIGNMENT_OFFERED",
+        "ASSIGNMENT_RE_OFFERED",
+      ].includes(booking.status)
     ) {
       throw new BadRequestError(
         `Cannot offer booking in status "${booking.status}". Must be PENDING / ASSIGNMENT_OFFERED / ASSIGNMENT_RE_OFFERED.`,
@@ -764,6 +1040,18 @@ export const assignVendor = asyncWrapper(
     // offer (admin, not vendor). A future schema migration could add
     // a WITHDRAWN_BY_ADMIN status or rejection reason for cleaner
     // audit fidelity; tracked separately.
+    // attemptNumber must be unique per (booking, vendor). A vendor may
+    // already have prior offers for this booking — REJECTED, or CANCELLED
+    // after a change released the booking — so take the next number above
+    // their highest rather than assuming this is their first offer (which
+    // collided on the (bookingId, vendorId, attemptNumber) unique key).
+    const priorForVendor = await prisma.bookingAssignmentOffer.findFirst({
+      where: { bookingId: id, vendorId },
+      orderBy: { attemptNumber: "desc" },
+      select: { attemptNumber: true },
+    });
+    const nextAttempt = (priorForVendor?.attemptNumber ?? 0) + 1;
+
     const txOps: any[] = [];
     if (isOverride && existingPending) {
       txOps.push(
@@ -783,7 +1071,7 @@ export const assignVendor = asyncWrapper(
           bookingId: id,
           vendorId,
           payoutAmount: payoutNum,
-          attemptNumber: 1,
+          attemptNumber: nextAttempt,
           status: "PENDING",
         },
       }),
@@ -797,6 +1085,8 @@ export const assignVendor = asyncWrapper(
           driverId: driverId ?? null,
           vendorPayoutAmount: payoutNum,
           status: "ASSIGNMENT_OFFERED",
+          // Vendor has a new offer to respond to.
+          isReadByVendor: false,
           needsAttention: false,
           attentionReason: null,
         },
@@ -971,6 +1261,8 @@ export const reOfferBooking = asyncWrapper(
         data: {
           vendorPayoutAmount: payoutNum,
           status: "ASSIGNMENT_OFFERED",
+          // Vendor has a new offer to respond to.
+          isReadByVendor: false,
           needsAttention: false,
           attentionReason: null,
         },
@@ -1044,31 +1336,82 @@ export const updateBookingStatus = asyncWrapper(
 export const cancelBooking = asyncWrapper(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body ?? {};
 
-    const booking = await prisma.booking.findUnique({ where: { id } });
+    const booking = await prisma.booking.findUnique({
+      where: { id },
+      include: {
+        vendor: { select: { userId: true } },
+        partner: { select: { userId: true } },
+      },
+    });
     if (!booking) throw new NotFoundError("Booking");
-
-    if (booking.status === "COMPLETED")
-      throw new BadRequestError("Cannot cancel completed booking");
     if (booking.status === "CANCELLED")
       throw new BadRequestError("Already cancelled");
-    if (booking.status === "IN_PROGRESS")
-      throw new BadRequestError("Cannot cancel in-progress booking");
 
+    // Admin may cancel from ANY other status (no lead-time gate). The
+    // vendor/driver/vehicle references are kept for the record; the
+    // booking simply moves to the CANCELLED terminal state.
     const updatedBooking = await prisma.booking.update({
       where: { id },
       data: {
         status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: req.user!.id,
+        cancellationReason: reason ? String(reason) : null,
         notes: reason ? `Cancelled: ${reason}` : booking.notes,
         needsAttention: false,
+        attentionReason: null,
+      },
+    });
+
+    const notifications: Array<{
+      userId: string;
+      title: string;
+      message: string;
+      type: string;
+      data: Record<string, string>;
+    }> = [];
+    if (booking.partner?.userId) {
+      notifications.push({
+        userId: booking.partner.userId,
+        title: "Booking cancelled",
+        message: `Booking ${booking.bookingRef} was cancelled by LuxDrive${reason ? `: ${reason}` : "."}`,
+        type: "BOOKING_CANCELLED",
+        data: { bookingId: id, bookingRef: booking.bookingRef },
+      });
+    }
+    if (booking.vendor?.userId) {
+      notifications.push({
+        userId: booking.vendor.userId,
+        title: "Booking cancelled",
+        message: `Booking ${booking.bookingRef} was cancelled by admin.`,
+        type: "BOOKING_CANCELLED",
+        data: { bookingId: id, bookingRef: booking.bookingRef },
+      });
+    }
+    if (notifications.length > 0) {
+      await prisma.notification.createMany({ data: notifications });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "ADMIN_CANCELLED_BOOKING",
+        entity: "Booking",
+        entityId: id,
+        changes: {
+          bookingRef: booking.bookingRef,
+          previousStatus: booking.status,
+          reason: reason ?? null,
+        },
       },
     });
 
     res.json({
       success: true,
       message: "Booking cancelled",
-      data: { id: updatedBooking.id },
+      data: { id: updatedBooking.id, status: updatedBooking.status },
     });
   },
 );
@@ -1296,6 +1639,170 @@ export const downloadBookingPO = asyncWrapper(
           partner: booking.partner?.companyName || "Direct customer",
           date: new Date().toISOString(),
         },
+      },
+    });
+  },
+);
+
+/**
+ * Admin modify booking — unrestricted. No lead-time gate, no status
+ * gate (admins may change any non-deleted booking at any time).
+ * PATCH /api/v1/admin/bookings/:id/modify
+ * Body: { patch: { ...changed fields }, reason?: string }
+ */
+export const modifyBooking = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { patch, reason } = req.body ?? {};
+    if (!patch || typeof patch !== "object") {
+      throw new BadRequestError("No changes supplied.");
+    }
+
+    const result = await applyBookingModification({
+      bookingId: id,
+      rawPatch: patch,
+      actor: "ADMIN",
+      actorUserId: req.user!.id,
+      actorLabel: "Admin",
+      reason,
+      ip: req.ip,
+      userAgent: req.headers["user-agent"] as string | undefined,
+    });
+
+    res.json({ success: true, data: result });
+  },
+);
+
+// ============== AUTHORIZE CATEGORY UPGRADE ==============
+//
+// Admin-driven. After a call in which the vendor reports being out of the
+// booked category and offers an upgraded one (with or without a price
+// change agreed with the partner), admin authorizes the extra category
+// (or categories) the vendor may assign from for THIS booking, and — if a
+// price was agreed — sets the new price. The change is recorded as a
+// BookingModification and vendor + partner are notified. The vendor can
+// then assign a matching (or newly added temporary) vehicle from an
+// authorized class; accepting moves the booking onto that class.
+export const authorizeCategoryUpgrade = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { allowedClasses, newTotalPrice, newVendorPayout } = req.body ?? {};
+
+    if (!Array.isArray(allowedClasses)) {
+      throw new BadRequestError(
+        "allowedClasses must be an array of vehicle classes",
+      );
+    }
+
+    const booking = await prisma.booking.findUnique({ where: { id } });
+    if (!booking) throw new NotFoundError("Booking");
+
+    const priceProvided =
+      typeof newTotalPrice === "number" && Number(newTotalPrice) > 0;
+    const payoutProvided =
+      typeof newVendorPayout === "number" && Number(newVendorPayout) > 0;
+
+    // Store the authorization only. The agreed price/payout is held
+    // here and applied — and recorded + shown to the partner — only
+    // when the vendor actually assigns an upgraded vehicle. The partner
+    // has no concern with an authorization that may never be used.
+    await prisma.booking.update({
+      where: { id },
+      data: {
+        upgradeAllowedClasses: allowedClasses as any,
+        upgradeAuthorizedPrice: priceProvided ? newTotalPrice : null,
+        upgradeAuthorizedPayout: payoutProvided ? newVendorPayout : null,
+      },
+    });
+
+    const humanize = (c: string) =>
+      c
+        .replace(/_/g, " ")
+        .toLowerCase()
+        .replace(/\b\w/g, (m) => m.toUpperCase());
+    const classList =
+      (allowedClasses as string[]).map(humanize).join(", ") || "—";
+
+    // Notify the vendor (they can now assign from these classes).
+    // Record the authorization in the change history so ADMIN and the
+    // VENDOR can see it (elaborative label). This entry is filtered out of
+    // the PARTNER timeline in the partner controller — the partner only
+    // learns of the change once the vendor actually assigns the upgrade.
+    await prisma.bookingModification.create({
+      data: {
+        bookingId: id,
+        actor: "ADMIN",
+        actorUserId: req.user!.id,
+        changedFields: [
+          {
+            field: "upgradeAllowedClasses",
+            label: "Category upgrade authorized",
+            from:
+              (booking.upgradeAllowedClasses ?? []).map(humanize).join(", ") ||
+              "—",
+            to: classList,
+          },
+        ] as any,
+        reason: priceProvided
+          ? `Vendor may assign an upgraded vehicle; agreed price SAR ${Number(
+              newTotalPrice,
+            ).toFixed(2)} applies on assignment.`
+          : "Vendor may assign an upgraded vehicle at no change to the price.",
+        vendorDecision: "NOT_REQUIRED",
+      },
+    });
+
+    if (booking.vendorId) {
+      const vendorRow = await prisma.vendor.findUnique({
+        where: { id: booking.vendorId },
+        select: { userId: true },
+      });
+      if (vendorRow?.userId) {
+        await prisma.notification.create({
+          data: {
+            userId: vendorRow.userId,
+            title: "Category upgrade authorized",
+            message: `For ${booking.bookingRef} you may now assign a vehicle from: ${classList}.${
+              priceProvided
+                ? ` Agreed price SAR ${Number(newTotalPrice).toFixed(2)} applies once you assign it.`
+                : ""
+            }`,
+            type: "BOOKING_ASSIGNMENT_UPDATED",
+            data: { bookingId: id, bookingRef: booking.bookingRef } as any,
+          },
+        });
+      }
+    }
+
+    // Notify admins (audit trail). No partner notification here — the
+    // partner is only told once the vendor executes the upgrade.
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN", isActive: true },
+      select: { id: true },
+    });
+    if (admins.length > 0) {
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          title: "Category upgrade authorized",
+          message: `${booking.bookingRef}: authorized ${classList}${
+            priceProvided
+              ? ` at SAR ${Number(newTotalPrice).toFixed(2)} (applied on assignment)`
+              : " (no price change)"
+          }.`,
+          type: "BOOKING_ASSIGNMENT_UPDATED",
+          data: { bookingId: id, bookingRef: booking.bookingRef } as any,
+        })),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Category upgrade authorized",
+      data: {
+        id,
+        upgradeAllowedClasses: allowedClasses,
+        upgradeAuthorizedPrice: priceProvided ? newTotalPrice : null,
       },
     });
   },

@@ -2,7 +2,7 @@
 
 // ============================================
 // components/partner/invoices/invoices-panel.tsx
-// Partner Portal — Invoices (Monthly + Custom)
+// Partner Portal — Invoices (Daily + Custom)
 // ============================================
 
 import { useState, useEffect, useCallback } from "react";
@@ -22,6 +22,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import Logo from "@/components/shared/logo";
+import ImageCropper from "@/components/ui/image-cropper";
 import {
   Empty,
   EmptyHeader,
@@ -37,6 +38,7 @@ interface InvoiceListItem {
   id: string;
   invoiceNumber: string;
   month?: string;
+  paymentTerms?: string;
   dateRangeLabel?: string;
   periodStart: string;
   periodEnd: string;
@@ -64,6 +66,7 @@ interface InvoiceDetail {
     isCustom: boolean;
     dateRangeLabel: string | null;
     month: string;
+    paymentTerms?: string;
     periodStart: string;
     periodEnd: string;
     bookingCount: number;
@@ -187,7 +190,9 @@ function InvoiceDetailModal({
           <div className="flex justify-between items-start p-4 bg-neutral-800/50 rounded-lg">
             <Logo size="md" showTagline linkTo={null} />
             <div className="text-right">
-              <p className="text-sm text-gray-400">Invoice Period</p>
+              <p className="text-sm text-gray-400">
+                {invoice.isCustom ? "Invoice Period" : "Invoice Date"}
+              </p>
               <p className="text-white font-medium">
                 {invoice.isCustom ? invoice.dateRangeLabel : invoice.month}
               </p>
@@ -216,6 +221,9 @@ function InvoiceDetailModal({
             <div className="text-right">
               <p className="text-xs text-gray-500 mb-1">Due Date</p>
               <p className="text-white">{formatDate(invoice.dueDate)}</p>
+              <p className="text-[11px] text-gray-500 mt-1">
+                {invoice.paymentTerms || "Net 7"} · due 7 days after issue
+              </p>
               {/* Stage 3B-2: split the date label so the partner can tell
                   proof-submitted (waiting on admin) from paid (admin has
                   confirmed). `isConfirmed` is true only when status === PAID;
@@ -393,6 +401,13 @@ interface InvoicesPanelProps {
   }>;
 }
 
+function blobToFile(blob: Blob, originalName: string): File {
+  const type = blob.type || "image/jpeg";
+  const ext = type.split("/")[1] || "jpg";
+  const base = originalName.replace(/\.[^./\\]+$/, "") || "receipt";
+  return new File([blob], `${base}.${ext}`, { type });
+}
+
 export default function InvoicesPanel({
   refreshBadges,
   partnerStatus,
@@ -470,11 +485,35 @@ export default function InvoicesPanel({
   // Backend transitions invoice PENDING/OVERDUE → PROOF_UPLOADED and
   // notifies admin to review. Allowed when partner is APPROVED or
   // SUSPENDED (SUSPENDED is the recovery path for partners auto-
-  // suspended on the 6th-of-month cron — uploading proof gets them
+  // auto-suspended by the daily overdue sweep (Net 7 + 3-day grace)
+  // — uploading proof gets them
   // back into PROOF_UPLOADED and out of the next suspension cycle).
   const [uploadProofInvoice, setUploadProofInvoice] =
     useState<InvoiceListItem | null>(null);
   const [uploadProofFile, setUploadProofFile] = useState<File | null>(null);
+  // Receipt image cropper — same UX as profile document uploads.
+  const [cropSrc, setCropSrc] = useState<string | null>(null);
+  const [cropName, setCropName] = useState<string>("receipt");
+  const handleProofPick = (file: File | null) => {
+    if (!file) {
+      setUploadProofFile(null);
+      return;
+    }
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setCropSrc(reader.result as string);
+        setCropName(file.name);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setUploadProofFile(file);
+    }
+  };
+  const handleProofCropComplete = (blob: Blob) => {
+    setUploadProofFile(blobToFile(blob, cropName));
+    setCropSrc(null);
+  };
   const [isUploadingProof, setIsUploadingProof] = useState(false);
 
   const openUploadProofModal = (invoice: InvoiceListItem) => {
@@ -739,7 +778,7 @@ export default function InvoicesPanel({
               {invoices.map((inv) => (
                 <tr
                   key={inv.id}
-                  className="hover:bg-neutral-800/30 transition-colors"
+                  className={`hover:bg-neutral-800/30 transition-colors ${inv.isNew ? "bg-orange-500/5" : ""}`}
                 >
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -844,7 +883,7 @@ export default function InvoicesPanel({
                 <EmptyDescription className="text-gray-400">
                   {isCustom
                     ? "Generate a custom invoice using the date range selector above"
-                    : "Your monthly invoices will appear here once generated"}
+                    : "Your daily invoices will appear here once generated"}
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
@@ -954,7 +993,7 @@ export default function InvoicesPanel({
           onClick={() => setActiveTab("monthly")}
           className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === "monthly" ? "bg-luxury-gold text-black" : "bg-neutral-800 text-gray-400 hover:text-white"}`}
         >
-          Monthly Invoices
+          Daily Invoices
           {newInvoiceCount > 0 && (
             <span
               className={`ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded-full ${
@@ -1175,6 +1214,15 @@ export default function InvoicesPanel({
           the partner side. Partner uploads bank-transfer receipt (image
           or PDF) which becomes visible to admin in the payments panel
           for verification. */}
+      {cropSrc && (
+        <ImageCropper
+          imageSrc={cropSrc}
+          onCropComplete={handleProofCropComplete}
+          onCancel={() => setCropSrc(null)}
+          title="Crop Payment Receipt"
+        />
+      )}
+
       {uploadProofInvoice && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
           <div
@@ -1225,9 +1273,7 @@ export default function InvoicesPanel({
                 <input
                   type="file"
                   accept="image/*,application/pdf"
-                  onChange={(e) =>
-                    setUploadProofFile(e.target.files?.[0] || null)
-                  }
+                  onChange={(e) => handleProofPick(e.target.files?.[0] || null)}
                   disabled={isUploadingProof}
                   className="w-full text-xs text-gray-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:bg-luxury-gold/20 file:text-luxury-gold hover:file:bg-luxury-gold/30 file:cursor-pointer disabled:opacity-50"
                 />

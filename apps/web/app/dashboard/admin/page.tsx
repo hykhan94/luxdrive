@@ -9,14 +9,18 @@ import PricingStrategyPanel from "@/components/admin/pricing-strategy-panel";
 import AdminSettingsPanel from "@/components/admin/admin-settings-panel";
 import CitiesPanel from "@/components/admin/cities-panel";
 import PaymentsPanel from "@/components/admin/payments-panel";
+import EarningsPanel from "@/components/admin/earnings-panel";
 import UserDriverPanel from "@/components/admin/user-driver-panel";
 import RoleManagerPanel from "@/components/admin/role-manager-panel";
 import PartnerManagementPanel from "@/components/admin/partner-management-panel";
 import VendorManagementPanel from "@/components/admin/vendor-management-panel";
+import BookingOpsPanel from "@/components/admin/booking-ops-panel";
+import AdminTemporaryAssets from "@/components/admin/temporary-assets";
 import Logo, { LogoBadge } from "@/components/shared/logo";
 import {
   Users,
   DollarSign,
+  TrendingUp,
   Loader2,
   ChevronRight,
   ChevronLeft,
@@ -34,6 +38,7 @@ import {
   CreditCard,
   Grid3X3,
 } from "lucide-react";
+import { ClipboardCheck, Clock } from "lucide-react";
 import Link from "next/link";
 import { useNotification } from "@/lib/notification-context";
 import { api } from "@/lib/api";
@@ -44,8 +49,11 @@ type TabType =
   | "pricing"
   | "cities"
   | "payments"
+  | "earnings"
   | "partners"
   | "vendors"
+  | "bookingOps"
+  | "tempAssets"
   | "settings"
   | "users"
   | "roles";
@@ -57,8 +65,11 @@ const adminSidebarItems = [
   { id: "pricing" as TabType, label: "Pricing Strategy", icon: DollarSign },
   { id: "cities" as TabType, label: "Cities", icon: MapPin },
   { id: "payments" as TabType, label: "Payments", icon: CreditCard },
+  { id: "earnings" as TabType, label: "Earnings", icon: TrendingUp },
   { id: "partners" as TabType, label: "Partners", icon: Handshake },
   { id: "vendors" as TabType, label: "Vendors", icon: Building2 },
+  { id: "bookingOps" as TabType, label: "Booking Ops", icon: ClipboardCheck },
+  { id: "tempAssets" as TabType, label: "Temp Assets", icon: Clock },
   { id: "settings" as TabType, label: "Alerts & Settings", icon: Bell },
   { id: "users" as TabType, label: "Users", icon: Users },
   { id: "roles" as TabType, label: "Role Manager", icon: Shield },
@@ -418,6 +429,8 @@ export default function AdminDashboard() {
             <PaymentsPanel onBadgeUpdate={fetchSidebarBadges} />
           )}
 
+          {activeTab === "earnings" && <EarningsPanel />}
+
           {/* Users Tab */}
           {activeTab === "users" && <UserDriverPanel />}
 
@@ -426,6 +439,11 @@ export default function AdminDashboard() {
 
           {/* Alerts & Settings Tab */}
           {activeTab === "settings" && <AdminSettingsPanel />}
+
+          {/* Booking Ops Tab — deletion requests, temp assets, rules */}
+          {activeTab === "bookingOps" && <BookingOpsPanel />}
+
+          {activeTab === "tempAssets" && <AdminTemporaryAssets />}
         </div>
       </main>
     </div>

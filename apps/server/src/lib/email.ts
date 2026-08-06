@@ -963,3 +963,136 @@ ${booking.vehicleClass ? `Vehicle: ${booking.vehicleClass}\n` : ""}
 Reassign: ${ctaUrl}`,
   });
 }
+
+// ============================================
+// BOOKING MODIFIED — admin + vendor intimation
+// Sent when a partner or admin edits a live booking. The admin variant
+// reuses the ops shell; the vendor variant is a lighter notice that
+// tells them whether they must re-accept the changed trip.
+// ============================================
+export interface BookingModifiedEmailOpts {
+  bookingRef: string;
+  actorLabel: string; // e.g. "Partner ACME Co" or "Admin"
+  changedFields: Array<{ label: string; from: string; to: string }>;
+  requiresVendorConsent: boolean;
+  pickupAddress?: string | null;
+  dropoffAddress?: string | null;
+}
+
+export async function sendBookingModifiedAdminEmail(
+  opts: BookingModifiedEmailOpts,
+): Promise<SendEmailResult> {
+  const skipped = skipIfNoAdminEmail("sendBookingModifiedAdminEmail");
+  if (skipped) return skipped;
+
+  const route = formatRoute(opts.pickupAddress, opts.dropoffAddress);
+  const ctaUrl = `${FRONTEND_URL}/dashboard/admin?tab=bookings&ref=${encodeURIComponent(
+    opts.bookingRef,
+  )}`;
+
+  const detailsRows = opts.changedFields.map((c) => ({
+    label: c.label,
+    value: `${escapeHtml(c.from || "—")} → <span style="color:#C9A961;">${escapeHtml(
+      c.to || "—",
+    )}</span>`,
+  }));
+
+  const alertBlockHtml = opts.requiresVendorConsent
+    ? `<div style="background:#2a2410;border:1px solid #4a3f16;border-radius:8px;padding:12px 14px;color:#e8d9a8;font-size:13px;">Awaiting the vendor’s accept / reject on the changed trip.</div>`
+    : undefined;
+
+  return sendEmail({
+    to: ADMIN_NOTIFICATION_EMAIL!,
+    from: BOOKINGS_FROM,
+    subject: `[LuxDrive] ${opts.bookingRef} · Modified · ${route}`,
+    html: renderAdminShell({
+      preheader: `${opts.actorLabel} modified ${opts.bookingRef}`,
+      eventLabel: "Booking Modified",
+      eventLabelColor: "#C9A961",
+      bookingRef: opts.bookingRef,
+      subtitle: `Modified by <span style="color:#C9A961;">${escapeHtml(
+        opts.actorLabel,
+      )}</span>`,
+      alertBlockHtml,
+      detailsRows,
+      ctaLabel: "Review in admin",
+      ctaUrl,
+    }),
+  });
+}
+
+export async function sendBookingModifiedVendorEmail(
+  opts: BookingModifiedEmailOpts & { to: string },
+): Promise<SendEmailResult> {
+  if (!opts.to) return { ok: true, id: "no-vendor-email" };
+
+  const rows = opts.changedFields
+    .map(
+      (c) =>
+        `<tr><td style="padding:6px 14px 6px 0;color:#777;font-size:13px;">${escapeHtml(
+          c.label,
+        )}</td><td style="padding:6px 0;font-size:14px;"><span style="color:#aaa;text-decoration:line-through;">${escapeHtml(
+          c.from || "—",
+        )}</span> &nbsp;→&nbsp; <b>${escapeHtml(c.to || "—")}</b></td></tr>`,
+    )
+    .join("");
+
+  const action = opts.requiresVendorConsent
+    ? `<p style="font-size:14px;color:#111;">Please review this change and <b>accept or reject</b> the booking from your dashboard.</p>`
+    : `<p style="font-size:14px;color:#444;">This booking’s details were updated. No action is required unless it affects your assignment.</p>`;
+
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:8px 0;">`
+    + `<h2 style="color:#111;font-size:18px;margin:0 0 12px;">Booking ${escapeHtml(opts.bookingRef)} was modified</h2>`
+    + `<table style="border-collapse:collapse;width:100%;margin:0 0 8px;">${rows}</table>`
+    + action
+    + `</div>`;
+
+  return sendEmail({
+    to: opts.to,
+    from: BOOKINGS_FROM,
+    subject: `[LuxDrive] ${opts.bookingRef} · Trip details changed`,
+    html,
+  });
+}
+
+// ============================================
+// MODIFICATION REJECTED BY VENDOR — admin intimation
+// The vendor declined a change on a confirmed booking; it has been
+// returned to PENDING for the admin to re-assign manually.
+// ============================================
+export async function sendModificationRejectedAdminEmail(opts: {
+  bookingRef: string;
+  vendorCompanyName: string;
+  reason: string;
+  pickupAddress?: string | null;
+  dropoffAddress?: string | null;
+}): Promise<SendEmailResult> {
+  const skipped = skipIfNoAdminEmail("sendModificationRejectedAdminEmail");
+  if (skipped) return skipped;
+
+  const route = formatRoute(opts.pickupAddress, opts.dropoffAddress);
+  const ctaUrl = `${FRONTEND_URL}/dashboard/admin?tab=bookings&ref=${encodeURIComponent(
+    opts.bookingRef,
+  )}`;
+
+  return sendEmail({
+    to: ADMIN_NOTIFICATION_EMAIL!,
+    from: BOOKINGS_FROM,
+    subject: `[LuxDrive] ${opts.bookingRef} · Change rejected · reassign needed`,
+    html: renderAdminShell({
+      preheader: `${opts.vendorCompanyName} rejected the change on ${opts.bookingRef}`,
+      eventLabel: "Change Rejected",
+      eventLabelColor: "#d9534f",
+      bookingRef: opts.bookingRef,
+      subtitle: `Rejected by <span style="color:#d9534f;">${escapeHtml(
+        opts.vendorCompanyName,
+      )}</span> · returned to pending`,
+      alertBlockHtml: `<div style="background:#2a1414;border:1px solid #4a1f1f;border-radius:8px;padding:12px 14px;color:#f0c9c9;font-size:13px;">Reason: ${escapeHtml(
+        opts.reason,
+      )}</div>`,
+      detailsRows: [{ label: "Route", value: escapeHtml(route) }],
+      ctaLabel: "Reassign in admin",
+      ctaUrl,
+    }),
+  });
+}

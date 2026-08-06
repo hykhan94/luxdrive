@@ -40,6 +40,7 @@ export const getSidebarBadges = asyncWrapper(
     const [
       totalUnreadNotifications,
       newBookingRequests,
+      pendingBookingChanges,
       unreadBookingNotifications,
       // Drivers section
       pendingDriverReviews,
@@ -64,12 +65,28 @@ export const getSidebarBadges = asyncWrapper(
       prisma.bookingAssignmentOffer.count({
         where: { vendorId: vendor.id, status: "PENDING" },
       }),
+      // Confirmed bookings with a partner/admin change awaiting this
+      // vendor's accept/reject — drives the "changes to review" nav badge.
+      prisma.booking.count({
+        where: {
+          vendorId: vendor.id,
+          modifications: { some: { vendorDecision: "PENDING" } },
+        },
+      }),
       prisma.notification.count({
         where: {
           userId,
           isRead: false,
           type: {
-            in: ["BOOKING_ASSIGNED", "BOOKING_REASSIGNED", "BOOKING_CANCELLED"],
+            in: [
+              "BOOKING_ASSIGNED",
+              "BOOKING_REASSIGNED",
+              "BOOKING_CANCELLED",
+              // A change to a booking the vendor holds (e.g. admin-authorized
+              // category upgrade) — surfaces on the Bookings sidebar badge.
+              "BOOKING_ASSIGNMENT_UPDATED",
+              "BOOKING_MODIFIED",
+            ],
           },
         },
       }),
@@ -141,8 +158,12 @@ export const getSidebarBadges = asyncWrapper(
       // unpaid VendorReceipts the vendor still owed admin; that table
       // and that direction no longer exist. Stage 3B may refine this
       // when the vendor earnings UI is rebuilt for the new flow.
+      // Payouts with an unseen update for the vendor — a fresh payout
+      // (default unseen) or one admin just marked PAID + uploaded the
+      // receipt (resets the flag). Clears per-payout when the vendor
+      // opens it, so the badge tracks "new payouts you haven't seen".
       prisma.vendorPayout.count({
-        where: { vendorId: vendor.id, status: "PENDING" },
+        where: { vendorId: vendor.id, isViewedByVendor: false },
       }),
       // Unread payment-confirmed notifications — keeps the earnings
       // badge lit briefly after admin marks a receipt paid, so the
@@ -213,7 +234,9 @@ export const getSidebarBadges = asyncWrapper(
       success: true,
       data: {
         notifications: totalUnreadNotifications,
-        bookings: Math.max(newBookingRequests, unreadBookingNotifications),
+        bookings:
+          Math.max(newBookingRequests, unreadBookingNotifications) +
+          pendingBookingChanges,
         fleet: fleetBadge,
         drivers: driversBadge,
         earnings: pendingReceipts + unreadPaymentConfirmedNotifications,
@@ -236,6 +259,7 @@ export const getSidebarBadges = asyncWrapper(
         breakdown: {
           bookings: {
             newRequests: newBookingRequests,
+            pendingChanges: pendingBookingChanges,
             unreadNotifications: unreadBookingNotifications,
           },
           fleet: {

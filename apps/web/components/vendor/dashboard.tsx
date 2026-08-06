@@ -7,6 +7,10 @@ import DocExpiryIndicator from "@/components/ui/doc-expiry-indicator";
 import { useState, useEffect, useCallback } from "react";
 import { vendorApi } from "@/lib/api";
 import {
+  BookingActivityRow,
+  deriveVendorActivity,
+} from "@/components/shared/booking-activity-row";
+import {
   Wallet,
   CalendarDays,
   Car,
@@ -800,85 +804,34 @@ export default function VendorDashboard({
           </div>
           <div className="space-y-3">
             {recentBookings.slice(0, 4).map((booking) => {
-              const isHourly = booking.tripType === "HOURLY";
-              // Vendor headline figure is the payout only. Under
-              // current backend rules a booking on the vendor's list
-              // always has a payout set (Booking.vendorId is only
-              // written alongside vendorPayoutAmount in the same
-              // update — see admin/booking.controller and
-              // vendor/bookings.controller). We render an em-dash for
-              // the theoretical null case rather than falling back to
-              // the partner's totalPrice, which would leak the
-              // partner rate.
-              const hasPayout = booking.vendorPayoutAmount != null;
+              const a = deriveVendorActivity(booking);
+              const vehicle = (booking.vehicleClass || "")
+                .toLowerCase()
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (c: string) => c.toUpperCase());
+              const sub =
+                booking.tripType === "HOURLY"
+                  ? [booking.city, booking.pickupAddress, vehicle]
+                      .filter(Boolean)
+                      .join(" · ")
+                  : [
+                      booking.route ||
+                        `${booking.pickupAddress} → ${booking.dropoffAddress}`,
+                      vehicle,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
               return (
-                <div
+                <BookingActivityRow
                   key={booking.id}
-                  className="p-3 bg-neutral-800/50 rounded-lg flex flex-col gap-2"
-                >
-                  {/* Top row — ref + descriptor badges + amount.
-                      The badges sit next to the ref so the eye picks
-                      up trip type + city + class in one glance. */}
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                      <span className="text-sm font-medium text-white font-mono">
-                        {booking.bookingRef}
-                      </span>
-                      <MiniTripTypeBadgeVendor
-                        tripType={booking.tripType}
-                        hours={booking.hours}
-                      />
-                      {isHourly && <MiniCityBadgeVendor city={booking.city} />}
-                      <MiniVehicleClassBadgeVendor
-                        vehicleClass={booking.vehicleClass}
-                      />
-                    </div>
-                    <div className="text-right flex-shrink-0">
-                      <p className="text-sm font-semibold text-luxury-gold">
-                        {hasPayout
-                          ? `SAR ${Number(booking.vendorPayoutAmount).toLocaleString()}`
-                          : "—"}
-                      </p>
-                      <p className="text-[10px] text-gray-500">Payout</p>
-                    </div>
-                  </div>
-
-                  {/* Guest + route line. HOURLY shows pickup only
-                      (no fixed drop-off); ONE_WAY shows the route
-                      string. Same logic admin and partner apply so
-                      the row reads the same way across portals. */}
-                  <div className="flex items-start gap-2 text-xs text-gray-400">
-                    <MapPin className="w-3 h-3 flex-shrink-0 mt-0.5 text-green-400" />
-                    <span className="truncate min-w-0 flex-1">
-                      <span className="text-gray-300">{booking.guestName}</span>
-                      <span className="text-gray-500"> · </span>
-                      {isHourly
-                        ? booking.pickupAddress
-                        : booking.route ||
-                          `${booking.pickupAddress} → ${booking.dropoffAddress}`}
-                    </span>
-                  </div>
-
-                  {/* Footer — date/time on the left, status pill on
-                      the right. Date format intentionally short so
-                      the row stays one-line on most viewports. */}
-                  <div className="flex items-center justify-between pt-1 border-t border-neutral-700/50">
-                    <p className="text-[11px] text-gray-500">
-                      {new Date(booking.tripDate).toLocaleDateString("en-SA", {
-                        month: "short",
-                        day: "numeric",
-                      })}{" "}
-                      at {booking.tripTime}
-                    </p>
-                    <span
-                      className={`inline-block px-2 py-0.5 text-[10px] rounded-full border ${getStatusColor(booking.status)}`}
-                    >
-                      {formatStatus(booking.status)}
-                    </span>
-                  </div>
-                </div>
+                  name={booking.guestName}
+                  subline={sub}
+                  onClick={() => onTabChange("bookings")}
+                  {...a}
+                />
               );
             })}
+
             {recentBookings.length === 0 && (
               <Empty className="py-8 border border-dashed border-neutral-700 rounded-lg">
                 <EmptyHeader>

@@ -40,6 +40,23 @@ export function formatDate(date: Date | null): string | null {
   return `${day} ${month}`;
 }
 
+// Same as formatDate but with the clock time appended, e.g.
+// "31 Jul, 2:45 PM". Every journey milestone that has actually
+// happened carries one of these so the timeline reads with real
+// timestamps, not just a bare day.
+export function formatDateTime(date: Date | null): string | null {
+  if (!date) return null;
+  const d = new Date(date);
+  const day = d.getDate();
+  const month = d.toLocaleString("en-US", { month: "short" });
+  const time = d.toLocaleString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  return `${day} ${month}, ${time}`;
+}
+
 // Builds the "vendor assignment" section that admin sees for each
 // booking. Under the new offer model the booking moves through:
 //   PENDING                  → no offer yet, "Pending Assignment"
@@ -89,15 +106,39 @@ export function buildVendorAssignment(
             id: booking.driver.id,
             name: `${booking.driver.firstName} ${booking.driver.lastName}`,
             phone: booking.driver.phone,
+            photoUrl: booking.driver.photoUrl ?? null,
+            rating: booking.driver.rating ?? null,
           }
-        : null,
+        : booking.temporaryDriver
+          ? {
+              id: booking.temporaryDriver.id,
+              name: `${booking.temporaryDriver.name} (temporary)`,
+              phone: booking.temporaryDriver.mobile,
+              photoUrl: booking.temporaryDriver.photoUrl ?? null,
+              rating: null,
+            }
+          : null,
       vehicle: booking.vehicle
         ? {
             id: booking.vehicle.id,
             plateNumber: booking.vehicle.plateNumber,
             name: `${booking.vehicle.make} ${booking.vehicle.model}`,
+            year: booking.vehicle.year ?? null,
+            color: booking.vehicle.color ?? null,
+            seats: booking.vehicle.seats ?? null,
+            category: booking.vehicle.category ?? null,
           }
-        : null,
+        : booking.temporaryVehicle
+          ? {
+              id: booking.temporaryVehicle.id,
+              plateNumber: null,
+              name: `${booking.temporaryVehicle.model} (temporary)`,
+              year: null,
+              color: null,
+              seats: null,
+              category: booking.temporaryVehicle.vehicleClass,
+            }
+          : null,
       vendorPayoutAmount: booking.vendorPayoutAmount
         ? Number(booking.vendorPayoutAmount)
         : null,
@@ -184,98 +225,101 @@ export function buildVendorAssignment(
 export function buildStatusTimeline(
   booking: any,
   rejectionReasons: Array<any>,
+  awaitingReassignment = false,
+  assignedAt: Date | null = null,
 ): Array<any> {
+  // The JOURNEY only — the intended happy path:
+  //   Booking Created -> Assigned to Vendor -> Vendor Accepted ->
+  //   Trip Started -> Trip Completed
+  // Ad-hoc edits (partner/admin/vendor field changes, driver/vehicle
+  // swaps) are deliberately NOT shown here; they live in the separate
+  // change-history card so the two aren't tangled together. Each step
+  // that has actually happened carries a real date + time.
   const timeline: Array<any> = [];
+  const status = booking.status;
 
   timeline.push({
     status: "Booking Created",
-    date: formatDate(booking.createdAt),
+    date: formatDateTime(booking.createdAt),
     completed: true,
   });
 
-  if (rejectionReasons.length > 0) {
-    timeline.push({
-      status: `Vendor Rejected (${rejectionReasons.length})`,
-      date: null,
-      completed: true,
-    });
-
-    // Booking sits back at PENDING after a rejection until admin
-    // re-assigns or the cascade picks the next vendor.
-    if (booking.status === "PENDING" && !booking.vendorId) {
-      timeline.push({
-        status: "Awaiting Reassignment",
-        date: null,
-        completed: false,
-        actionNeeded: true,
-      });
-      return timeline;
-    }
-  }
-
-  if (booking.vendorId) {
-    timeline.push({
-      status: "Assigned to Vendor",
-      date: null,
-      completed: true,
-    });
-  } else if (booking.status === "PENDING") {
-    timeline.push({
-      status: "Assigned to Vendor",
-      date: null,
-      completed: false,
-    });
-    return timeline;
-  }
-
-  if (booking.confirmedAt) {
-    timeline.push({
-      status: "Vendor Accepted",
-      date: null,
-      completed: true,
-    });
-  } else if (
-    booking.status === "ASSIGNMENT_OFFERED" ||
-    booking.status === "ASSIGNMENT_RE_OFFERED"
-  ) {
-    timeline.push({
-      status:
-        booking.status === "ASSIGNMENT_RE_OFFERED"
-          ? "Vendor Re-offered"
-          : "Vendor Accepted",
-      date: null,
-      completed: false,
-    });
-    return timeline;
-  }
-
-  if (booking.status === "CONFIRMED") {
-    timeline.push({
-      status: "Trip Pending",
-      date: null,
-      completed: false,
-    });
-  } else if (booking.status === "IN_PROGRESS") {
-    timeline.push({
-      status: "In Progress",
-      date: null,
-      completed: true,
-    });
-  } else if (booking.status === "COMPLETED") {
-    timeline.push({
-      status: "Completed",
-      date: formatDate(booking.completedAt),
-      completed: true,
-    });
-  }
-
-  if (booking.status === "CANCELLED") {
+  // Terminal path: a cancelled booking stops here.
+  if (status === "CANCELLED") {
     timeline.push({
       status: "Cancelled",
-      date: null,
+      date: formatDateTime(booking.cancelledAt),
+      completed: true,
+      actionNeeded: true,
+    });
+    return timeline;
+  }
+
+  // A change released the booking (or a rejection sent it back), so it's
+  // sitting with admin to re-assign — a meaningful branch off the path.
+  const needsReassignment =
+    awaitingReassignment ||
+    (rejectionReasons.length > 0 && status === "PENDING" && !booking.vendorId);
+  if (needsReassignment) {
+    timeline.push({
+      status: "Assigned to Vendor",
+      date: formatDateTime(assignedAt),
       completed: true,
     });
+    timeline.push({
+      status: "Awaiting Reassignment",
+      date: null,
+      completed: false,
+      actionNeeded: true,
+      detail:
+        "Booking details changed — assign a vendor that serves the new selection.",
+    });
+    return timeline;
   }
+
+  const everAssigned =
+    Boolean(booking.vendorId) ||
+    Boolean(booking.confirmedAt) ||
+    [
+      "ASSIGNMENT_OFFERED",
+      "ASSIGNMENT_RE_OFFERED",
+      "CONFIRMED",
+      "IN_PROGRESS",
+      "COMPLETED",
+    ].includes(status);
+  const accepted =
+    Boolean(booking.confirmedAt) ||
+    ["IN_PROGRESS", "COMPLETED"].includes(status);
+  const started = ["IN_PROGRESS", "COMPLETED"].includes(status);
+  const completed = status === "COMPLETED";
+
+  timeline.push({
+    status: "Assigned to Vendor",
+    date: everAssigned ? formatDateTime(assignedAt) : null,
+    completed: everAssigned,
+    current: !everAssigned && status === "PENDING",
+  });
+
+  timeline.push({
+    status: "Vendor Accepted",
+    date: accepted ? formatDateTime(booking.confirmedAt) : null,
+    completed: accepted,
+    current: !accepted && everAssigned,
+  });
+
+  timeline.push({
+    status: "Trip Started",
+    date: null,
+    completed: started,
+    current: !started && accepted,
+  });
+
+  timeline.push({
+    status: "Trip Completed",
+    date: completed ? formatDateTime(booking.completedAt) : null,
+    completed,
+    current: false,
+  });
 
   return timeline;
 }

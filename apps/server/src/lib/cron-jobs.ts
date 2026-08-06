@@ -22,6 +22,16 @@
 
 import { prisma } from "./prisma";
 
+// ============================================
+// PARTNER BILLING POLICY (daily invoicing)
+// Each daily invoice carries Net-7 payment terms (due 7 days after
+// issue). A partner is auto-suspended only once an invoice is more than
+// PARTNER_SUSPENSION_GRACE_DAYS past its due date (a rolling, per-invoice
+// aging model — replaces the retired "settle by the 9th of the month").
+// ============================================
+export const PARTNER_PAYMENT_TERMS_DAYS = 7;
+export const PARTNER_SUSPENSION_GRACE_DAYS = 3;
+
 type JobResult = {
   // Counts so callers (cron log line, HTTP response, monitoring)
   // can report what actually happened.
@@ -369,7 +379,8 @@ export async function runPartnerOverdueSuspension(): Promise<{
   // suspension cron is firing the day after their deadline.
   const cutoff = new Date(now);
   cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - 1);
+  // Grace: only suspend once an invoice is more than N days past due.
+  cutoff.setDate(cutoff.getDate() - PARTNER_SUSPENSION_GRACE_DAYS);
 
   // PROOF_UPLOADED is explicitly excluded — partner already acted,
   // status reflects "waiting on admin", not "waiting on partner".
@@ -502,22 +513,41 @@ export async function runPartnerOverdueSuspension(): Promise<{
 //
 // Returns { created, skipped, totalPartners } for the caller to log.
 // ============================================================
-export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
+export async function runPartnerDailyInvoiceGeneration(
+  targetDay?: Date,
+): Promise<{
   created: number;
   skipped: number;
   totalPartners: number;
 }> {
   const now = new Date();
-  const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevMonthEnd = new Date(
-    now.getFullYear(),
-    now.getMonth(),
+  // Default (cron) invoices YESTERDAY. When a targetDay is passed
+  // (manual run / backfill), invoice that exact calendar day instead.
+  const ref = targetDay || now;
+  const dayOffset = targetDay ? 0 : -1;
+  const prevDayStart = new Date(
+    ref.getFullYear(),
+    ref.getMonth(),
+    ref.getDate() + dayOffset,
     0,
+    0,
+    0,
+  );
+  const prevDayEnd = new Date(
+    ref.getFullYear(),
+    ref.getMonth(),
+    ref.getDate() + dayOffset,
     23,
     59,
     59,
   );
-  const dueDate = new Date(now.getFullYear(), now.getMonth(), 5);
+  // Overdue after 3 days, per the PartnerInvoice schema contract.
+  // Net 7: each daily invoice is due 7 days after it is issued.
+  const dueDate = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + PARTNER_PAYMENT_TERMS_DAYS,
+  );
 
   const partners = await prisma.partner.findMany({
     where: { status: "APPROVED" },
@@ -534,8 +564,8 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
     const existing = await prisma.partnerInvoice.findFirst({
       where: {
         partnerId: partner.id,
-        periodStart: prevMonthStart,
-        periodEnd: prevMonthEnd,
+        periodStart: prevDayStart,
+        periodEnd: prevDayEnd,
         isCustom: false,
       },
     });
@@ -552,7 +582,7 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
       where: {
         partnerId: partner.id,
         status: "COMPLETED",
-        tripDate: { gte: prevMonthStart, lte: prevMonthEnd },
+        tripDate: { gte: prevDayStart, lte: prevDayEnd },
         isCustomInvoiced: false,
       },
       select: { id: true, totalPrice: true },
@@ -579,14 +609,14 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
         .substring(0, 3)
         .toUpperCase() + "XXX"
     ).substring(0, 3);
-    const yearMonth = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const ymd = `${prevDayStart.getFullYear()}${String(prevDayStart.getMonth() + 1).padStart(2, "0")}${String(prevDayStart.getDate()).padStart(2, "0")}`;
     const existingCount = await prisma.partnerInvoice.count({
       where: {
         partnerId: partner.id,
-        invoiceNumber: { startsWith: `${prefix}-INV-${yearMonth}-` },
+        invoiceNumber: { startsWith: `${prefix}-INV-${ymd}-` },
       },
     });
-    const invoiceNumber = `${prefix}-INV-${yearMonth}-${String(existingCount + 1).padStart(3, "0")}`;
+    const invoiceNumber = `${prefix}-INV-${ymd}-${String(existingCount + 1).padStart(3, "0")}`;
 
     const invoice = await prisma.partnerInvoice.create({
       data: {
@@ -594,9 +624,9 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
         partnerId: partner.id,
         amount: totalAmount,
         bookingCount: bookings.length,
-        periodStart: prevMonthStart,
-        periodEnd: prevMonthEnd,
-        generationType: "MONTHLY",
+        periodStart: prevDayStart,
+        periodEnd: prevDayEnd,
+        generationType: "DAILY",
         dueDate,
         status: "PENDING",
         isCustom: false,
@@ -616,8 +646,8 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
     await prisma.notification.create({
       data: {
         userId: partner.userId,
-        title: "Monthly Invoice Generated",
-        message: `Your invoice ${invoiceNumber} for ${prevMonthStart.toLocaleString("default", { month: "long", year: "numeric" })} is ready. ${bookings.length} rides totaling SAR ${totalAmount.toFixed(2)}. Due by ${dueDate.toLocaleDateString()}.`,
+        title: "Daily Invoice Generated",
+        message: `Your invoice ${invoiceNumber} for ${prevDayStart.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })} is ready. ${bookings.length} rides totaling SAR ${totalAmount.toFixed(2)}. Due by ${dueDate.toLocaleDateString()}.`,
         type: "INVOICE_GENERATED",
         data: { invoiceId: invoice.id, invoiceNumber },
       },
@@ -632,7 +662,7 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
       await prisma.notification.createMany({
         data: adminUsers.map((admin) => ({
           userId: admin.id,
-          title: "Monthly Invoice Generated",
+          title: "Daily Invoice Generated",
           message: `${partner.companyName} — ${invoiceNumber}: ${bookings.length} rides, SAR ${totalAmount.toFixed(2)}`,
           type: "PARTNER_MONTHLY_INVOICE",
           data: {
@@ -668,7 +698,7 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
 // return type are otherwise unchanged so the admin "Run Now"
 // endpoint that already calls it keeps working.
 //
-// `targetMonth`, when provided, can be any date inside the period
+// `targetDay`, when provided, can be any date inside the period
 // to generate for — the function derives month boundaries itself.
 // Pass `new Date(2026, 4, 15)` to generate payouts for May 2026,
 // regardless of what day inside May you pick. Used by the admin
@@ -679,8 +709,8 @@ export async function runPartnerMonthlyInvoiceGeneration(): Promise<{
 //
 // Returns a summary so the caller can log results.
 // ============================================================
-export async function runVendorMonthlyPayoutGeneration(
-  targetMonth?: Date,
+export async function runVendorDailyPayoutGeneration(
+  targetDay?: Date,
 ): Promise<{
   created: number;
   skipped: number;
@@ -696,14 +726,30 @@ export async function runVendorMonthlyPayoutGeneration(
 }> {
   // Default to previous month — matches the cron's once-per-month
   // 1st-of-month firing (generates for the month just ended).
-  const referenceDate = targetMonth || new Date();
-  const targetMonthStart = targetMonth
-    ? new Date(targetMonth.getFullYear(), targetMonth.getMonth(), 1)
-    : new Date(referenceDate.getFullYear(), referenceDate.getMonth() - 1, 1);
-  const targetMonthEnd = new Date(
-    targetMonthStart.getFullYear(),
-    targetMonthStart.getMonth() + 1,
-    0,
+  const referenceDate = targetDay || new Date();
+  // Default (cron) generates for YESTERDAY. When admin passes a
+  // targetDay (backfill), generate for that exact calendar day.
+  const targetDayStart = targetDay
+    ? new Date(
+        targetDay.getFullYear(),
+        targetDay.getMonth(),
+        targetDay.getDate(),
+        0,
+        0,
+        0,
+      )
+    : new Date(
+        referenceDate.getFullYear(),
+        referenceDate.getMonth(),
+        referenceDate.getDate() - 1,
+        0,
+        0,
+        0,
+      );
+  const targetDayEnd = new Date(
+    targetDayStart.getFullYear(),
+    targetDayStart.getMonth(),
+    targetDayStart.getDate(),
     23,
     59,
     59,
@@ -729,8 +775,8 @@ export async function runVendorMonthlyPayoutGeneration(
     const existing = await prisma.vendorPayout.findFirst({
       where: {
         vendorId: vendor.id,
-        periodStart: targetMonthStart,
-        periodEnd: targetMonthEnd,
+        periodStart: targetDayStart,
+        periodEnd: targetDayEnd,
       },
     });
 
@@ -748,7 +794,7 @@ export async function runVendorMonthlyPayoutGeneration(
       where: {
         vendorId: vendor.id,
         status: "COMPLETED",
-        tripDate: { gte: targetMonthStart, lte: targetMonthEnd },
+        tripDate: { gte: targetDayStart, lte: targetDayEnd },
       },
       _sum: { vendorPayoutAmount: true },
       _count: { id: true },
@@ -768,14 +814,14 @@ export async function runVendorMonthlyPayoutGeneration(
         .substring(0, 3)
         .toUpperCase() + "XXX"
     ).substring(0, 3);
-    const yearMonth = `${targetMonthStart.getFullYear()}${String(targetMonthStart.getMonth() + 1).padStart(2, "0")}`;
+    const ymd = `${targetDayStart.getFullYear()}${String(targetDayStart.getMonth() + 1).padStart(2, "0")}${String(targetDayStart.getDate()).padStart(2, "0")}`;
     const existingCount = await prisma.vendorPayout.count({
       where: {
         vendorId: vendor.id,
-        receiptNumber: { startsWith: `${prefix}-RCP-${yearMonth}-` },
+        receiptNumber: { startsWith: `${prefix}-RCP-${ymd}-` },
       },
     });
-    const receiptNumber = `${prefix}-RCP-${yearMonth}-${String(existingCount + 1).padStart(3, "0")}`;
+    const receiptNumber = `${prefix}-RCP-${ymd}-${String(existingCount + 1).padStart(3, "0")}`;
 
     const receipt = await prisma.vendorPayout.create({
       data: {
@@ -783,9 +829,9 @@ export async function runVendorMonthlyPayoutGeneration(
         vendorId: vendor.id,
         amount: totalAmount,
         bookingCount: bookingsAgg._count.id,
-        periodStart: targetMonthStart,
-        periodEnd: targetMonthEnd,
-        generationType: "MONTHLY",
+        periodStart: targetDayStart,
+        periodEnd: targetDayEnd,
+        generationType: "DAILY",
         status: "PENDING",
       },
     });
@@ -795,8 +841,8 @@ export async function runVendorMonthlyPayoutGeneration(
     await prisma.notification.create({
       data: {
         userId: vendor.userId,
-        title: "Monthly Payout Generated",
-        message: `Your payout ${receiptNumber} for ${targetMonthStart.toLocaleString("default", { month: "long", year: "numeric" })} is being processed. ${bookingsAgg._count.id} completed rides, SAR ${totalAmount.toFixed(2)}. You'll be notified when payment lands.`,
+        title: "Daily Payout Generated",
+        message: `Your payout ${receiptNumber} for ${targetDayStart.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })} is being processed. ${bookingsAgg._count.id} completed rides, SAR ${totalAmount.toFixed(2)}. You'll be notified when payment lands.`,
         type: "VENDOR_RECEIPT_GENERATED",
         data: { receiptId: receipt.id, receiptNumber, amount: totalAmount },
       },

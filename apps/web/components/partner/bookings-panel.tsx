@@ -28,14 +28,20 @@ import {
   AlertCircle,
   Star,
 } from "lucide-react";
-import {
-  Empty,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-  EmptyDescription,
-} from "@/components/ui/empty";
 import { CalendarX } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
+import { ChevronUp, ChevronDown, ArrowUpDown } from "lucide-react";
+import {
+  ModificationTimeline,
+  type BookingModificationEntry,
+} from "@/components/shared/modification-timeline";
+import { DriverCard, VehicleCard } from "@/components/shared/assignment-cards";
+import { ModifyBookingDrawer, RequestDeletionDialog } from "./booking-actions";
+import { LockedChangeButton } from "@/components/shared/locked-change-button";
+import {
+  BookingActivityRow,
+  derivePartnerActivity,
+} from "@/components/shared/booking-activity-row";
 import { proxiedImageUrl } from "@/lib/image-url";
 import {
   type BookingShareInput,
@@ -73,6 +79,7 @@ interface BookingListItem {
   totalPrice: number;
   status: string;
   statusLabel: string;
+  modificationCount: number;
 }
 
 interface TabCounts {
@@ -111,6 +118,11 @@ interface BookingDetail {
   shareToken: string | null;
   status: string;
   statusLabel: string;
+  changeLocked?: boolean;
+  changeCutoffHours?: number | null;
+  modificationCount: number;
+  modifiedAt: string | null;
+  modifications: BookingModificationEntry[];
   timeline: TimelineStep[];
   customer: { name: string; phone: string; email: string | null };
   trip: {
@@ -907,6 +919,8 @@ function BookingDetailModal({
   booking,
   onClose,
   onCancel,
+  onModify,
+  onRequestDeletion,
   onDownloadPO,
   cancelling,
   downloadingPO,
@@ -914,11 +928,17 @@ function BookingDetailModal({
   booking: BookingDetail;
   onClose: () => void;
   onCancel: () => void;
+  onModify: () => void;
+  onRequestDeletion: () => void;
   onDownloadPO: () => void;
   cancelling: boolean;
   downloadingPO: boolean;
 }) {
   const canCancel = ["PENDING", "AWAITING_VENDOR"].includes(booking.status);
+  const canModify = !["COMPLETED", "CANCELLED", "IN_PROGRESS"].includes(
+    booking.status,
+  );
+  const canDelete = ["COMPLETED", "CANCELLED"].includes(booking.status);
   const [open, setOpen] = useState(false);
 
   // Slide-in on mount: open=false on first paint (offscreen right),
@@ -973,6 +993,12 @@ function BookingDetailModal({
         </div>
 
         <div className="p-5 space-y-5">
+          {booking.modifications && booking.modifications.length > 0 && (
+            <ModificationTimeline
+              modifications={booking.modifications}
+              defaultOpen
+            />
+          )}
           {/* Status Timeline */}
           <div className="p-4 bg-neutral-800/50 rounded-lg">
             <p className="text-xs text-gray-500 mb-3 uppercase tracking-wide">
@@ -1318,20 +1344,27 @@ function BookingDetailModal({
               <div>
                 <p className="text-xs text-gray-500 mb-1">Booking Fare</p>
                 <p className="text-2xl font-bold text-luxury-gold">
-                  SAR {booking.pricing.totalPrice.toLocaleString()}
+                  {booking.pricing.totalPrice > 0
+                    ? `SAR ${booking.pricing.totalPrice.toLocaleString()}`
+                    : "Awaiting pricing"}
                 </p>
-                <div className="text-xs text-gray-400 mt-1 space-y-0.5">
-                  <p>Base: SAR {booking.pricing.basePrice.toLocaleString()}</p>
-                  {booking.pricing.peakSurcharge > 0 && (
+                {booking.pricing.totalPrice > 0 && (
+                  <div className="text-xs text-gray-400 mt-1 space-y-0.5">
                     <p>
-                      Peak ({booking.pricing.peakMultiplier}x): +SAR{" "}
-                      {booking.pricing.peakSurcharge.toLocaleString()}
+                      Base: SAR {booking.pricing.basePrice.toLocaleString()}
                     </p>
-                  )}
-                  <p>
-                    VAT (15%): SAR {booking.pricing.vatAmount.toLocaleString()}
-                  </p>
-                </div>
+                    {booking.pricing.peakSurcharge > 0 && (
+                      <p>
+                        Peak ({booking.pricing.peakMultiplier}x): +SAR{" "}
+                        {booking.pricing.peakSurcharge.toLocaleString()}
+                      </p>
+                    )}
+                    <p>
+                      VAT (15%): SAR{" "}
+                      {booking.pricing.vatAmount.toLocaleString()}
+                    </p>
+                  </div>
+                )}
               </div>
               <button
                 onClick={onDownloadPO}
@@ -1370,130 +1403,31 @@ function BookingDetailModal({
               `.split(' ')[0]` handles "Mercedes Benz" → "MERCEDES"
               cleanly. Substring color match below means even typos
               like "Super Whitee" still render a sensible swatch. */}
-          <div className="rounded-xl overflow-hidden border border-luxury-gold/30 bg-gradient-to-br from-luxury-gold/[0.03] to-transparent">
-            {/* ----- Driver section ----- */}
-            <div className="p-4 bg-gradient-to-r from-luxury-gold/10 to-transparent border-b border-luxury-gold/10">
-              <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
-                Your Chauffeur
-              </p>
-              {driver ? (
-                <div className="flex items-start gap-4">
-                  {/* Driver photo — simple direct img routed through
-                      the resize-proxy helper. Falls back to the User
-                      icon when no photo is set OR when the load fails
-                      (broken signed URL, GCS object missing, etc.).
-                      The backend signs photoUrl via getReadUrl before
-                      sending, so the URL the browser receives is
-                      always a fresh signed URL or null. */}
-                  <DriverPhoto photoUrl={driver.photoUrl} name={driver.name} />
-                  <div className="flex-1 min-w-0">
-                    <h4 className="text-base font-semibold text-white truncate">
-                      {driver.name}
-                    </h4>
-                    {driver.rating != null && (
-                      <div className="flex items-center gap-1 mt-0.5">
-                        <Star className="w-3.5 h-3.5 text-luxury-gold fill-luxury-gold" />
-                        <span className="text-xs text-luxury-gold font-medium">
-                          {driver.rating.toFixed(1)}
-                        </span>
-                      </div>
-                    )}
-                    <a
-                      href={`tel:${driver.phone}`}
-                      className="inline-flex items-center gap-1.5 mt-2 text-sm text-gray-300 hover:text-luxury-gold transition-colors"
-                    >
-                      <Phone className="w-3.5 h-3.5" />
-                      {driver.phone}
-                    </a>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 text-gray-400 py-2">
-                  <div className="w-12 h-12 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
-                    <User className="w-6 h-6 text-gray-500" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-300">
-                      Awaiting Driver Assignment
-                    </p>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Your chauffeur will be confirmed shortly
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* ----- Vehicle section ----- */}
-            <div className="p-4">
-              <p className="text-[10px] tracking-[0.2em] uppercase text-luxury-gold/80 mb-3 font-medium">
-                Your Vehicle
-              </p>
-              {vehicle ? (
-                <div className="flex items-center gap-4">
-                  {/* Brand wordmark tile — uses the make's first word
-                      in a serif display font on a gold-tinted gradient.
-                      More premium than a clip-art car icon and works
-                      across every luxury brand (BMW, MERCEDES, ROLLS,
-                      BENTLEY, AUDI, LEXUS — they all read well in
-                      serif caps). Falls back to a clean Car icon if
-                      the make string is somehow empty. */}
-                  <div className="relative w-24 h-20 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-luxury-gold/20 via-luxury-gold/5 to-neutral-900 border border-luxury-gold/30 flex items-center justify-center">
-                    {/* Subtle inner glow */}
-                    <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-transparent to-luxury-gold/10" />
-                    {vehicle.make?.trim() ? (
-                      <span
-                        className="relative font-serif text-base tracking-tight text-luxury-gold uppercase leading-none"
-                        style={{ letterSpacing: "-0.02em" }}
-                      >
-                        {vehicle.make.split(" ")[0].slice(0, 8)}
-                      </span>
-                    ) : (
-                      <Car className="relative w-8 h-8 text-luxury-gold" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h4 className="text-base font-semibold text-white">
-                      {vehicle.year} {vehicle.make} {vehicle.model}
-                    </h4>
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs">
-                      {vehicle.color && (
-                        <>
-                          <span className="flex items-center gap-1.5 text-gray-300">
-                            <span
-                              className="w-2.5 h-2.5 rounded-full border border-gray-500/50 shadow-inner"
-                              style={{
-                                backgroundColor: vehicleColorToCss(
-                                  vehicle.color,
-                                ),
-                              }}
-                              aria-hidden
-                            />
-                            {vehicle.color}
-                          </span>
-                          <span className="text-gray-600">•</span>
-                        </>
-                      )}
-                      <span className="font-mono tracking-wider text-luxury-gold">
-                        {vehicle.plateNumber}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 text-gray-400 py-2">
-                  <div className="w-24 h-20 rounded-lg bg-neutral-800 border border-neutral-700 flex items-center justify-center flex-shrink-0">
-                    <Car className="w-7 h-7 text-gray-500" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-300">Vehicle Pending</p>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Confirmed alongside driver assignment
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
+          <div className="space-y-3">
+            <DriverCard
+              driver={
+                driver
+                  ? {
+                      name: driver.name,
+                      phone: driver.phone,
+                      photoUrl: driver.photoUrl,
+                      rating: driver.rating,
+                    }
+                  : null
+              }
+            />
+            <VehicleCard
+              vehicle={
+                vehicle
+                  ? {
+                      name: `${vehicle.make} ${vehicle.model}`,
+                      plateNumber: vehicle.plateNumber,
+                      year: vehicle.year,
+                      color: vehicle.color,
+                    }
+                  : null
+              }
+            />
           </div>
 
           {booking.notes && (
@@ -1512,6 +1446,26 @@ function BookingDetailModal({
           >
             Close
           </button>
+          {canModify && (
+            <LockedChangeButton
+              locked={!!booking.changeLocked}
+              cutoffHours={booking.changeCutoffHours}
+              onClick={onModify}
+              className="flex items-center gap-2 px-4 py-2 border border-luxury-gold/40 text-luxury-gold rounded-lg hover:bg-luxury-gold/10 transition-colors"
+            >
+              <Pencil className="w-4 h-4" />
+              Modify
+            </LockedChangeButton>
+          )}
+          {canDelete && (
+            <button
+              onClick={onRequestDeletion}
+              className="flex items-center gap-2 px-4 py-2 text-gray-400 hover:text-red-400 rounded-lg hover:bg-red-500/10 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Request deletion
+            </button>
+          )}
           {canCancel && (
             <button
               onClick={onCancel}
@@ -1565,6 +1519,7 @@ export default function BookingsPanel({
   );
   const [search, setSearch] = useState("");
   const [dateFrom, setDateFrom] = useState(initialDateFilter || "");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc" | null>(null);
   const [dateTo, setDateTo] = useState(initialDateFilter || "");
 
   // Detail modal
@@ -1574,6 +1529,8 @@ export default function BookingsPanel({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [downloadingPO, setDownloadingPO] = useState<string | null>(null);
+  const [showModify, setShowModify] = useState(false);
+  const [showDeletion, setShowDeletion] = useState(false);
 
   // Export
   const [exporting, setExporting] = useState(false);
@@ -1604,6 +1561,7 @@ export default function BookingsPanel({
       if (search) params.search = search;
       if (dateFrom) params.startDate = dateFrom;
       if (dateTo) params.endDate = dateTo;
+      if (sortOrder) params.sortOrder = sortOrder;
 
       const res = await partnerApi.getBookings(params);
       if (res.data) {
@@ -1625,6 +1583,7 @@ export default function BookingsPanel({
     search,
     dateFrom,
     dateTo,
+    sortOrder,
     showNotification,
   ]);
 
@@ -1863,226 +1822,30 @@ export default function BookingsPanel({
         </div>
       )}
 
-      {/* Mobile Cards */}
-      <div className="lg:hidden space-y-3">
-        {bookings.map((b) => (
-          <div
-            key={b.id}
-            className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"
-          >
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <p className="text-xs text-luxury-gold font-mono">
-                  {b.bookingRef}
-                </p>
-                <p className="text-sm font-medium text-white mt-0.5">
-                  {b.guestName}
-                </p>
-              </div>
-              <span
-                className={`px-2 py-1 text-xs rounded border ${getStatusColor(b.status)}`}
-              >
-                {b.statusLabel}
-              </span>
-            </div>
-
-            {/* Trip descriptor row — same badge set as the desktop
-                table's Type/Class column. Wraps when the city badge is
-                present so the row degrades gracefully on narrow phones. */}
-            <div className="flex flex-wrap gap-1.5 mb-2">
-              <TripTypeBadge
-                tripType={b.tripType}
-                hours={b.hours}
-                hourlyDuration={b.hourlyDuration}
-              />
-              {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
-              <VehicleClassBadge vehicleClass={b.vehicleClass} />
-            </div>
-
-            <div className="flex items-center gap-2 text-xs text-gray-400 mb-2">
-              <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-              <span className="truncate">
-                {b.tripType === "HOURLY" ? b.pickupAddress : b.route}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-gray-400 mb-3">
-              <div className="flex items-center gap-1">
-                <Calendar className="w-3.5 h-3.5" />
-                <span>{formatDate(b.tripDate)}</span>
-                <Clock className="w-3.5 h-3.5 ml-2" />
-                <span>{b.tripTime}</span>
-              </div>
-              <span className="text-sm font-medium text-white">
-                SAR {b.totalPrice.toLocaleString()}
-              </span>
-            </div>
-            <div className="flex items-center justify-end pt-3 border-t border-neutral-800">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => handleViewDetail(b.id)}
-                  className="text-xs text-luxury-gold hover:underline"
-                >
-                  View
-                </button>
-                <button
-                  onClick={() => handleDownloadPO(b.id)}
-                  disabled={downloadingPO === b.id}
-                  className="text-xs text-green-400 hover:underline disabled:opacity-50"
-                >
-                  {downloadingPO === b.id ? "Loading..." : "PO"}
-                </button>
-              </div>
-            </div>
+      {/* Booking list — activity-forward rows */}
+      <div className="space-y-2.5">
+        {bookings.map((b) => {
+          const a = derivePartnerActivity(b);
+          const vehicle = (b.vehicleClass || "")
+            .toLowerCase()
+            .replace(/_/g, " ")
+            .replace(/\b\w/g, (c: string) => c.toUpperCase());
+          const sub = [b.route, vehicle].filter(Boolean).join(" · ");
+          return (
+            <BookingActivityRow
+              key={b.id}
+              name={b.guestName || "Guest"}
+              subline={sub}
+              onClick={() => handleViewDetail(b.id)}
+              {...a}
+            />
+          );
+        })}
+        {bookings.length === 0 && (
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-900 py-14 text-center text-sm text-gray-500">
+            No bookings to show yet.
           </div>
-        ))}
-        {!loading && bookings.length === 0 && (
-          <Empty className="bg-neutral-900 border border-neutral-800 rounded-xl py-12">
-            <EmptyHeader>
-              <EmptyMedia variant="icon" className="bg-neutral-800">
-                <CalendarX className="w-5 h-5 text-gray-400" />
-              </EmptyMedia>
-              <EmptyTitle className="text-white">No Bookings Found</EmptyTitle>
-              <EmptyDescription className="text-gray-400">
-                {search || activeTab !== "upcoming"
-                  ? "Try adjusting your filters or search terms"
-                  : "Your bookings will appear here once created"}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
         )}
-      </div>
-
-      {/* Desktop Table */}
-      <div className="hidden lg:block bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-neutral-800">
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Ref
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Guest
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Type / Class
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Route
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Date / Time
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                  Fare
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {bookings.map((b) => (
-                <tr
-                  key={b.id}
-                  className="border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition-colors"
-                >
-                  <td className="px-4 py-3 text-sm text-luxury-gold font-mono">
-                    {b.bookingRef}
-                  </td>
-                  <td className="px-4 py-3">
-                    <p className="text-sm text-white">{b.guestName}</p>
-                    {b.guestPhone !== "—" && (
-                      <p className="text-xs text-gray-500">{b.guestPhone}</p>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    {/* Stacked badges echo the vendor portal so the
-                        same booking reads identically on both sides. */}
-                    <div className="flex flex-col gap-1 items-start">
-                      <TripTypeBadge
-                        tripType={b.tripType}
-                        hours={b.hours}
-                        hourlyDuration={b.hourlyDuration}
-                      />
-                      {b.tripType === "HOURLY" && <CityBadge city={b.city} />}
-                      <VehicleClassBadge vehicleClass={b.vehicleClass} />
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-400 max-w-[220px]">
-                    {/* Route column branches on trip type:
-                        - ONE_WAY: shows pickup → dropoff (or routeName fallback)
-                        - HOURLY:  shows just the pickup with a map pin —
-                          the city is conveyed via the CityBadge in the
-                          Type/Class column, so duplicating it here would
-                          be noise. */}
-                    {b.tripType === "HOURLY" ? (
-                      <div className="flex items-center gap-1.5 truncate">
-                        <MapPin className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
-                        <span className="truncate">{b.pickupAddress}</span>
-                      </div>
-                    ) : (
-                      <div className="truncate">{b.route}</div>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <p className="text-sm text-gray-400">
-                      {formatDate(b.tripDate)}
-                    </p>
-                    <p className="text-xs text-gray-500">{b.tripTime}</p>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right font-medium text-white">
-                    SAR {b.totalPrice.toLocaleString()}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-block px-2 py-1 text-xs rounded border ${getStatusColor(b.status)}`}
-                    >
-                      {b.statusLabel}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleViewDetail(b.id)}
-                        className="text-xs text-luxury-gold hover:underline"
-                      >
-                        View
-                      </button>
-                      <button
-                        onClick={() => handleDownloadPO(b.id)}
-                        disabled={downloadingPO === b.id}
-                        className="text-xs text-green-400 hover:underline disabled:opacity-50"
-                      >
-                        {downloadingPO === b.id ? "..." : "PO"}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!loading && bookings.length === 0 && (
-            <Empty className="py-12">
-              <EmptyHeader>
-                <EmptyMedia variant="icon" className="bg-neutral-800">
-                  <CalendarX className="w-5 h-5 text-gray-400" />
-                </EmptyMedia>
-                <EmptyTitle className="text-white">
-                  No Bookings Found
-                </EmptyTitle>
-                <EmptyDescription className="text-gray-400">
-                  {search || activeTab !== "upcoming"
-                    ? "Try adjusting your filters or search terms"
-                    : "Your bookings will appear here once created"}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          )}
-        </div>
       </div>
 
       {/* Pagination */}
@@ -2189,9 +1952,35 @@ export default function BookingsPanel({
           booking={selectedBooking}
           onClose={() => setSelectedBooking(null)}
           onCancel={handleCancel}
+          onModify={() => setShowModify(true)}
+          onRequestDeletion={() => setShowDeletion(true)}
           onDownloadPO={() => handleDownloadPO(selectedBooking.id)}
           cancelling={cancelling}
           downloadingPO={downloadingPO === selectedBooking.id}
+        />
+      )}
+      {selectedBooking && showModify && (
+        <ModifyBookingDrawer
+          booking={selectedBooking}
+          onClose={() => setShowModify(false)}
+          onSaved={() => {
+            fetchBookings();
+            refreshBadges();
+            handleViewDetail(selectedBooking.id);
+          }}
+        />
+      )}
+      {selectedBooking && showDeletion && (
+        <RequestDeletionDialog
+          booking={{
+            id: selectedBooking.id,
+            bookingRef: selectedBooking.bookingRef,
+          }}
+          onClose={() => setShowDeletion(false)}
+          onDone={() => {
+            fetchBookings();
+            refreshBadges();
+          }}
         />
       )}
     </div>

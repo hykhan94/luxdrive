@@ -311,7 +311,7 @@ export const getVendors = asyncWrapper(async (req: Request, res: Response) => {
           select: {
             vehicles: true,
             drivers: { where: { isActive: true } },
-            bookings: true,
+            bookings: { where: { deletedAt: null } },
           },
         },
         // Doc-health for the admin list chip. See partner controller
@@ -542,7 +542,7 @@ export const getVendorDetails = asyncWrapper(
           select: {
             vehicles: true,
             drivers: { where: { isActive: true } },
-            bookings: true,
+            bookings: { where: { deletedAt: null } },
           },
         },
       },

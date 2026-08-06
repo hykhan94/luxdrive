@@ -16,7 +16,17 @@ import { buildPOHtml } from "../../utils/helpers/po.helpers";
 import {
   sendBookingAcceptedAdminEmail,
   sendBookingRejectedAdminEmail,
+  sendModificationRejectedAdminEmail,
 } from "../../lib/email";
+import {
+  validateVendorAssignment,
+  resolveLatestModificationDecision,
+} from "../../lib/vendor-assignment.service";
+import {
+  resolveBookingAssignment,
+  archiveTemporaryAssetsForBooking,
+} from "../../lib/temporary-asset.service";
+import { checkLeadTime } from "../../utils/helpers/booking-modification.helpers";
 
 // ============== GCS (for signed photo URLs) ==============
 // Driver photoUrl in the DB is the raw GCS path (e.g. "drivers/abc/photo.jpg").
@@ -238,7 +248,14 @@ export const getBookingsList = asyncWrapper(
           // New requests first by creation date, others by trip date
           ...(tab === "new_requests"
             ? [{ createdAt: "desc" as const }]
-            : [{ tripDate: "desc" as const }, { createdAt: "desc" as const }]),
+            : [
+                {
+                  tripDate: (req.query.sortOrder === "asc" ? "asc" : "desc") as
+                    | "asc"
+                    | "desc",
+                },
+                { createdAt: "desc" as const },
+              ]),
         ],
         select: {
           id: true,
@@ -270,6 +287,17 @@ export const getBookingsList = asyncWrapper(
           // responses don't carry booking-origin attribution. See list
           // mapping below for the longer rationale.
           createdAt: true,
+          updatedAt: true,
+          confirmedAt: true,
+          isReadByVendor: true,
+          // Probe for a still-pending partner/admin change awaiting this
+          // vendor's accept/reject, so the list can flag it without the
+          // vendor having to open every booking.
+          modifications: {
+            where: { vendorDecision: "PENDING" },
+            select: { id: true },
+            take: 1,
+          },
           driver: { select: { id: true, firstName: true, lastName: true } },
           vehicle: {
             select: { id: true, make: true, model: true, plateNumber: true },
@@ -349,6 +377,19 @@ export const getBookingsList = asyncWrapper(
           b.vendorPayoutAmount != null ? Number(b.vendorPayoutAmount) : null,
         status: b.status,
         statusLabel,
+        // A partner/admin change is waiting for this vendor to accept
+        // or reject — drives the "review needed" flag on the list row.
+        hasPendingChange: (b.modifications?.length ?? 0) > 0,
+        // Running edit count — drives the "Modified" badge on the row.
+        modificationCount: (b as any).modificationCount ?? 0,
+        modifiedAt: (b as any).modifiedAt ?? null,
+        // Unseen-update glow + activity time for the redesigned list row.
+        hasUnseenUpdate: !((b as any).isReadByVendor ?? true),
+        lastActivityAt:
+          (b as any).confirmedAt ?? (b as any).updatedAt ?? b.createdAt,
+        // Categories admin authorized the vendor to upgrade to for this
+        // booking — drives the "Upgrade allowed" badge on the row.
+        upgradeAllowedClasses: (b as any).upgradeAllowedClasses ?? [],
         // True when the booking is in an actionable offer state for
         // this vendor — fresh offer OR a revised offer that hasn't
         // been responded to yet. Used by the frontend to gate the
@@ -491,7 +532,53 @@ export const getBookingDetail = asyncWrapper(
 
     if (!booking) throw new NotFoundError("Booking");
 
+    if (!(booking as any).isReadByVendor) {
+      prisma.booking
+        .update({ where: { id: booking.id }, data: { isReadByVendor: true } })
+        .catch((err) =>
+          console.error("Failed to mark booking read (vendor):", err),
+        );
+    }
+
     const timeline = buildVendorStatusTimeline(booking.status, booking);
+
+    // Full change history for the change-history card — the same
+    // segregated view admin and partner get, kept separate from the
+    // journey timeline above.
+    const modHistory = await prisma.bookingModification.findMany({
+      where: { bookingId: booking.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        actor: true,
+        changedFields: true,
+        reason: true,
+        vendorDecision: true,
+        vendorDecisionReason: true,
+        vendorDecidedAt: true,
+        createdAt: true,
+      },
+    });
+
+    // Vendors only see changes from the point the booking was offered
+    // to them — earlier setup edits are none of their concern. And they
+    // must never learn a partner exists: every non-vendor actor is
+    // masked to the neutral "PLATFORM", so the vendor only ever sees
+    // their own changes vs "LuxDrive".
+    const vendorOffer = await prisma.bookingAssignmentOffer.findFirst({
+      where: { bookingId: booking.id, vendorId: vendor.id },
+      orderBy: { offeredAt: "asc" },
+      select: { offeredAt: true },
+    });
+    const assignedAt = vendorOffer?.offeredAt ?? null;
+    const visibleMods = modHistory
+      .filter(
+        (m) => !assignedAt || new Date(m.createdAt) >= new Date(assignedAt),
+      )
+      .map((m) => ({
+        ...m,
+        actor: m.actor === "VENDOR" ? "VENDOR" : "PLATFORM",
+      }));
 
     // Same statusLabel + isActionable derivation as getBookingsList —
     // see the longer comment there for why ASSIGNMENT_RE_OFFERED needs
@@ -523,6 +610,22 @@ export const getBookingDetail = asyncWrapper(
       ? await getReadUrl(booking.driver.photoUrl || null)
       : null;
 
+    // Surface a still-pending change so the vendor can accept/reject it.
+    const pendingMod = await prisma.bookingModification.findFirst({
+      where: { bookingId: booking.id, vendorDecision: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      select: { changedFields: true, reason: true, actor: true },
+    });
+
+    // Lead-time lock: once the trip is within the admin-configured
+    // vendor-change cutoff, the vendor can no longer change the assignment.
+    // Surfaced so the UI can grey the Reassign action out with a reason.
+    const changeLead = await checkLeadTime(
+      "vendorChange",
+      booking.tripDate,
+      booking.tripTime,
+    );
+
     res.json({
       success: true,
       data: {
@@ -531,9 +634,14 @@ export const getBookingDetail = asyncWrapper(
         status: booking.status,
         statusLabel,
         isActionable,
+        changeLocked: !changeLead.allowed,
+        changeCutoffHours: changeLead.cutoffHours,
 
         // Timeline
         timeline,
+
+        // Change history (segregated from the journey timeline above)
+        modifications: visibleMods,
 
         // Source attribution is intentionally NOT in the vendor-facing
         // response. Even `booking.source` ("PARTNER" / "DIRECT") leaks
@@ -612,6 +720,15 @@ export const getBookingDetail = asyncWrapper(
         // Notes
         notes: booking.notes || null,
 
+        // Pending change (partner/admin modified a confirmed trip).
+        pendingModification: pendingMod
+          ? {
+              changedFields: pendingMod.changedFields,
+              reason: pendingMod.reason,
+              actor: pendingMod.actor,
+            }
+          : null,
+
         // Timestamps
         createdAt: booking.createdAt,
         confirmedAt: booking.confirmedAt,
@@ -644,10 +761,11 @@ export const getAssignmentOptions = asyncWrapper(
     if (!booking) throw new NotFoundError("Booking");
     if (
       booking.status !== "ASSIGNMENT_OFFERED" &&
-      booking.status !== "ASSIGNMENT_RE_OFFERED"
+      booking.status !== "ASSIGNMENT_RE_OFFERED" &&
+      booking.status !== "CONFIRMED"
     ) {
       throw new BadRequestError(
-        "Can only assign driver/vehicle to new requests",
+        "Can only assign driver/vehicle to new requests or reassign confirmed bookings",
       );
     }
 
@@ -740,7 +858,11 @@ export const getAssignmentOptions = asyncWrapper(
         vendorId: vendor.id,
         isActive: true,
         status: "APPROVED",
-        category: booking.vehicleClass,
+        // Booked class plus any categories admin has authorized as an
+        // upgrade for this specific booking.
+        category: {
+          in: [booking.vehicleClass, ...(booking.upgradeAllowedClasses ?? [])],
+        },
         // Exclude vehicles whose any document expires on/before the trip date
         documents: {
           none: { expiryDate: { lte: booking.tripDate } },
@@ -827,75 +949,50 @@ export const acceptBooking = asyncWrapper(
       );
     }
 
-    // Validate driver belongs to this vendor and is approved
-    const driver = await prisma.driver.findFirst({
-      where: {
-        id: driverId,
-        vendorId: vendor.id,
-        isActive: true,
-        status: "APPROVED",
-      },
-      select: { id: true, firstName: true, lastName: true, phone: true },
+    // The chosen vehicle may be an admin-authorized upgrade for this
+    // booking (vendor ran out of the booked class). Resolve its class,
+    // confirm it's either the booked class or one admin authorized, and
+    // validate against that class.
+    const allowedClasses = [
+      booking.vehicleClass,
+      ...(booking.upgradeAllowedClasses ?? []),
+    ];
+    const chosenVehicle = await prisma.vehicle.findFirst({
+      where: { id: vehicleId, vendorId: vendor.id },
+      select: { category: true },
     });
-    if (!driver)
-      throw new BadRequestError("Invalid or inactive driver selected");
+    if (!chosenVehicle) throw new NotFoundError("Vehicle");
+    if (!allowedClasses.includes(chosenVehicle.category)) {
+      throw new BadRequestError(
+        "That vehicle's category isn't permitted for this booking. Ask admin to authorize the upgrade first.",
+      );
+    }
+    const effectiveClass = chosenVehicle.category;
+    const isUpgrade = effectiveClass !== booking.vehicleClass;
+    const humanizeClass = (c: string) =>
+      c
+        .replace(/_/g, " ")
+        .toLowerCase()
+        .replace(/\b\w/g, (m) => m.toUpperCase());
+    // Appended to the admin accept notification when this is an upgrade so
+    // admin sees the category change, not just a plain acceptance.
+    const upgradeNote = isUpgrade
+      ? ` — upgraded ${humanizeClass(booking.vehicleClass)} → ${humanizeClass(effectiveClass)}`
+      : "";
+    // Apply the admin-agreed price/payout only now, on actual assignment.
+    const applyPrice = isUpgrade && booking.upgradeAuthorizedPrice != null;
+    const applyPayout = isUpgrade && booking.upgradeAuthorizedPayout != null;
 
-    // Validate vehicle belongs to this vendor, matches class, and is approved
-    const vehicle = await prisma.vehicle.findFirst({
-      where: {
-        id: vehicleId,
-        vendorId: vendor.id,
-        isActive: true,
-        status: "APPROVED",
-        category: booking.vehicleClass,
-      },
-      select: { id: true, make: true, model: true, plateNumber: true },
+    // Validate the selected driver + vehicle against this vendor's
+    // fleet (ownership, active, APPROVED, class match, no docs
+    // expiring by the trip date). Shared with the reassign path.
+    const { driver, vehicle } = await validateVendorAssignment({
+      vendorId: vendor.id,
+      vehicleClass: effectiveClass,
+      tripDate: booking.tripDate,
+      driverId,
+      vehicleId,
     });
-    if (!vehicle) {
-      throw new BadRequestError(
-        `Invalid vehicle selected. Must be an active, approved ${booking.vehicleClass} vehicle.`,
-      );
-    }
-
-    // Ensure no required vehicle/driver document expires on or before the trip date.
-    // If any does, refuse the assignment — vendor must renew first.
-    const tripDate = booking.tripDate;
-    const expiringVehicleDocs = await prisma.vehicleDocument.findMany({
-      where: {
-        vehicleId,
-        expiryDate: { lte: tripDate },
-      },
-      select: { type: true, expiryDate: true },
-    });
-    if (expiringVehicleDocs.length > 0) {
-      const list = expiringVehicleDocs
-        .map(
-          (d) =>
-            `${d.type} (expires ${d.expiryDate!.toISOString().split("T")[0]})`,
-        )
-        .join(", ");
-      throw new BadRequestError(
-        `Cannot assign this vehicle. The following document(s) expire on or before the trip date: ${list}. Please renew them first.`,
-      );
-    }
-    const expiringDriverDocs = await prisma.driverDocument.findMany({
-      where: {
-        driverId,
-        expiryDate: { lte: tripDate },
-      },
-      select: { type: true, expiryDate: true },
-    });
-    if (expiringDriverDocs.length > 0) {
-      const list = expiringDriverDocs
-        .map(
-          (d) =>
-            `${d.type} (expires ${d.expiryDate!.toISOString().split("T")[0]})`,
-        )
-        .join(", ");
-      throw new BadRequestError(
-        `Cannot assign this driver. The following document(s) expire on or before the trip date: ${list}. Please renew them first.`,
-      );
-    }
 
     // Find this vendor's PENDING offer row for this booking — that's
     // what we're flipping to ACCEPTED. Under the offer model the offer
@@ -921,18 +1018,111 @@ export const acceptBooking = asyncWrapper(
         where: { id: bookingId },
         data: {
           status: "CONFIRMED",
+          // Partner has a new update: driver & vehicle confirmed.
+          isReadByPartner: false,
           driverId: driver.id,
           vehicleId: vehicle.id,
           // Denormalize the offer's payoutAmount onto booking — that
           // way downstream payout aggregation doesn't need to join
           // back to BookingAssignmentOffer for every row.
-          vendorPayoutAmount: pendingOffer.payoutAmount,
+          vendorPayoutAmount: applyPayout
+            ? booking.upgradeAuthorizedPayout!
+            : pendingOffer.payoutAmount,
           confirmedAt: new Date(),
           needsAttention: false,
           attentionReason: null,
+          ...(isUpgrade
+            ? {
+                vehicleClass: effectiveClass,
+                ...(applyPrice
+                  ? { totalPrice: booking.upgradeAuthorizedPrice! }
+                  : {}),
+                // Surfaces the "Modified" badge across all portals.
+                modifiedAt: new Date(),
+                modificationCount: { increment: 1 },
+                // Float it to admin's attention (red-row highlight) so the
+                // category change is visible there, not just a badge.
+                needsAttention: true,
+                attentionReason: `Vehicle category upgraded to ${humanizeClass(
+                  effectiveClass,
+                )}`,
+                // Consume the authorization now that it's executed.
+                upgradeAllowedClasses: [],
+                upgradeAuthorizedPrice: null,
+                upgradeAuthorizedPayout: null,
+              }
+            : {}),
         },
       }),
     ]);
+
+    // If the partner modified this booking while the offer was
+    // outstanding, accepting the offer resolves that change too.
+    await resolveLatestModificationDecision({
+      bookingId,
+      decision: "ACCEPTED",
+    });
+
+    // Executed an admin-authorized upgrade (assigned class differs from
+    // the booked class) → record it so the change history reflects the
+    // category the booking now actually runs at.
+    if (isUpgrade) {
+      const upgradeChangedFields: Array<Record<string, unknown>> = [
+        {
+          field: "vehicleClass",
+          label: "Vehicle class",
+          from: booking.vehicleClass,
+          to: effectiveClass,
+        },
+      ];
+      if (applyPrice) {
+        upgradeChangedFields.push({
+          field: "totalPrice",
+          label: "Total price",
+          from: Number(booking.totalPrice),
+          to: Number(booking.upgradeAuthorizedPrice),
+        });
+      }
+      await prisma.bookingModification.create({
+        data: {
+          bookingId,
+          actor: "VENDOR",
+          actorUserId: req.user!.id,
+          changedFields: upgradeChangedFields as any,
+          reason: applyPrice
+            ? "Upgraded vehicle assigned at revised price (admin-authorized)"
+            : "Upgraded vehicle assigned (admin-authorized)",
+          vendorDecision: "NOT_REQUIRED",
+        },
+      });
+
+      // The partner's single upgrade notification — sent only now that the
+      // vehicle is actually assigned, not when admin authorized it.
+      // Masking-safe: no vendor reference.
+      if (booking.partnerId) {
+        const upgPartner = await prisma.partner.findUnique({
+          where: { id: booking.partnerId },
+          select: { userId: true },
+        });
+        if (upgPartner?.userId) {
+          await prisma.notification.create({
+            data: {
+              userId: upgPartner.userId,
+              title: "Booking updated",
+              message: `Booking ${booking.bookingRef} has been upgraded to a ${humanizeClass(
+                effectiveClass,
+              )} (${vehicle.make} ${vehicle.model})${
+                applyPrice
+                  ? ` at SAR ${Number(booking.upgradeAuthorizedPrice).toFixed(2)}`
+                  : ""
+              }.`,
+              type: "BOOKING_ASSIGNMENT_UPDATED",
+              data: { bookingId, bookingRef: booking.bookingRef } as any,
+            },
+          });
+        }
+      }
+    }
 
     // Notify admin
     const adminUsers = await prisma.user.findMany({
@@ -945,7 +1135,7 @@ export const acceptBooking = asyncWrapper(
         data: adminUsers.map((admin) => ({
           userId: admin.id,
           title: "Booking Accepted by Vendor",
-          message: `${vendor.companyName} accepted booking ${booking.bookingRef}. Driver: ${driver.firstName} ${driver.lastName}, Vehicle: ${vehicle.make} ${vehicle.model} (${vehicle.plateNumber})`,
+          message: `${vendor.companyName} accepted booking ${booking.bookingRef}. Driver: ${driver.firstName} ${driver.lastName}, Vehicle: ${vehicle.make} ${vehicle.model} (${vehicle.plateNumber})${upgradeNote}`,
           type: "BOOKING_CONFIRMED",
           data: {
             bookingId,
@@ -1218,6 +1408,14 @@ export const rejectBooking = asyncWrapper(
       },
     });
 
+    // A departing vendor's offer rejection also resolves any pending
+    // change on the booking — they're no longer party to it.
+    await resolveLatestModificationDecision({
+      bookingId,
+      decision: "REJECTED",
+      reason: mappedReason,
+    });
+
     const { cascadeToNextVendor } = await import("../../lib/offer-cascade");
     const { notifyAdminOfRejection } =
       await import("../../lib/offer-notifications");
@@ -1328,7 +1526,8 @@ export const startTrip = asyncWrapper(async (req: Request, res: Response) => {
 
   const updated = await prisma.booking.update({
     where: { id: bookingId },
-    data: { status: "IN_PROGRESS" },
+    // Partner has a new update: their ride is now underway.
+    data: { status: "IN_PROGRESS", isReadByPartner: false },
   });
 
   // Notify admin
@@ -1403,7 +1602,16 @@ export const completeTrip = asyncWrapper(
       data: {
         status: "COMPLETED",
         completedAt: new Date(),
+        // Partner has a new update: their trip is complete.
+        isReadByPartner: false,
       },
+    });
+
+    // Archive any temporary assets this booking used (bump their
+    // usage counter). They can be reactivated later for another job.
+    await archiveTemporaryAssetsForBooking({
+      temporaryVehicleId: booking.temporaryVehicleId,
+      temporaryDriverId: booking.temporaryDriverId,
     });
 
     // Notify admin
@@ -1729,6 +1937,572 @@ export const downloadBookingPO = asyncWrapper(
           title: `Purchase Order — ${booking.bookingRef}`,
         },
       },
+    });
+  },
+);
+
+// ============== REASSIGN BOOKING ==============
+
+/**
+ * POST /api/v1/vendor/bookings/:bookingId/reassign
+ *
+ * Assign / swap the driver + vehicle on a CONFIRMED booking the vendor
+ * already holds. Each side may be a permanent fleet asset OR an
+ * admin-approved temporary asset, so a vendor who can't meet a changed
+ * class from their fleet can pair a permanent driver with a temporary
+ * vehicle (or go fully temporary).
+ *
+ * Body: { driverId? , vehicleId? , temporaryDriverId? , temporaryVehicleId? }
+ * (exactly one driver source and one vehicle source).
+ */
+export const reassignBooking = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const vendor = await getVendorForUser(req.user!.id);
+    await requireApprovedAndDocsValid(vendor);
+
+    const { bookingId } = req.params;
+    const { driverId, vehicleId, temporaryDriverId, temporaryVehicleId } =
+      req.body ?? {};
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, vendorId: vendor.id },
+      include: {
+        driver: { select: { firstName: true, lastName: true } },
+        vehicle: { select: { make: true, model: true, plateNumber: true } },
+        temporaryDriver: { select: { name: true } },
+        temporaryVehicle: { select: { model: true } },
+        partner: { select: { userId: true } },
+      },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+    if (booking.status !== "CONFIRMED") {
+      throw new BadRequestError(
+        `Cannot reassign a booking with status "${booking.status}". Only confirmed bookings can be reassigned.`,
+      );
+    }
+
+    // Enforce the admin-configured vendor change cutoff (lead time).
+    // Once the trip is within the cutoff window, the vendor can no longer
+    // change the driver/vehicle assignment — same rule the partner change
+    // and cancel flows already honour.
+    const lead = await checkLeadTime(
+      "vendorChange",
+      booking.tripDate,
+      booking.tripTime,
+    );
+    if (!lead.allowed) {
+      throw new BadRequestError(
+        `Bookings can only be changed up to ${lead.cutoffHours} hours before the trip time.`,
+      );
+    }
+
+    // The reassigned vehicle may be an admin-authorized upgrade for
+    // this booking. Resolve its actual class (permanent or temporary);
+    // if it differs from the booked class, confirm admin authorized it,
+    // then validate against THAT class rather than the booked one.
+    let chosenClass: string | null = null;
+    if (vehicleId) {
+      const v = await prisma.vehicle.findFirst({
+        where: { id: vehicleId, vendorId: vendor.id },
+        select: { category: true },
+      });
+      chosenClass = v?.category ?? null;
+    } else if (temporaryVehicleId) {
+      const tv = await prisma.temporaryVehicle.findFirst({
+        where: { id: temporaryVehicleId, vendorId: vendor.id },
+        select: { vehicleClass: true },
+      });
+      chosenClass = tv?.vehicleClass ?? null;
+    }
+    const allowedClasses: string[] = [
+      booking.vehicleClass,
+      ...(booking.upgradeAllowedClasses ?? []),
+    ];
+    if (chosenClass && !allowedClasses.includes(chosenClass)) {
+      throw new BadRequestError(
+        "That vehicle\u2019s category isn\u2019t permitted for this booking. Ask admin to authorize the upgrade first.",
+      );
+    }
+    const effectiveClass = chosenClass ?? booking.vehicleClass;
+    const isUpgrade = effectiveClass !== booking.vehicleClass;
+    const applyPrice = isUpgrade && booking.upgradeAuthorizedPrice != null;
+    const applyPayout = isUpgrade && booking.upgradeAuthorizedPayout != null;
+    const humanizeClass = (c: string) =>
+      c
+        .replace(/_/g, " ")
+        .toLowerCase()
+        .replace(/\b\w/g, (m) => m.toUpperCase());
+
+    const resolved = await resolveBookingAssignment({
+      vendorId: vendor.id,
+      vehicleClass: effectiveClass as any,
+      tripDate: booking.tripDate,
+      driverId,
+      vehicleId,
+      temporaryDriverId,
+      temporaryVehicleId,
+    });
+
+    // Before-state labels for the change event (the assignment we're
+    // replacing). "(unchanged)" from resolveBookingAssignment marks the
+    // side the vendor left alone, so only genuinely-changed sides appear
+    // in the diff.
+    const oldDriverLabel = booking.driver
+      ? `${booking.driver.firstName} ${booking.driver.lastName}`
+      : booking.temporaryDriver
+        ? `${booking.temporaryDriver.name} (temporary)`
+        : "—";
+    const oldVehicleLabel = booking.vehicle
+      ? `${booking.vehicle.make} ${booking.vehicle.model} (${booking.vehicle.plateNumber})`
+      : booking.temporaryVehicle
+        ? `${booking.temporaryVehicle.model} (temporary)`
+        : "—";
+    const changedFields = [
+      resolved.driverLabel !== "(unchanged)" && {
+        field: "driver",
+        label: "Driver",
+        from: oldDriverLabel,
+        to: resolved.driverLabel,
+      },
+      resolved.vehicleLabel !== "(unchanged)" && {
+        field: "vehicle",
+        label: "Vehicle",
+        from: oldVehicleLabel,
+        to: resolved.vehicleLabel,
+      },
+      isUpgrade && {
+        field: "vehicleClass",
+        label: "Vehicle class",
+        from: humanizeClass(booking.vehicleClass),
+        to: humanizeClass(effectiveClass),
+      },
+    ].filter(Boolean) as {
+      field: string;
+      label: string;
+      from: string;
+      to: string;
+    }[];
+    const changeSummary = changedFields.map((f) => f.label).join(" & ");
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        ...resolved.update,
+        // Surface the swap as a tracked change: it flows into the shared
+        // change-history timeline and raises the admin attention flag.
+        modifiedAt: new Date(),
+        modificationCount: { increment: 1 },
+        needsAttention: true,
+        attentionReason: `Vendor changed ${changeSummary.toLowerCase()}`,
+        isReadByAdmin: false,
+        ...(isUpgrade
+          ? {
+              vehicleClass: effectiveClass as any,
+              ...(applyPrice
+                ? { totalPrice: booking.upgradeAuthorizedPrice! }
+                : {}),
+              ...(applyPayout
+                ? { vendorPayoutAmount: booking.upgradeAuthorizedPayout! }
+                : {}),
+              upgradeAllowedClasses: [],
+              upgradeAuthorizedPrice: null,
+              upgradeAuthorizedPayout: null,
+            }
+          : {}),
+      },
+    });
+
+    // Record the swap as a VENDOR change event so it appears in the same
+    // change-history timeline as partner/admin edits (violet actor chip,
+    // before -> after diff), and notify admin + partner.
+    await prisma.bookingModification.create({
+      data: {
+        bookingId,
+        actor: "VENDOR",
+        actorUserId: req.user!.id,
+        changedFields: changedFields as any,
+        reason: null,
+        vendorDecision: "NOT_REQUIRED",
+      },
+    });
+
+    // The admin has no notification feed. Its surface is the attention
+    // system: the `needsAttention` + `attentionReason` + `isReadByAdmin`
+    // set on the update above make this booking float to the top of the
+    // admin bookings list, highlight red, count toward the "N need
+    // attention" banner, and show the reason — no separate admin notice
+    // needed. The partner DOES have a notification feed, so intimate them
+    // there. (Both also see the full before -> after in the timeline.)
+    if (booking.partner?.userId) {
+      await prisma.notification.create({
+        data: {
+          userId: booking.partner.userId,
+          title: "Driver / vehicle updated",
+          message: `The ${changeSummary.toLowerCase()} for ${booking.bookingRef} has been updated.`,
+          type: "BOOKING_ASSIGNMENT_UPDATED",
+          data: {
+            bookingId,
+            bookingRef: booking.bookingRef,
+            changedFields,
+          } as any,
+        },
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "VENDOR_REASSIGNED_BOOKING",
+        entity: "Booking",
+        entityId: bookingId,
+        changes: {
+          bookingRef: booking.bookingRef,
+          vendor: vendor.companyName,
+          driver: resolved.driverLabel,
+          vehicle: resolved.vehicleLabel,
+          usedTemporary: resolved.usedTemporary,
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: "Booking reassigned successfully",
+      data: {
+        id: updated.id,
+        bookingRef: updated.bookingRef,
+        status: updated.status,
+        statusLabel: STATUS_LABELS[updated.status],
+        driver: { name: resolved.driverLabel, phone: resolved.driverPhone },
+        vehicle: { label: resolved.vehicleLabel },
+      },
+    });
+  },
+);
+
+// ============== BOOKING-MODIFICATION CONSENT (confirmed bookings) ==============
+
+/**
+ * POST /api/v1/vendor/bookings/:bookingId/modification/accept
+ *
+ * Vendor accepts a partner/admin change on a booking they had already
+ * confirmed. Resolves the pending modification to ACCEPTED and keeps
+ * the booking CONFIRMED with this vendor. If the change altered the
+ * required class, the vendor reassigns separately (or adds a temp
+ * asset in Step 3B).
+ */
+export const acceptBookingModification = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const vendor = await getVendorForUser(req.user!.id);
+    await requireApprovedAndDocsValid(vendor);
+
+    const { bookingId } = req.params;
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, vendorId: vendor.id },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+    if (booking.status !== "CONFIRMED") {
+      throw new BadRequestError(
+        "Only a change on a confirmed booking can be accepted here.",
+      );
+    }
+
+    const pending = await prisma.bookingModification.findFirst({
+      where: { bookingId, vendorDecision: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    if (!pending) {
+      throw new BadRequestError("There is no pending change on this booking.");
+    }
+
+    await resolveLatestModificationDecision({
+      bookingId,
+      decision: "ACCEPTED",
+    });
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: { modificationVendorSeenAt: new Date() },
+    });
+
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN", isActive: true },
+      select: { id: true },
+    });
+    if (admins.length > 0) {
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          title: "Change accepted by vendor",
+          message: `${vendor.companyName} accepted the change on ${booking.bookingRef}.`,
+          type: "BOOKING_MODIFICATION_ACCEPTED",
+          data: {
+            bookingId,
+            bookingRef: booking.bookingRef,
+            vendorId: vendor.id,
+          },
+        })),
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "VENDOR_ACCEPTED_MODIFICATION",
+        entity: "Booking",
+        entityId: bookingId,
+        changes: {
+          bookingRef: booking.bookingRef,
+          vendor: vendor.companyName,
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: "Change accepted.",
+      data: {
+        id: bookingId,
+        bookingRef: booking.bookingRef,
+        status: booking.status,
+      },
+    });
+  },
+);
+
+/**
+ * POST /api/v1/vendor/bookings/:bookingId/modification/reject
+ *
+ * Vendor rejects a change on a confirmed booking, with a reason. The
+ * modification is resolved REJECTED, the vendor is released, and the
+ * booking returns to PENDING for the admin to re-assign MANUALLY
+ * (deliberately no auto-cascade — admin decides the next vendor).
+ * Body: { reason }.
+ */
+export const rejectBookingModification = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const vendor = await getVendorForUser(req.user!.id);
+    await requireApprovedAndDocsValid(vendor);
+
+    const { bookingId } = req.params;
+    const { reason } = req.body;
+    if (!reason || !String(reason).trim()) {
+      throw new BadRequestError(
+        "Please provide a reason for rejecting the change.",
+      );
+    }
+    const cleanReason = String(reason).trim();
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, vendorId: vendor.id },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+    if (booking.status !== "CONFIRMED") {
+      throw new BadRequestError(
+        "Only a change on a confirmed booking can be rejected here.",
+      );
+    }
+
+    const pending = await prisma.bookingModification.findFirst({
+      where: { bookingId, vendorDecision: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    if (!pending) {
+      throw new BadRequestError("There is no pending change on this booking.");
+    }
+
+    // Resolve + release the vendor; return the booking to PENDING for
+    // admin to re-assign manually. No auto-cascade (design decision).
+    await prisma.$transaction([
+      prisma.bookingModification.update({
+        where: { id: pending.id },
+        data: {
+          vendorDecision: "REJECTED",
+          vendorDecisionReason: cleanReason,
+          vendorDecidedAt: new Date(),
+        },
+      }),
+      prisma.booking.update({
+        where: { id: bookingId },
+        data: {
+          status: "PENDING",
+          vendorId: null,
+          vehicleId: null,
+          driverId: null,
+          temporaryVehicleId: null,
+          temporaryDriverId: null,
+          vendorPayoutAmount: null,
+          confirmedAt: null,
+          needsAttention: true,
+          attentionReason: `${vendor.companyName} rejected a change — reassign required`,
+          attentionAt: new Date(),
+          isReadByAdmin: false,
+          modificationVendorSeenAt: new Date(),
+        },
+      }),
+    ]);
+
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN", isActive: true },
+      select: { id: true },
+    });
+    if (admins.length > 0) {
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          title: "Change rejected by vendor",
+          message: `${vendor.companyName} rejected the change on ${booking.bookingRef} (${cleanReason}). Booking returned to pending.`,
+          type: "BOOKING_MODIFICATION_REJECTED",
+          data: {
+            bookingId,
+            bookingRef: booking.bookingRef,
+            vendorId: vendor.id,
+            reason: cleanReason,
+          },
+        })),
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "VENDOR_REJECTED_MODIFICATION",
+        entity: "Booking",
+        entityId: bookingId,
+        changes: {
+          bookingRef: booking.bookingRef,
+          vendor: vendor.companyName,
+          reason: cleanReason,
+        },
+      },
+    });
+
+    // Fire-and-forget admin email.
+    sendModificationRejectedAdminEmail({
+      bookingRef: booking.bookingRef,
+      vendorCompanyName: vendor.companyName,
+      reason: cleanReason,
+      pickupAddress: booking.pickupAddress,
+      dropoffAddress: booking.dropoffAddress,
+    }).catch((err) =>
+      console.error("[email] sendModificationRejectedAdminEmail failed:", err),
+    );
+
+    res.json({
+      success: true,
+      message:
+        "Change rejected. The booking has been returned to admin for reassignment.",
+      data: {
+        id: bookingId,
+        bookingRef: booking.bookingRef,
+        status: "PENDING",
+      },
+    });
+  },
+);
+
+// ============== VENDOR CANCEL BOOKING ==============
+
+/**
+ * POST /api/v1/vendor/bookings/:bookingId/cancel
+ *
+ * Vendor cancels a CONFIRMED booking they can no longer fulfil. Gated
+ * by the admin-configurable vendor cancel cutoff. The vendor is
+ * released and the booking returns to PENDING for the admin to
+ * re-assign MANUALLY (no auto-cascade). Body: { reason }.
+ */
+export const cancelBooking = asyncWrapper(
+  async (req: Request, res: Response) => {
+    const vendor = await getVendorForUser(req.user!.id);
+    await requireApprovedAndDocsValid(vendor);
+
+    const { bookingId } = req.params;
+    const { reason } = req.body ?? {};
+    if (!reason || !String(reason).trim()) {
+      throw new BadRequestError("Please provide a reason for cancelling.");
+    }
+    const cleanReason = String(reason).trim();
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, vendorId: vendor.id },
+    });
+    if (!booking) throw new NotFoundError("Booking");
+    if (booking.status !== "CONFIRMED") {
+      throw new BadRequestError(
+        `Only a confirmed booking can be cancelled by the vendor. This booking is "${booking.status}".`,
+      );
+    }
+
+    const lead = await checkLeadTime(
+      "vendorCancel",
+      booking.tripDate,
+      booking.tripTime,
+    );
+    if (!lead.allowed) {
+      throw new BadRequestError(
+        `Bookings can only be cancelled up to ${lead.cutoffHours} hours before the trip time.`,
+      );
+    }
+
+    // Release the vendor; return to PENDING for admin to re-assign.
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: "PENDING",
+        vendorId: null,
+        vehicleId: null,
+        driverId: null,
+        temporaryVehicleId: null,
+        temporaryDriverId: null,
+        vendorPayoutAmount: null,
+        confirmedAt: null,
+        needsAttention: true,
+        attentionReason: `${vendor.companyName} cancelled — reassign required`,
+        attentionAt: new Date(),
+        isReadByAdmin: false,
+      },
+    });
+
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN", isActive: true },
+      select: { id: true },
+    });
+    if (admins.length > 0) {
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          title: "Booking cancelled by vendor",
+          message: `${vendor.companyName} cancelled ${booking.bookingRef} (${cleanReason}). Booking returned to pending.`,
+          type: "VENDOR_BOOKING_CANCELLED",
+          data: {
+            bookingId,
+            bookingRef: booking.bookingRef,
+            vendorId: vendor.id,
+            reason: cleanReason,
+          },
+        })),
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user!.id,
+        action: "VENDOR_CANCELLED_BOOKING",
+        entity: "Booking",
+        entityId: bookingId,
+        changes: {
+          bookingRef: booking.bookingRef,
+          vendor: vendor.companyName,
+          reason: cleanReason,
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: "Booking cancelled and returned to admin for reassignment.",
+      data: { id: bookingId, status: "PENDING" },
     });
   },
 );

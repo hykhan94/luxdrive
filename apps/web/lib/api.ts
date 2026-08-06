@@ -304,6 +304,45 @@ export const adminApi = {
   // Frontend opens in a popup window with print-to-PDF triggered.
   getBookingPO: (id: string) => api.get(`${ADMIN_BASE}/bookings/${id}/po`),
 
+  // Admin booking modify / cancel (unrestricted).
+  modifyBooking: (
+    id: string,
+    body: { patch: Record<string, any>; reason?: string },
+  ) => api.patch(`${ADMIN_BASE}/bookings/${id}/modify`, body),
+  cancelBookingAdmin: (id: string, body?: { reason?: string }) =>
+    api.patch(`${ADMIN_BASE}/bookings/${id}/cancel`, body ?? {}),
+
+  // Booking policy — lead-time cutoffs (hours).
+  getBookingPolicy: () => api.get(`${ADMIN_BASE}/booking-policy`),
+  updateBookingPolicy: (body: Record<string, number>) =>
+    api.patch(`${ADMIN_BASE}/booking-policy`, body),
+
+  // Booking deletion requests.
+  listDeletionRequests: (params?: Record<string, any>) =>
+    api.get(`${ADMIN_BASE}/booking-deletion-requests`, params),
+  approveDeletion: (id: string, body?: { adminNote?: string }) =>
+    api.patch(
+      `${ADMIN_BASE}/booking-deletion-requests/${id}/approve`,
+      body ?? {},
+    ),
+  rejectDeletion: (id: string, body?: { adminNote?: string }) =>
+    api.patch(
+      `${ADMIN_BASE}/booking-deletion-requests/${id}/reject`,
+      body ?? {},
+    ),
+
+  // Temporary (ad-hoc) vehicle/driver approvals.
+  listTemporaryAssets: (params?: Record<string, any>) =>
+    api.get(`${ADMIN_BASE}/temporary-assets`, params),
+  approveTemporaryVehicle: (id: string) =>
+    api.patch(`${ADMIN_BASE}/temporary-assets/vehicles/${id}/approve`, {}),
+  rejectTemporaryVehicle: (id: string, body: { reason: string }) =>
+    api.patch(`${ADMIN_BASE}/temporary-assets/vehicles/${id}/reject`, body),
+  approveTemporaryDriver: (id: string) =>
+    api.patch(`${ADMIN_BASE}/temporary-assets/drivers/${id}/approve`, {}),
+  rejectTemporaryDriver: (id: string, body: { reason: string }) =>
+    api.patch(`${ADMIN_BASE}/temporary-assets/drivers/${id}/reject`, body),
+
   // Cities — replaces the retired Tariff Management surface. Admin
   // creates cities, edits name/region/sortOrder, and toggles per-city
   // ELECTRIC and ULTRA_LUXURY availability. Passing force=1 to delete
@@ -515,6 +554,8 @@ export const adminApi = {
 
   // Payments / Users
   getPaymentSummary: () => api.get(`${ADMIN_BASE}/payments/summary`),
+  getEarnings: (params?: { period?: string }) =>
+    api.get(`${ADMIN_BASE}/earnings`, params),
   getUserSummary: () => api.get(`${ADMIN_BASE}/users/summary`),
   getUsers: (params?: Record<string, any>) =>
     api.get(`${ADMIN_BASE}/users`, params),
@@ -561,6 +602,20 @@ export const adminApi = {
       driverId?: string;
     },
   ) => api.patch(`${ADMIN_BASE}/bookings/${id}/assign-vendor`, body),
+  // Admin-driven pricing: set the partner-facing price on an
+  // AWAITING_PRICING booking. Moves it to PENDING (offer-eligible).
+  setBookingPrice: (id: string, body: { totalPrice: number }) =>
+    api.patch(`${ADMIN_BASE}/bookings/${id}/set-price`, body),
+  // Admin authorizes extra vehicle categories for a booking (vendor ran
+  // out of the booked class) and optionally sets a new agreed price.
+  authorizeCategoryUpgrade: (
+    id: string,
+    body: {
+      allowedClasses: string[];
+      newTotalPrice?: number;
+      newVendorPayout?: number;
+    },
+  ) => api.patch(`${ADMIN_BASE}/bookings/${id}/authorize-upgrade`, body),
   // Re-offer at revised price — only valid when booking is in
   // ASSIGNMENT_RE_OFFERED state after a PRICE_TOO_LOW rejection at
   // attempt 1.
@@ -611,7 +666,7 @@ export const adminApi = {
     periodEnd: string;
     generationType?: string;
   }) => api.post(`${ADMIN_BASE}/payments/vendor-receipts/generate`, body),
-  runVendorMonthlyReceipts: (body?: { targetMonth?: string }) =>
+  runVendorMonthlyReceipts: (body?: { targetDay?: string }) =>
     api.post(`${ADMIN_BASE}/payments/vendor-receipts/run-monthly`, body),
   getPartnerInvoices: (params?: Record<string, any>) =>
     api.get(`${ADMIN_BASE}/payments/partner-invoices`, params),
@@ -717,6 +772,14 @@ export const partnerApi = {
   getBookRideDetail: (id: string) => api.get(`${PARTNER_BASE}/book-ride/${id}`),
   cancelBooking: (id: string, body?: any) =>
     api.patch(`${PARTNER_BASE}/book-ride/${id}/cancel`, body),
+  // Modify a live booking. Body: { patch: {...changed fields}, reason? }.
+  modifyBooking: (
+    id: string,
+    body: { patch: Record<string, any>; reason?: string },
+  ) => api.patch(`${PARTNER_BASE}/book-ride/${id}/modify`, body),
+  // Request admin approval to (soft) delete a booking. Body: { reason }.
+  requestBookingDeletion: (id: string, body: { reason: string }) =>
+    api.post(`${PARTNER_BASE}/book-ride/${id}/deletion-request`, body),
 
   // Bookings Repository
   getBookings: (params?: Record<string, any>) =>
@@ -850,6 +913,52 @@ export const vendorApi = {
   startTrip: (id: string) => api.patch(`${VENDOR_BASE}/bookings/${id}/start`),
   completeTrip: (id: string) =>
     api.patch(`${VENDOR_BASE}/bookings/${id}/complete`),
+
+  // Reassign driver/vehicle on a confirmed booking. Each side is either
+  // a fleet id or an approved temporary id (exactly one per side).
+  reassignBooking: (
+    id: string,
+    body: {
+      driverId?: string;
+      vehicleId?: string;
+      temporaryDriverId?: string;
+      temporaryVehicleId?: string;
+    },
+  ) => api.post(`${VENDOR_BASE}/bookings/${id}/reassign`, body),
+
+  // Consent on a change made to a confirmed booking.
+  acceptBookingModification: (id: string) =>
+    api.post(`${VENDOR_BASE}/bookings/${id}/modification/accept`, {}),
+  rejectBookingModification: (id: string, body: { reason: string }) =>
+    api.post(`${VENDOR_BASE}/bookings/${id}/modification/reject`, body),
+
+  // Vendor cancels a confirmed booking (returns it to admin as pending).
+  cancelBooking: (id: string, body: { reason: string }) =>
+    api.post(`${VENDOR_BASE}/bookings/${id}/cancel`, body),
+
+  // Temporary (ad-hoc) assets.
+  listTemporaryVehicles: (params?: Record<string, any>) =>
+    api.get(`${VENDOR_BASE}/temporary-assets/vehicles`, params),
+  createTemporaryVehicle: (body: {
+    model: string;
+    vehicleClass: string;
+    frontPhotoUrl: string;
+    backPhotoUrl: string;
+    singleUse?: boolean;
+    manualEntry?: boolean;
+  }) => api.post(`${VENDOR_BASE}/temporary-assets/vehicles`, body),
+  listTemporaryDrivers: (params?: Record<string, any>) =>
+    api.get(`${VENDOR_BASE}/temporary-assets/drivers`, params),
+  createTemporaryDriver: (body: {
+    name: string;
+    mobile: string;
+    photoUrl: string;
+  }) => api.post(`${VENDOR_BASE}/temporary-assets/drivers`, body),
+  reactivateTemporaryAsset: (body: {
+    type: "vehicle" | "driver";
+    id: string;
+  }) => api.post(`${VENDOR_BASE}/temporary-assets/reactivate`, body),
+
   exportBookingsCsv: (params?: Record<string, any>) =>
     api.get(`${VENDOR_BASE}/bookings/export/csv`, params),
   // PO download — server returns { html, meta }; frontend opens

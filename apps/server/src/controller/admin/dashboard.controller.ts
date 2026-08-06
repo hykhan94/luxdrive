@@ -40,9 +40,19 @@ export const getSidebarBadges = asyncWrapper(
       dueSoonPartnerInvoices,
       // Alerts & Settings
       unactionedBookings,
+      // Temp assets awaiting approval (Booking Ops)
+      pendingTempVehicles,
+      pendingTempDrivers,
     ] = await Promise.all([
       prisma.booking.count({ where: { isReadByAdmin: false } }),
-      prisma.booking.count({ where: { needsAttention: true } }),
+      prisma.booking.count({
+        where: {
+          needsAttention: true,
+          // Match the list: only unassigned, non-terminal bookings count.
+          vendorId: null,
+          status: { notIn: ["CANCELLED", "COMPLETED"] },
+        },
+      }),
       // Vendor: profiles awaiting review
       prisma.vendor.count({ where: { status: "PENDING_REVIEW" } }),
       // Vendor: bank update requests from vendors
@@ -90,6 +100,14 @@ export const getSidebarBadges = asyncWrapper(
           },
         },
       }),
+      // Temp vehicles awaiting admin approval
+      prisma.temporaryVehicle.count({
+        where: { status: "PENDING_APPROVAL" },
+      }),
+      // Temp drivers awaiting admin approval
+      prisma.temporaryDriver.count({
+        where: { status: "PENDING_APPROVAL" },
+      }),
     ]);
 
     const totalVendorBadge =
@@ -113,6 +131,11 @@ export const getSidebarBadges = asyncWrapper(
         partners: pendingPartnerReviews + pendingPartnerChangeRequests,
         payments: totalPaymentsBadge,
         alertsSettings: unactionedBookings,
+        // Temp driver/vehicle submissions awaiting admin review. Shown on
+        // both the Booking Ops tab (its Temporary-assets sub-tab) and the
+        // dedicated Temp Assets tab.
+        bookingOps: pendingTempVehicles + pendingTempDrivers,
+        tempAssets: pendingTempVehicles + pendingTempDrivers,
 
         // Detailed breakdown
         breakdown: {

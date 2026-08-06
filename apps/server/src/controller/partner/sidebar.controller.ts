@@ -102,6 +102,8 @@ export const getSidebarBadges = asyncWrapper(
         isRead: false,
         type: {
           in: [
+            "BOOKING_RECEIVED",
+            "BOOKING_PRICED",
             "BOOKING_VENDOR_ASSIGNED",
             "BOOKING_CONFIRMED",
             "BOOKING_VENDOR_REJECTED",
@@ -110,6 +112,10 @@ export const getSidebarBadges = asyncWrapper(
             "BOOKING_IN_PROGRESS",
             "BOOKING_COMPLETED",
             "BOOKING_CANCELLED",
+            // A change to the booking's details (price/vehicle/trip) —
+            // surfaces on the partner's Bookings sidebar badge.
+            "BOOKING_ASSIGNMENT_UPDATED",
+            "BOOKING_MODIFIED",
           ],
         },
       },

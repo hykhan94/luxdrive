@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { adminApi, uploadApi, ApiError } from "@/lib/api";
 import DocumentViewer from "@/components/ui/document-viewer";
+import ImageCropper from "@/components/ui/image-cropper";
 import {
   CreditCard,
   Send,
@@ -75,6 +76,7 @@ interface PartnerInvoice {
   isOverdue: boolean;
   isPaid: boolean;
   needsConfirmation: boolean;
+  needsReview?: boolean;
   paidAt: string | null;
   createdAt: string;
   // Stage 7: backend now inlines the signed proof URL on the list
@@ -98,6 +100,15 @@ const defaultPagination: Pagination = {
   total: 0,
   totalPages: 0,
 };
+
+// Cropped image blobs come back without a filename; rebuild a File so the
+// existing signed-URL upload path keeps working unchanged.
+function blobToFile(blob: Blob, originalName: string): File {
+  const type = blob.type || "image/jpeg";
+  const ext = type.split("/")[1] || "jpg";
+  const base = originalName.replace(/\.[^./\\]+$/, "") || "receipt";
+  return new File([blob], `${base}.${ext}`, { type });
+}
 
 export default function PaymentsPanel({
   onBadgeUpdate,
@@ -167,6 +178,13 @@ export default function PaymentsPanel({
   );
   const [markPaidFile, setMarkPaidFile] = useState<File | null>(null);
   const [isMarkingPaid, setIsMarkingPaid] = useState(false);
+  // Receipt image cropper (same UX as profile document uploads).
+  const [cropSrc, setCropSrc] = useState<string | null>(null);
+  const [cropName, setCropName] = useState<string>("receipt");
+  // Vendor payout detail modal (per-booking payout breakdown).
+  const [detailPayout, setDetailPayout] = useState<VendorPayout | null>(null);
+  const [detailBookings, setDetailBookings] = useState<any[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   // Open vendor-side receipt viewer (admin's uploaded transfer receipt
   // on a PAID payout). The list response already includes a signed URL,
@@ -365,6 +383,44 @@ export default function PaymentsPanel({
   //   3. Call adminApi.markVendorReceiptPaid with the GCS path + filename.
   // Backend transitions the payout to PAID, denormalizes receipt URL,
   // and notifies vendor (VENDOR_PAYOUT_PAID notification).
+  // Open the booking-breakdown detail for a payout.
+  const openPayoutDetail = async (payout: VendorPayout) => {
+    setDetailPayout(payout);
+    setDetailBookings([]);
+    setDetailLoading(true);
+    try {
+      const res = await adminApi.getVendorReceiptDetails(payout.id);
+      if (res.success && res.data)
+        setDetailBookings((res.data as any).bookings || []);
+    } catch {
+      /* empty breakdown handled by the modal */
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  // Receipt pick: images go through the cropper first; PDFs upload as-is.
+  const handleReceiptPick = (file: File | null) => {
+    if (!file) {
+      setMarkPaidFile(null);
+      return;
+    }
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setCropSrc(reader.result as string);
+        setCropName(file.name);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setMarkPaidFile(file);
+    }
+  };
+  const handleCropComplete = (blob: Blob) => {
+    setMarkPaidFile(blobToFile(blob, cropName));
+    setCropSrc(null);
+  };
+
   const openMarkPaidModal = (payout: VendorPayout) => {
     setMarkPaidPayout(payout);
     setMarkPaidFile(null);
@@ -383,7 +439,7 @@ export default function PaymentsPanel({
       const signedRes = await uploadApi.getSignedUploadUrl({
         fileName: markPaidFile.name,
         fileType: markPaidFile.type,
-        section: "payments",
+        section: "vendors",
         folder: "vendor-payouts",
         entityId: markPaidPayout.id,
       });
@@ -919,33 +975,42 @@ export default function PaymentsPanel({
                             </span>
                           </td>
                           <td className="px-4 py-3">
-                            {r.isPaid ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs text-gray-500">
-                                  Paid{" "}
-                                  {r.paidAt
-                                    ? new Date(r.paidAt).toLocaleDateString()
-                                    : ""}
-                                </span>
-                                {r.paymentProofUrl && (
-                                  <button
-                                    onClick={() => openVendorReceiptViewer(r)}
-                                    className="px-2 py-1 bg-blue-500/20 text-blue-400 text-xs rounded hover:bg-blue-500/30 flex items-center gap-1"
-                                  >
-                                    <Eye className="w-3 h-3" />
-                                    View Receipt
-                                  </button>
-                                )}
-                              </div>
-                            ) : (
+                            <div className="flex items-center gap-2">
                               <button
-                                onClick={() => openMarkPaidModal(r)}
-                                className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded hover:bg-green-500/30 flex items-center gap-1"
+                                onClick={() => openPayoutDetail(r)}
+                                className="px-2 py-1 bg-neutral-700/50 text-gray-300 text-xs rounded hover:bg-neutral-700 flex items-center gap-1"
                               >
-                                <Upload className="w-3 h-3" />
-                                Mark Paid + Upload Receipt
+                                <Eye className="w-3 h-3" />
+                                Details
                               </button>
-                            )}
+                              {r.isPaid ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-gray-500">
+                                    Paid{" "}
+                                    {r.paidAt
+                                      ? new Date(r.paidAt).toLocaleDateString()
+                                      : ""}
+                                  </span>
+                                  {r.paymentProofUrl && (
+                                    <button
+                                      onClick={() => openVendorReceiptViewer(r)}
+                                      className="px-2 py-1 bg-blue-500/20 text-blue-400 text-xs rounded hover:bg-blue-500/30 flex items-center gap-1"
+                                    >
+                                      <Eye className="w-3 h-3" />
+                                      View Receipt
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => openMarkPaidModal(r)}
+                                  className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded hover:bg-green-500/30 flex items-center gap-1"
+                                >
+                                  <Upload className="w-3 h-3" />
+                                  Mark Paid + Upload Receipt
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1152,12 +1217,24 @@ export default function PaymentsPanel({
                               </div>
                             </td>
                             <td className="px-4 py-3">
-                              <p className="text-white text-sm font-mono">
+                              <p className="text-white text-sm font-mono flex items-center gap-2">
+                                {inv.needsReview && (
+                                  <span
+                                    className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"
+                                    title="Payment proof submitted — needs review"
+                                  />
+                                )}
                                 {inv.invoiceNumber}
                               </p>
-                              <p className="text-xs text-gray-500">
-                                {inv.bookingCount} bookings
-                              </p>
+                              {inv.needsReview ? (
+                                <p className="text-xs text-amber-400">
+                                  Proof submitted — review
+                                </p>
+                              ) : (
+                                <p className="text-xs text-gray-500">
+                                  {inv.bookingCount} bookings
+                                </p>
+                              )}
                             </td>
                             <td className="px-4 py-3 text-blue-400 font-medium">
                               SAR {Number(inv.amount).toLocaleString()}
@@ -1388,7 +1465,9 @@ export default function PaymentsPanel({
                 <input
                   type="file"
                   accept="image/*,application/pdf"
-                  onChange={(e) => setMarkPaidFile(e.target.files?.[0] || null)}
+                  onChange={(e) =>
+                    handleReceiptPick(e.target.files?.[0] || null)
+                  }
                   disabled={isMarkingPaid}
                   className="w-full text-xs text-gray-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:bg-luxury-gold/20 file:text-luxury-gold hover:file:bg-luxury-gold/30 file:cursor-pointer disabled:opacity-50"
                 />
@@ -1424,6 +1503,104 @@ export default function PaymentsPanel({
                 )}
                 Mark Paid
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Receipt image cropper — same UX as profile document uploads */}
+      {cropSrc && (
+        <ImageCropper
+          imageSrc={cropSrc}
+          onCropComplete={handleCropComplete}
+          onCancel={() => setCropSrc(null)}
+          title="Crop Bank Transfer Receipt"
+        />
+      )}
+
+      {/* Vendor payout — booking breakdown */}
+      {detailPayout && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setDetailPayout(null)}
+        >
+          <div
+            className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between p-5 border-b border-neutral-800">
+              <div>
+                <h3 className="text-white font-semibold">
+                  {detailPayout.vendor.companyName}
+                </h3>
+                <p className="text-xs text-gray-500 font-mono mt-0.5">
+                  {detailPayout.receiptNumber}
+                </p>
+              </div>
+              <button
+                onClick={() => setDetailPayout(null)}
+                className="p-1 hover:bg-neutral-800 rounded"
+              >
+                <X className="w-5 h-5 text-gray-400" />
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto">
+              <div className="flex justify-between text-sm mb-4">
+                <div>
+                  <p className="text-xs text-gray-500">Payout Total</p>
+                  <p className="text-luxury-gold font-semibold text-lg">
+                    SAR {Number(detailPayout.amount).toLocaleString()}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-gray-500">Rides</p>
+                  <p className="text-white">{detailPayout.tripCount}</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-400 mb-2">Booking breakdown</p>
+              {detailLoading ? (
+                <div className="py-10 flex justify-center">
+                  <Loader2 className="w-6 h-6 text-luxury-gold animate-spin" />
+                </div>
+              ) : detailBookings.length === 0 ? (
+                <p className="text-sm text-gray-500 py-8 text-center">
+                  No bookings found for this payout period.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-gray-400 text-xs">
+                      <tr className="border-b border-neutral-800">
+                        <th className="text-left py-2 font-medium">Ref</th>
+                        <th className="text-left py-2 font-medium">Date</th>
+                        <th className="text-left py-2 font-medium">Route</th>
+                        <th className="text-right py-2 font-medium">Payout</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800/60">
+                      {detailBookings.map((b) => (
+                        <tr key={b.id}>
+                          <td className="py-2 font-mono text-luxury-gold text-xs">
+                            {b.bookingRef}
+                          </td>
+                          <td className="py-2 text-gray-400 text-xs whitespace-nowrap">
+                            {new Date(b.tripDate).toLocaleDateString("en-GB", {
+                              day: "numeric",
+                              month: "short",
+                            })}
+                          </td>
+                          <td className="py-2 text-gray-300 text-xs max-w-[280px] truncate">
+                            {b.route}
+                          </td>
+                          <td className="py-2 text-right text-white font-mono">
+                            SAR {Number(b.payout).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         </div>

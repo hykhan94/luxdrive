@@ -158,7 +158,7 @@ export const getPartners = asyncWrapper(async (req: Request, res: Response) => {
       orderBy: [{ status: "asc" }, { createdAt: "desc" }],
       include: {
         user: { select: { id: true, email: true, name: true, phone: true } },
-        _count: { select: { bookings: true } },
+        _count: { select: { bookings: { where: { deletedAt: null } } } },
         // Pull documents with their expiry dates so we can compute
         // per-row doc-health badges (e.g. "2 expired" / "1 expiring").
         // Cheap — partners have at most a handful of docs, and the
@@ -344,7 +344,7 @@ export const getPartnerDetails = asyncWrapper(
             image: true,
           },
         },
-        _count: { select: { bookings: true, invoices: true } },
+        _count: { select: { bookings: { where: { deletedAt: null } }, invoices: true } },
         documents: {
           orderBy: { type: "asc" },
         },

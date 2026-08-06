@@ -8,7 +8,7 @@ import { prisma } from "../../lib/prisma";
 import { getReadUrl } from "../../lib/gcs";
 import { asyncWrapper } from "../../utils/asyncWrapper";
 import { NotFoundError, BadRequestError } from "../../utils/AppError";
-import { runVendorMonthlyPayoutGeneration } from "../../lib/cron-jobs";
+import { runVendorDailyPayoutGeneration } from "../../lib/cron-jobs";
 // Same pattern as vendor/earnings.controller.ts. Admin needs signed
 // URLs for vendor-uploaded payment proofs so the document viewer can
 // render them in-page.
@@ -441,6 +441,8 @@ export const markVendorReceiptPaid = asyncWrapper(
         status: "PAID",
         paidAt: new Date(),
         paidBy: req.user!.id,
+        // Vendor should see they've been paid and can view the receipt.
+        isViewedByVendor: false,
         receiptUrl: receiptUrl ?? receipt.receiptUrl,
         receiptFileName: receiptFileName ?? receipt.receiptFileName,
         receiptUploadedAt: receiptUrl ? new Date() : receipt.receiptUploadedAt,
@@ -509,6 +511,46 @@ export const getVendorReceiptDetails = asyncWrapper(
       throw new NotFoundError("Vendor payout");
     }
 
+    // Booking breakdown for this payout. Vendor bookings aren't linked to
+    // the payout by a foreign key, so we match the same criteria the
+    // generator summed over: this vendor's COMPLETED rides whose tripDate
+    // falls in the payout period. Each ride's vendorPayoutAmount is the
+    // line item; the sum reconciles to the payout total.
+    const breakdownBookings = await prisma.booking.findMany({
+      where: {
+        vendorId: receipt.vendorId,
+        status: "COMPLETED",
+        tripDate: { gte: receipt.periodStart, lte: receipt.periodEnd },
+      },
+      select: {
+        id: true,
+        bookingRef: true,
+        tripDate: true,
+        tripTime: true,
+        tripType: true,
+        city: true,
+        pickupAddress: true,
+        dropoffAddress: true,
+        vehicleClass: true,
+        vendorPayoutAmount: true,
+      },
+      orderBy: { tripDate: "asc" },
+    });
+    const bookingBreakdown = breakdownBookings.map((b) => ({
+      id: b.id,
+      bookingRef: b.bookingRef,
+      tripDate: b.tripDate,
+      tripTime: b.tripTime,
+      tripType: b.tripType,
+      city: b.city,
+      route:
+        b.pickupAddress && b.dropoffAddress
+          ? `${b.pickupAddress} → ${b.dropoffAddress}`
+          : b.pickupAddress || "",
+      vehicleClass: b.vehicleClass,
+      payout: Number(b.vendorPayoutAmount ?? 0),
+    }));
+
     // Surface signed URL for the admin-uploaded receipt so the frontend
     // can render it in the DocumentViewer. Field name preserved as
     // `paymentProofUrl` in the response shape for frontend
@@ -533,6 +575,7 @@ export const getVendorReceiptDetails = asyncWrapper(
         // to load the unsigned path.
         receiptUrl: paymentProofSignedUrl,
         lifecycle,
+        bookings: bookingBreakdown,
       },
     });
   },
@@ -620,6 +663,7 @@ export const getPartnerInvoices = asyncWrapper(
       invoices.map(async (invoice) => ({
         id: invoice.id,
         invoiceNumber: invoice.invoiceNumber,
+        needsReview: !invoice.isViewedByAdmin,
         partner: {
           id: invoice.partner.id,
           companyName: invoice.partner.companyName,
@@ -675,7 +719,7 @@ export const sendPartnerReminder = asyncWrapper(
     const invoice = await prisma.partnerInvoice.findUnique({
       where: { id },
       include: {
-        partner: { select: { id: true, companyName: true } },
+        partner: { select: { id: true, companyName: true, userId: true } },
       },
     });
 
@@ -692,10 +736,29 @@ export const sendPartnerReminder = asyncWrapper(
       data: {
         reminderSentAt: new Date(),
         reminderCount: { increment: 1 },
+        // Re-flag for the partner so the reminder stands out in their list.
+        isViewedByPartner: false,
       },
     });
 
-    // TODO: Send actual notification/email to partner
+    // Actually deliver the reminder to the partner. INVOICE_DUE_SOON is
+    // already categorised as INVOICE and counted in the partner sidebar,
+    // so the reminder shows up in their notifications like any other.
+    if (invoice.partner.userId) {
+      await prisma.notification.create({
+        data: {
+          userId: invoice.partner.userId,
+          title: "Payment Reminder",
+          message: `Reminder: invoice ${invoice.invoiceNumber} for SAR ${Number(
+            invoice.amount,
+          ).toFixed(2)} is due ${new Date(invoice.dueDate).toLocaleDateString(
+            "en-GB",
+            { day: "numeric", month: "long", year: "numeric" },
+          )}. Please submit your payment.`,
+          type: "INVOICE_DUE_SOON",
+        },
+      });
+    }
 
     res.json({
       success: true,
@@ -734,6 +797,8 @@ export const confirmPartnerPayment = asyncWrapper(
         status: "PAID",
         confirmedAt: new Date(),
         confirmedBy: req.user!.id,
+        // Partner should see their payment has been confirmed.
+        isViewedByPartner: false,
       },
     });
 
@@ -821,6 +886,15 @@ export const getPartnerInvoiceDetails = asyncWrapper(
 
     if (!invoice) {
       throw new NotFoundError("Partner invoice");
+    }
+
+    // Admin opened the invoice — clear the "partner uploaded proof" flag.
+    if (!(invoice as any).isViewedByAdmin) {
+      prisma.partnerInvoice
+        .update({ where: { id }, data: { isViewedByAdmin: true } })
+        .catch((err) =>
+          console.error("Failed to clear invoice admin-seen flag:", err),
+        );
     }
 
     res.json({
@@ -947,23 +1021,23 @@ export const generateVendorReceipt = asyncWrapper(
  */
 export const runVendorMonthlyReceiptsNow = asyncWrapper(
   async (req: Request, res: Response) => {
-    const { targetMonth } = req.body || {};
+    const { targetDay } = req.body || {};
 
-    // Parse the optional month. Accepts "YYYY-MM" (most readable for
+    // Parse the optional day. Accepts "YYYY-MM-DD" (most readable for
     // operators) or any Date-parseable string. If absent, the helper
-    // falls back to "last completed month".
+    // falls back to yesterday (the last completed day).
     let targetDate: Date | undefined;
-    if (targetMonth) {
-      const parsed = new Date(targetMonth);
+    if (targetDay) {
+      const parsed = new Date(targetDay);
       if (isNaN(parsed.getTime())) {
         throw new BadRequestError(
-          "targetMonth must be a valid date like '2026-04' or '2026-04-01'",
+          "targetDay must be a valid date like '2026-04-15'",
         );
       }
       targetDate = parsed;
     }
 
-    const result = await runVendorMonthlyPayoutGeneration(targetDate);
+    const result = await runVendorDailyPayoutGeneration(targetDate);
 
     res.json({
       success: true,

@@ -12,6 +12,7 @@ import pricingRoutes from "./pricing.route";
 import citiesRoutes from "./cities.route";
 import paymentRoutes from "./payment.route";
 import overviewRoutes from "./overview.route";
+import earningsRoutes from "./earnings.route";
 import alertsSettingsRoutes from "./alerts-settings.route";
 import vendorRoutes from "./vendor.route";
 import partnerRoutes from "./partner.route";
@@ -21,6 +22,9 @@ import partnerChangeRequestRoutes from "./partner-change-request.route";
 import driverChangeRequestRoutes from "./driver-change-request.route";
 import vehicleChangeRequestRoutes from "./vehicle-change-request.route";
 import vendorProfileChangeRequestRoutes from "./vendor-profile-change-request.route";
+import temporaryAssetsRoutes from "./temporary-assets.route";
+import bookingDeletionRequestRoutes from "./booking-deletion-requests.route";
+import bookingPolicyRoutes from "./booking-policy.route";
 
 // Import dashboard controllers directly (sidebar badges only)
 import { getSidebarBadges } from "../../controller/admin/dashboard.controller";
@@ -35,6 +39,7 @@ router.get("/sidebar-badges", getSidebarBadges);
 
 // ============== OVERVIEW / DASHBOARD ==============
 router.use("/overview", overviewRoutes);
+router.use("/earnings", earningsRoutes);
 
 // ============== BOOKINGS ==============
 router.use("/bookings", bookingRoutes);
@@ -72,5 +77,8 @@ router.use("/driver-change-requests", driverChangeRequestRoutes);
 // ============== VEHICLE CHANGE REQUEST ==============
 router.use("/vehicle-change-requests", vehicleChangeRequestRoutes);
 router.use("/vendor-profile-change-requests", vendorProfileChangeRequestRoutes);
+router.use("/temporary-assets", temporaryAssetsRoutes);
+router.use("/booking-deletion-requests", bookingDeletionRequestRoutes);
+router.use("/booking-policy", bookingPolicyRoutes);
 
 export default router;

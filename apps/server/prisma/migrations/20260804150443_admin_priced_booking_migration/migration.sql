@@ -1,0 +1,7 @@
+-- AlterEnum
+ALTER TYPE "BookingStatus" ADD VALUE 'AWAITING_PRICING';
+
+-- AlterTable
+ALTER TABLE "bookings" ALTER COLUMN "basePrice" DROP NOT NULL,
+ALTER COLUMN "vatAmount" DROP NOT NULL,
+ALTER COLUMN "totalPrice" DROP NOT NULL;

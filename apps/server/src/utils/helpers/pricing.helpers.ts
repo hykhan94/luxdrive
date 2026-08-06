@@ -210,3 +210,24 @@ export const DEFAULT_PRICING = {
     vatPercent: 15,
   },
 };
+
+// ============================================
+// VAT-inclusive split
+// ============================================
+// LuxDrive bookings are partner-priced: the partner supplies a single
+// VAT-inclusive total and the server derives the base + VAT columns from
+// it. This is the SINGLE source for that split — imported by both the
+// create-booking flow and the booking-modification (re-price) flow so
+// the two can never diverge.
+export const VAT_RATE = 0.15;
+
+export function splitVatInclusive(total: number): {
+  basePrice: number;
+  vatAmount: number;
+  totalPrice: number;
+} {
+  const base = Math.round((total / (1 + VAT_RATE)) * 100) / 100;
+  const vat = Math.round((total - base) * 100) / 100;
+  const totalRounded = Math.round(total * 100) / 100;
+  return { basePrice: base, vatAmount: vat, totalPrice: totalRounded };
+}
