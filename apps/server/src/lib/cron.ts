@@ -12,9 +12,39 @@ import {
 
 const KSA_TZ = "Asia/Riyadh";
 
+// When an external scheduler (Cloud Scheduler / OS crontab hitting
+// /api/v1/cron/*) drives daily billing, set USE_EXTERNAL_BILLING_CRON=true
+// to stop these in-process timers so generation doesn't run twice.
+const EXTERNAL_CRON = process.env.USE_EXTERNAL_CRON === "true";
+
+// Registry of every cron job by name. Populated on module load (below),
+// so an external scheduler can trigger ANY job — including the inline
+// ones without a dedicated exported function — via POST /api/v1/cron/run/:job.
+export const CRON_REGISTRY: Record<string, () => void | Promise<void>> = {};
+
+// Registers the job (always, so it stays triggerable) and schedules it
+// in-process UNLESS USE_EXTERNAL_CRON=true, in which case an external
+// scheduler (Cloud Scheduler / OS crontab) is expected to drive it.
+function gatedSchedule(
+  name: string,
+  expr: string,
+  fn: () => void | Promise<void>,
+  opts?: Parameters<typeof cron.schedule>[2],
+) {
+  CRON_REGISTRY[name] = fn;
+  if (EXTERNAL_CRON) {
+    console.log(
+      `[CRON] External scheduler enabled — not scheduling in-process: ${name} (${expr})`,
+    );
+    return;
+  }
+  return cron.schedule(expr, fn, opts);
+}
+
 // ============== DAILY INVOICE GENERATION ==============
 // Runs every day at 2:00 AM KSA
-cron.schedule(
+gatedSchedule(
+  "partner-invoices",
   "0 2 * * *",
   async () => {
     console.log("[CRON] Starting daily invoice generation...");
@@ -32,7 +62,8 @@ cron.schedule(
 
 // ============== OVERDUE INVOICE CHECK ==============
 // Runs daily at 8:00 AM KSA
-cron.schedule(
+gatedSchedule(
+  "mark-overdue-invoices",
   "0 8 * * *",
   async () => {
     console.log("[CRON] Checking for overdue invoices...");
@@ -99,7 +130,8 @@ cron.schedule(
 //      MOU is mission-critical at this level.)
 //   2. NOTIFY APPROVED partners whose MOU expires within 2 months but
 //      hasn't expired yet. Single-fire per MOU via mouExpiryNotified.
-cron.schedule(
+gatedSchedule(
+  "partner-mou",
   "0 9 * * *",
   async () => {
     console.log("[CRON] Checking partner MOUs...");
@@ -122,7 +154,8 @@ cron.schedule(
 //   - Every 7 days thereafter until expiry: weekly reminder
 //   - On/past expiry: suspend the vehicle (isActive=false, suspendedForDocs=true)
 //   - Per-doc tracking via lastExpiryNotifiedAt prevents duplicate notifications.
-cron.schedule(
+gatedSchedule(
+  "vehicle-doc-expiry",
   "30 9 * * *",
   async () => {
     console.log("[CRON] Checking vehicle document expiry...");
@@ -258,7 +291,8 @@ cron.schedule(
 );
 // ============== DRIVER DOCUMENT EXPIRY CHECK ==============
 // Runs daily at 10:00 AM KSA. Same cadence as vehicle docs.
-cron.schedule(
+gatedSchedule(
+  "driver-doc-expiry",
   "0 10 * * *",
   async () => {
     console.log("[CRON] Checking driver document expiry...");
@@ -393,7 +427,8 @@ cron.schedule(
 // invoices at 2 AM, per the cron-order decision). The actual work
 // lives in lib/cron-jobs.ts so admin's "Run Now" endpoint and any
 // test/backfill harness can call the exact same logic.
-cron.schedule(
+gatedSchedule(
+  "vendor-payouts",
   "0 3 * * *",
   async () => {
     console.log("[CRON] Starting vendor daily payout generation...");
@@ -430,7 +465,8 @@ cron.schedule(
 // Stage 3B replaces what was previously the vendor-receipt-overdue
 // no-op stub at this position — same time slot, opposite side of the
 // payment direction.
-cron.schedule(
+gatedSchedule(
+  "overdue-suspension",
   "0 9 * * *",
   async () => {
     console.log("[CRON] Running partner overdue suspension check...");
@@ -454,7 +490,8 @@ cron.schedule(
 //   2. NOTIFY vendors whose MOU expires within 2 months but not yet.
 // Other vendor docs (CR, VAT, etc.) only generate notifications, never
 // auto-suspend. The MOU is the only doc that triggers suspension here.
-cron.schedule(
+gatedSchedule(
+  "vendor-mou",
   "15 9 * * *",
   async () => {
     console.log("[CRON] Checking vendor MOUs...");
@@ -479,7 +516,8 @@ cron.schedule(
 // MOU (handled by runVendorMouCheck above). The profile sidebar
 // badge and the doc-locked write gate together carry the
 // "renew this" signal for these docs.
-cron.schedule(
+gatedSchedule(
+  "vendor-profile-docs",
   "45 9 * * *",
   async () => {
     console.log("[CRON] Checking vendor profile documents...");
@@ -499,7 +537,8 @@ cron.schedule(
 // Runs daily at 9:50 AM KSA — same cadence as the vendor job,
 // staggered five minutes after to avoid both jobs hammering the
 // notifications table at the same instant.
-cron.schedule(
+gatedSchedule(
+  "partner-profile-docs",
   "50 9 * * *",
   async () => {
     console.log("[CRON] Checking partner profile documents...");

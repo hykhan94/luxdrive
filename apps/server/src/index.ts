@@ -11,6 +11,7 @@ import { logger } from "./utils/logger";
 import { auth } from "./lib/auth";
 import authRoutes from "./route/auth";
 import adminRoutes from "./route/admin";
+import cronRoutes from "./route/cron.route";
 import partnerRoutes from "./route/partner";
 import vendorRoutes from "./route/vendor";
 import { isAdmin, isAuthenticated } from "./middleware/auth";
@@ -114,6 +115,10 @@ app.use("/api/v1/public", publicRoutes);
 // the payload and sends a transactional email via Resend to the
 // LuxDrive ops inbox with reply-to set to the submitter.
 app.use("/api/v1/contact", contactRoutes);
+
+// External-scheduler cron triggers (Cloud Scheduler / OS crontab).
+// Auth via X-Cron-Secret header, not a session — see cron.controller.
+app.use("/api/v1/cron", cronRoutes);
 
 // 404 Handler
 app.use(notFoundHandler);
