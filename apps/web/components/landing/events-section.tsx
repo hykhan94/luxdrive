@@ -120,7 +120,7 @@ export default function EventsSection() {
               }`}
             >
               <a
-                href="https://wa.me/966545559510?text=Hello%2C%20I%27d%20like%20to%20inquire%20about%20event%20transportation"
+                href="https://wa.me/966579357572?text=Hello%2C%20I%27d%20like%20to%20inquire%20about%20event%20transportation"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-3 px-8 py-4 bg-[#25D366] text-white font-semibold rounded-xl hover:bg-[#20BD5A] transition-all duration-300 shadow-lg shadow-[#25D366]/20 group"

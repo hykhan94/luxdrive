@@ -42,7 +42,7 @@
 //   LUXDRIVE_SUPPORT_EMAIL   — Support/contact email shown/linked in footers.
 //                              Defaults to "info@luxdriveksa.com".
 //   LUXDRIVE_SUPPORT_PHONE   — Support/contact phone shown/linked in footers.
-//                              Defaults to "+966545559510" (WhatsApp support line).
+//                              Defaults to "+966579357572" (WhatsApp support line).
 
 import { Resend } from "resend";
 
@@ -70,12 +70,12 @@ const LUXDRIVE_WEBSITE_URL =
 const LUXDRIVE_SUPPORT_EMAIL =
   process.env.LUXDRIVE_SUPPORT_EMAIL || "info@luxdriveksa.com";
 const LUXDRIVE_SUPPORT_PHONE =
-  process.env.LUXDRIVE_SUPPORT_PHONE || "+966545559510";
+  process.env.LUXDRIVE_SUPPORT_PHONE || "+966579357572";
 
 // Human-readable versions computed once at module load. `websiteHost`
 // strips the scheme so the footer link text reads "luxdriveksa.com"
 // while the href keeps the full "https://…" URL. `supportPhonePretty`
-// spaces the number the way KSA convention displays it: "+966 54 555 9510".
+// spaces the number the way KSA convention displays it: "+966 57 935 7572".
 const LUXDRIVE_WEBSITE_HOST = LUXDRIVE_WEBSITE_URL.replace(
   /^https?:\/\//,
   "",
@@ -169,7 +169,7 @@ const SOCIALS = [
     url: "https://www.linkedin.com/showcase/luxdriveksa/",
     icon: "linkedin",
   },
-  { name: "WhatsApp", url: "https://wa.me/966545559510", icon: "whatsapp" },
+  { name: "WhatsApp", url: "https://wa.me/966579357572", icon: "whatsapp" },
 ];
 
 // Icon base URL. Icons must be hosted publicly (Gmail's image proxy

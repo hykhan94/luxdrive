@@ -762,7 +762,7 @@ function PartnerDashboardInner() {
                 <a
                   href={
                     suspensionInfo?.support.whatsappUrl ??
-                    "https://wa.me/966545559510"
+                    "https://wa.me/966579357572"
                   }
                   target="_blank"
                   rel="noopener noreferrer"

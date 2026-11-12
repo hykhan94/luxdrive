@@ -22,7 +22,7 @@ import { WhatsappIcon } from "@/lib/social-icons";
 // belongs in. No customer data, no auth, no backend needed.
 // ============================================
 
-const WHATSAPP_NUMBER = "966545559510";
+const WHATSAPP_NUMBER = "966579357572";
 
 const WHATSAPP_VENDOR_INTRO =
   "Hello LuxDrive — I'd like to onboard my fleet as a vendor on the platform. Please share the next steps.";
@@ -239,7 +239,7 @@ export default function IndustryPartnerCTA() {
                 Onboarding Desk
               </p>
               <p className="text-sm sm:text-base font-semibold text-white tracking-wide">
-                +966 54 555 9510
+                +966 57 935 7572
               </p>
             </div>
             <ArrowRight className="w-4 h-4 text-[#25D366] group-hover:translate-x-0.5 transition-transform flex-shrink-0" />

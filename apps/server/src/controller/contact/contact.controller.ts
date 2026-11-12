@@ -125,7 +125,7 @@ export const submitContactForm = asyncWrapper(
       return res.status(502).json({
         success: false,
         message:
-          "We couldn't send your message right now. Please email us directly at info@luxdriveksa.com or call +966 54 555 9510.",
+          "We couldn't send your message right now. Please email us directly at info@luxdriveksa.com or call +966 57 935 7572.",
       });
     }
 

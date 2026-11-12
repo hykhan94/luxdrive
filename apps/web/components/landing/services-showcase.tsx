@@ -390,7 +390,7 @@ function ServiceDetailPanel({
               <ArrowRight className="w-4 h-4" />
             </Link> */}
             <Link
-              href="tel:+966545559510"
+              href="tel:+966579357572"
               className="flex-1 flex items-center justify-center gap-2 px-6 py-3.5 bg-transparent border border-[#C9A961]/40 text-[#C9A961] font-semibold rounded-lg hover:bg-[#C9A961]/10 transition-colors"
             >
               <Phone className="w-4 h-4" />

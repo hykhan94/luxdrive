@@ -37,10 +37,10 @@ export default function ContactPreview() {
             </div>
             <h3 className="text-white font-semibold mb-2">Call Us</h3>
             <a
-              href="tel:+966545559510"
+              href="tel:+966579357572"
               className="text-gray-400 text-sm hover:text-[#C9A961] transition-colors"
             >
-              +966545559510
+              +966579357572
             </a>
           </div>
 

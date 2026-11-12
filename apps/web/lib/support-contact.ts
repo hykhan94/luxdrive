@@ -11,7 +11,7 @@
 // ============================================
 
 const SUPPORT_WHATSAPP =
-  process.env.NEXT_PUBLIC_SUPPORT_WHATSAPP || "966545559510";
+  process.env.NEXT_PUBLIC_SUPPORT_WHATSAPP || "966579357572";
 
 export function openWhatsApp(message: string): void {
   if (typeof window === "undefined") return;

@@ -19,7 +19,7 @@ import { HttpStatus } from "../../utils/httpStatus";
 // Luxakari's contact profile — currently a single WhatsApp number for all
 // deactivated partners. If future ops splits into multiple support desks,
 // this can become a per-partner lookup without touching the frontend.
-const SUPPORT_WHATSAPP = "+966545559510";
+const SUPPORT_WHATSAPP = "+966579357572";
 const SUPPORT_EMAIL = "info@luxdriveksa.com";
 
 export const getPartnerSuspensionInfo = asyncWrapper(

@@ -109,7 +109,7 @@ export const luxdriveSocials: SocialLink[] = [
     // wa.me requires digits-only, no `+`. The KSA dispatch line
     // doubles as the WhatsApp business number; tapping the icon
     // opens a chat thread on the user's WhatsApp.
-    href: "https://wa.me/966545559510",
+    href: "https://wa.me/966579357572",
     Icon: WhatsappIcon,
   },
   {

@@ -513,7 +513,7 @@ export async function applyBookingModification(params: {
 // Admin support line shown to a vendor when their booking is released
 // back to admin after an assignment-invalidating change, so they know
 // exactly who to contact to have it reassigned.
-const SUPPORT_WHATSAPP = process.env.SUPPORT_WHATSAPP ?? "+966 54 555 9510";
+const SUPPORT_WHATSAPP = process.env.SUPPORT_WHATSAPP ?? "+966 57 935 7572";
 
 async function dispatchIntimations(args: {
   booking: BookingForModification;
